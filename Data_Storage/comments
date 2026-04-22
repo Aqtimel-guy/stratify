@@ -1,0 +1,22 @@
+
+### sources ###
+ Yahoo finance
+ wikipedia
+
+
+### used libraries ###
+numpy
+yfinance
+duckdb
+random
+pandas
+
+### credits ###
+Lavie Koren
+Gemini
+ChatGPT
+
+
+### feature logic ###
+1. be aware of divident oulaiers and hendle them corretly in the code (mergers , ProShares Short QQQ (3x) , etc..)
+

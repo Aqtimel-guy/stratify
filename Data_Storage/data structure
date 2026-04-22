@@ -1,0 +1,131 @@
+###     data base   ###
+using duckdb
+than a folder holding all the paquets
+
+####    Tables   ####
+--- Table 0 ---
+test(
+    col1
+    col2
+    col3
+)
+--- Table 1 ---
+assets (
+    asset_id
+    ticker_(AAPL)
+    name
+    sector
+    industry
+)
+
+primary key: asset_id
+description: A table of all tradeble assets in Stratiy
+
+--- Table 2 ---
+prices (
+    asset_id
+    datetime
+    open
+    high
+    low
+    close
+    adj_close
+    volume
+)
+primary key: (asset_id ,datetime)
+description: basic data of the assets
+
+--- Table 3 ---
+fundamentals (
+    asset_id
+    datetime
+    pe_ratio
+    market_cap
+    revenue
+    eps
+)
+primary key: (asset_id ,datetime)
+description: more data of the assets
+
+--- Table 4 ---
+features (
+    asset_id
+    datetime
+    volatility
+    momentum
+    avg_volume
+    return_1m
+    return_3m
+    return_1y
+    .
+    .
+    . (to be extended in the future)
+)
+
+primary key: (asset_id , datetime)
+description: data of the assets after some anaylisys
+
+
+--- Table 5 ---
+users (
+    user_id
+    email
+    first_name
+    middle_name (not requarid)
+    last_name
+    date_of_birth
+    password_hash
+)
+primary key: uesr_id
+description: our users
+
+--- Table 6 ---
+portfolios (
+    protfolio_id
+    user_id
+    protfolio_name
+    created_at (when the user open the protfolio)
+    starting_at (at what time in history the protfolio started simulating)
+    preferd_currency
+    available_cash
+    protfolio_value
+    
+)
+primary key: protfolio_id
+description: The investments protfolios (users can creat several protfolios)
+
+--- Table 7 ---
+assets_transactions (
+    transaction_id
+    portfolio_id
+    asset_id
+    datetime
+    quantity 
+    price (per share in dollars)
+    side (buy\sell)
+)
+primary key: transaction_id
+description: every transaction that happens through the platform
+
+--- table 8 ---
+portfolio_performance (
+    portfolio_id
+    datetime
+    value
+    initial_investment
+)
+primary key: (portfolio_id, datetime)
+description: analyizing the worth of each protfloio
+
+--- table 9 ---
+cash_transactions (
+    transaction_id
+    portfolio_id
+    datetime
+    amount (in dollars)
+    type (deposit / withdraw)
+)
+primary key: transaction_id
+description: records of all cashflow on the system
+
+### relationships ###

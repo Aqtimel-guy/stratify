@@ -1,0 +1,7 @@
+### data related ###
+2. in fundementals table - update the correct P/E ratios 
+3. fix in fundementlas table the update mechanics
+3. adressing splits in stocks
+4. expand the is_etf collum in assets to "asset_type"
+5. add trailing_dividend_yield to features
+10. need to address transaction fee when trading assets

@@ -1,0 +1,19 @@
+# Database
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# Logs
+*.log
