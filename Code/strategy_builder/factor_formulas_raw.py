@@ -2,14 +2,16 @@ import duckdb
 import logging
 import pandas as pd
 import numpy as np
+from functools import reduce
+import sys
+
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
-con = duckdb.connect(DB_PATH)
 
 
-## needs check , all are NAN
-def momentum_factor_raw_calculator(asset_id , w1=0.3 , w2=0.3 , w3=0.2 , w4=0.1 , w5=0.1):
+## seems ok
+def momentum_factor_raw_calculator(con  ,asset_id , w1=0.3 , w2=0.3 , w3=0.2 , w4=0.1 , w5=0.1):
     """
     gets an asset_id and potential weights. than calculate the momentum score for each day we have in the DB
     Wi refers to the weights
@@ -51,8 +53,8 @@ def momentum_factor_raw_calculator(asset_id , w1=0.3 , w2=0.3 , w3=0.2 , w4=0.1 
     
     return df[['asset_id', 'timestamp', 'momentum_factor_raw']]
 
-## needs check , all are NAN
-def value_factor_raw_calculator(asset_id, w1=0.6, w2=0.3, w3=0.1):
+## seems ok
+def value_factor_raw_calculator(con , asset_id, w1=0.6, w2=0.3, w3=0.1):
     """
 
     Key properties:
@@ -193,8 +195,8 @@ def value_factor_raw_calculator(asset_id, w1=0.6, w2=0.3, w3=0.1):
     return df[["asset_id", "timestamp", "value_factor_raw"]]
 
 
-## needs check , all are NAN
-def quality_factor_raw_calculator(asset_id, w1=0.4, w2=0.4, w3=0.2):
+## seems ok
+def quality_factor_raw_calculator(con, asset_id, w1=0.4, w2=0.4, w3=0.2):
     """
     Output:
      asset_id, timestamp, quality_factor_raw
@@ -313,10 +315,10 @@ def quality_factor_raw_calculator(asset_id, w1=0.4, w2=0.4, w3=0.2):
     # -------------------------
     return df[["asset_id", "timestamp", "quality_factor_raw"]]
 
-## needs fix, comes empty
-def growth_factor_raw_calculator(asset_id, w_eps=0.5, w_revenue=0.5):
+## seems ok
+def growth_factor_raw_calculator(con , asset_id, w_eps=0.5, w_revenue=0.5):
     """
-    returns: growth_factor_raw, eps_growth_yoy, revenue_growth_yoy
+    if the asset is an ETF we will return an empty DF since growth is not relevant for ETFs
     
     """
 
@@ -420,7 +422,7 @@ def growth_factor_raw_calculator(asset_id, w_eps=0.5, w_revenue=0.5):
     )
 
     # -----------------------
-    # 7. Final factor (NO fillna(0))
+    # 7. Final factor 
     # -----------------------
     df["growth_factor_raw"] = (
         w_eps * df["eps_growth_yoy"] +
@@ -444,16 +446,15 @@ def growth_factor_raw_calculator(asset_id, w_eps=0.5, w_revenue=0.5):
         [
             "asset_id",
             "timestamp",
-            "growth_factor_raw",
-            "eps_growth_yoy",
-            "revenue_growth_yoy"
+            "growth_factor_raw"
         ]
     ]
     
     
 ## seems to ok
 def defensive_factor_raw_calculator(
-    asset_id,
+    con,
+    asset_id ,
     benchmark_id=504, # 504 is SPY
     w_vol=0.4,
     w_beta=0.4,
@@ -570,7 +571,7 @@ def defensive_factor_raw_calculator(
     inv_dd = inv_dd.replace([np.inf, -np.inf], np.nan)
 
     # -----------------------
-    # 11. Final factor (NO fillna(0))
+    # 11. Final factor 
     # -----------------------
     df["defensive_factor_raw"] = (
         w_vol * inv_vol +
@@ -587,16 +588,12 @@ def defensive_factor_raw_calculator(
         [
             "asset_id",
             "timestamp",
-            "defensive_factor_raw",
-            "volatility",
-            "beta_90d",
-            "sharpe_90d",
-            "max_drawdown_90d"
+            "defensive_factor_raw"
         ]
     ]
     
 ## seems ok
-def size_factor_raw_calculator(asset_id, w_mcap=0.7, w_liquidity=0.3):
+def size_factor_raw_calculator(con, asset_id, w_mcap=0.7, w_liquidity=0.3):
     """
     Size Factor (Research / Production Grade)
 
@@ -688,7 +685,7 @@ def size_factor_raw_calculator(asset_id, w_mcap=0.7, w_liquidity=0.3):
     ]]
 
 ## seems ok
-def liquidity_factor_raw_calculator(asset_id, window=20):
+def liquidity_factor_raw_calculator(con, asset_id, window=20):
     """
     Liquidity Factor (Amihud Illiquidity Ratio)
 
@@ -731,7 +728,7 @@ def liquidity_factor_raw_calculator(asset_id, window=20):
     # 2. Clean inputs
     # -----------------------
     df["price"] = df["adj_close"].clip(lower=EPSILON)
-    df["volume"] = df["volume"].fillna(0)
+    df["volume"] = df["volume"]
 
     # Dollar volume
     df["dollar_volume"] = (df["price"] * df["volume"]).clip(lower=EPSILON)
@@ -780,14 +777,12 @@ def liquidity_factor_raw_calculator(asset_id, window=20):
         [
             "asset_id",
             "timestamp",
-            "liquidity_factor_raw",
-            "avg_volume",
-            "dollar_volume"
+            "liquidity_factor_raw"
         ]
     ]
     
 ## seems ok
-def diversification_factor_raw_calculator(asset_id, benchmark_id=504, window=90):
+def diversification_factor_raw_calculator(con, asset_id, benchmark_id=504, window=90):
     """
     Diversification Factor (Robust Correlation Model)
 
@@ -880,22 +875,244 @@ def diversification_factor_raw_calculator(asset_id, benchmark_id=504, window=90)
         [
             "asset_id",
             "timestamp",
-            "diversification_factor_raw",
-            "correlation"
+            "diversification_factor_raw"
         ]
     ] 
 
 
 
-asset_id = con.execute("""
-                       select asset_id from assets where ticker = 'NVDA'
-                       """).fetchone()[0]
-asset_price = con.execute("""
-                       select asset_id , timestamp, return_3m , return_6m , return_1y , momentum_relative_sp_1y , dist_sma50 , dist_sma200 from features where asset_id = ? order by timestamp desc limit 20
-                          """ , [asset_id]).fetch_df()
-print(asset_price)
-print(asset_id)
-test_df = momentum_factor_raw_calculator(asset_id)
-print(test_df.tail(20))
+def update_asset_factors_raw_v1():
+    """
+    Update all raw factor values for all assets in the database.
+    This is a heavy operation and should be run periodically (once a week).
+    The function merges individual factor dataframes on [asset_id, timestamp].
+    """
+    logger = logging.getLogger(__name__)
 
-con.close()
+    LOOKBACK_BUFFER_DAYS = 300
+
+    target_cols = [
+        'asset_id', 'timestamp',
+        'momentum_factor_raw',
+        'value_factor_raw',
+        'quality_factor_raw',
+        'growth_factor_raw',
+        'defensive_factor_raw',
+        'size_factor_raw',
+        'liquidity_factor_raw',
+        'diversification_factor_raw'
+    ]
+
+    calculators = {
+        'momentum_factor_raw': momentum_factor_raw_calculator,
+        'value_factor_raw': value_factor_raw_calculator,
+        'quality_factor_raw': quality_factor_raw_calculator,
+        'growth_factor_raw': growth_factor_raw_calculator,  # allowed to be NaN
+        'defensive_factor_raw': defensive_factor_raw_calculator,
+        'size_factor_raw': size_factor_raw_calculator,
+        'liquidity_factor_raw': liquidity_factor_raw_calculator,
+        'diversification_factor_raw': diversification_factor_raw_calculator
+    }
+    
+    logger.info("Starting asset_factors_raw_v1 update process")
+
+    # -------------------------
+    # OPEN CONNECTION (SAFE)
+    # -------------------------
+    con = duckdb.connect(DB_PATH)
+
+    try:
+        asset_ids = [
+            row[0] for row in con.execute(
+                "SELECT DISTINCT asset_id FROM assets"
+            ).fetchall()
+        ]
+
+        total_assets = len(asset_ids)
+        logger.info(f"Starting factor update for {total_assets} assets")
+
+        all_results = []
+
+        for i, asset_id in enumerate(asset_ids, start=1):
+
+            # -------------------------
+            # Progress indicator
+            # -------------------------
+            progress = (i / total_assets) * 100
+            sys.stdout.write(f"\rRaw Factors Calculation: Processing assets: {i}/{total_assets} ({progress:.1f}%)")
+            sys.stdout.flush()
+
+            try:
+                # -------------------------
+                # 1. Get last timestamp
+                # -------------------------
+                last_ts_row = con.execute("""
+                    SELECT MAX(timestamp)
+                    FROM asset_factors_raw_v1
+                    WHERE asset_id = ?
+                """, [asset_id]).fetchone()
+
+                last_ts = last_ts_row[0] if last_ts_row and last_ts_row[0] else None
+
+                # -------------------------
+                # 2. Define start date with buffer
+                # -------------------------
+                if last_ts:
+                    start_date = pd.to_datetime(last_ts) - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)
+                else:
+                    start_date = None
+
+                # -------------------------
+                # 3. Fetch price timeline
+                # -------------------------
+                if start_date:
+                    prices_df = con.execute("""
+                        SELECT asset_id, timestamp
+                        FROM prices
+                        WHERE asset_id = ? AND timestamp >= ?
+                        ORDER BY timestamp
+                    """, [asset_id, start_date]).df()
+                else:
+                    prices_df = con.execute("""
+                        SELECT asset_id, timestamp
+                        FROM prices
+                        WHERE asset_id = ?
+                        ORDER BY timestamp
+                    """, [asset_id]).df()
+
+                if prices_df.empty:
+                    continue
+
+                prices_df = prices_df.sort_values("timestamp")
+                final_df = prices_df.copy()
+
+                # -------------------------
+                # 4. Merge factors
+                # -------------------------
+                for col_name, calc_func in calculators.items():
+                    try:
+                        f_df = calc_func(con ,asset_id)
+
+                        if f_df is None or f_df.empty:
+                            continue
+
+                        if col_name not in f_df.columns:
+                            continue
+
+                        f_df = f_df[['timestamp', col_name]].copy()
+                        f_df = f_df.drop_duplicates(subset=["timestamp"])
+                        f_df = f_df.sort_values("timestamp")
+
+                        # ensure sorted before merge_asof (safety)
+                        final_df = final_df.sort_values("timestamp")
+
+                        final_df = pd.merge_asof(
+                            final_df,
+                            f_df,
+                            on="timestamp",
+                            direction="backward"
+                        )
+
+                    except Exception as e:
+                        logger.warning(f"{col_name} failed for asset {asset_id}: {e}")
+                        continue
+
+                # -------------------------
+                # 5. Clean
+                # -------------------------
+                final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+                # IMPORTANT:
+                # Growth is allowed to be NaN → exclude it from drop condition
+                factor_cols = [
+                    c for c in target_cols
+                    if c not in ['asset_id', 'timestamp', 'growth_factor_raw']
+                ]
+
+                final_df = final_df.dropna(subset=factor_cols, how='all')
+
+                if final_df.empty:
+                    continue
+
+                # -------------------------
+                # 6. Keep only NEW rows
+                # -------------------------
+                if last_ts:
+                    final_df = final_df[final_df["timestamp"] > last_ts]
+
+                if final_df.empty:
+                    continue
+
+                # -------------------------
+                # 7. Ensure schema
+                # -------------------------
+                for col in target_cols:
+                    if col not in final_df.columns:
+                        final_df[col] = np.nan
+
+                final_df = final_df[target_cols]
+
+                all_results.append(final_df)
+
+            except Exception as e:
+                logger.error(f"Error processing asset {asset_id}: {e}")
+                continue
+
+        # New line after progress bar
+        logger.info("\nFactor calculation completed for all assets. Starting database update...")
+
+        # -------------------------
+        # 8. Batch insert
+        # -------------------------
+        if not all_results:
+            logger.warning("No new data to insert")
+            
+            return
+
+        final_insert_df = pd.concat(all_results, ignore_index=True)
+
+        con.register("temp_factors", final_insert_df)
+
+        # -------------------------
+        # TRANSACTION (SAFE INSERT)
+        # -------------------------
+        con.execute("BEGIN")
+
+        con.execute("""
+            INSERT OR REPLACE INTO asset_factors_raw_v1
+            SELECT * FROM temp_factors
+        """)
+
+        con.execute("COMMIT")
+
+        logger.info(f"Inserted/Updated {len(final_insert_df)} rows successfully")
+
+    except Exception as e:
+        logger.error(f"Critical pipeline failure: {e}")
+
+        # -------------------------
+        # SAFE ROLLBACK
+        # -------------------------
+        try:
+            con.execute("ROLLBACK")
+        except:
+            pass
+
+    finally:
+        # -------------------------
+        # ALWAYS CLOSE CONNECTION
+        # -------------------------
+        con.close()
+
+
+
+
+
+
+
+
+
+update_asset_factors_raw_v1()
+
+
+

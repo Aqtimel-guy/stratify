@@ -643,5 +643,29 @@ def show_portfolio_performance_analysis():
     
     
 def show_strategy_builder():
+    import streamlit as st
+
     dashboard_sidebar()
-    st.title("🛠️ Strategy builder")
+    st.title("🛠️ Strategy Builder")
+
+    # ---------------------------------------
+    # Get required state
+    # ---------------------------------------
+    con = st.session_state.get("con")
+    portfolio_id = st.session_state.get('current_portfolio_id')
+
+    # ---------------------------------------
+    # Validations
+    # ---------------------------------------
+    if con is None:
+        st.error("Database connection is missing.")
+        return
+
+    if portfolio_id is None:
+        st.warning("Please select a portfolio first.")
+        return
+
+    # ---------------------------------------
+    # Render main component
+    # ---------------------------------------
+    strategy_creating_component(con, portfolio_id)

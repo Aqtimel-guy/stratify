@@ -4,7 +4,16 @@ import pandas as pd
 from datetime import datetime, timedelta
 import logging
 import time
+import sys
+import os
 import numpy as np
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from strategy_builder.factor_formulas_raw import *
+from strategy_builder.normelizing_factors import *
+
+
+
 
 # Global logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -368,7 +377,7 @@ def fill_fundamentals_table(test_only=False, force_refresh=False):
         con.close()
         return
 
-    logging.info(f"Processing {len(assets_to_update)} tickers...")
+    logging.info(f"Fundamentals: Processing {len(assets_to_update)} tickers...")
 
     for row in assets_to_update.itertuples(index=False):
         asset_id, ticker_str = row.asset_id, row.ticker.strip().replace(".", "-")
@@ -770,8 +779,7 @@ def fill_dividends_table():
 
 
 
-
-
+##############################################################################
 def fill_fundamentals_table_v2(test_only=False, force_refresh=False):
     """
     Robust Fundamentals ETL (Production Grade)
@@ -980,16 +988,29 @@ def fill_fundamentals_table_v2(test_only=False, force_refresh=False):
 
 ########### Exectute the functions ############
 
-def daily_update(test_only=False, force_refresh=False):
+def daily_update_data(test_only=False, force_refresh=False):
     '''This function will execute all the necessary steps to update the database on a daily basis.'''
     fill_assets_table() # first we make sure the assets table is up to date with all the tickers we want to track.
     fill_prices_table() # then we update the prices table with the latest price data for all assets.
     fill_dividends_table() # then we update the dividends table with the latest dividend data for all assets.
     # fill_fundamentals_table(test_only=test_only, force_refresh=True) # then we update the fundamentals table with the latest financial data for all assets. 
     fill_features_table(test_only=test_only, force_refresh=force_refresh) # then we calculate the features based on the updated prices and fundamentals data, and fill the features table.
+    
+def daily_update_strategy():
+    '''This function will execute all the necessary steps to update the strategy related tables on a daily '''
+    update_asset_factors_raw_v1() # then we update the raw factor table with the latest calculations.
+    update_factors_percentile() # then we update the factors percentile table with the latest percentiles based on the updated raw factors.
+    update_factors_zscore() # then we update the factors zscore table with the latest z-scores based on the updated percentiles.
+    update_asset_factors_normelized_final() # then we update the final normalized factors table with the latest data from the raw, percentile, and zscore tables.
+    
+    
     logging.info("Data is up to date")
 
 
-#daily_update()
 
-fill_fundamentals_table_v2(test_only=True)
+
+###########################
+
+daily_update_data(test_only=False, force_refresh=False)
+
+daily_update_strategy()

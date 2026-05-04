@@ -1,11 +1,12 @@
 import streamlit as st
 import duckdb
 import pandas as pd
-from datetime import timedelta
+from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from .trading_logic import execute_asset_trade , execute_cash_transaction
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
+from Code.strategy_builder.user_prefrence import *
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -409,7 +410,6 @@ def asset_search_component(con):
     if selected_option:
         st.session_state.selected_ticker_for_analysis = selected_option.split(" | ")[0]
 
-
 # for analysing an asset (analysis diolog pop up)
 @st.dialog("Asset Analysis Deep-Dive", width="large")
 def show_asset_analysis_dialog( asset_ticker):
@@ -447,10 +447,22 @@ def show_asset_analysis_dialog( asset_ticker):
         WHERE asset_id = ? AND timestamp <= ?
         ORDER BY timestamp DESC LIMIT 1
     """, [a_id, sim_date]).fetchone()
-    
+    # 4 quering strategy data for tab 4
+    factors_data = con.execute("""
+                               SELECT
+                               *
+                               FROM 
+                               asset_factors_normalized_final
+                               
+                               WHERE
+                               asset_id = ?
+                               AND timestamp <= ?
+                               AND timestamp >= ? + INTERVAL '-1 week'
+                               
+                               """ , [a_id, sim_date, sim_date]).df()
     
     # יצירת טאבים בתוך הדיאלוג
-    tab1, tab2, tab3 = st.tabs(["📈 Price Chart", "📊 Fundamentals", "🏆 Performance"])
+    tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🏆 Performance", "🔍 Analysis"])
 
     with tab1:
     # 1. בחירת טווח זמן
@@ -578,3 +590,389 @@ def show_asset_analysis_dialog( asset_ticker):
             if st.button(f"Trade {asset_ticker}", use_container_width=True):
                 st.session_state.trade_target = asset_ticker
                 st.rerun()
+    with tab4:
+        factors_df = con.execute("""
+            SELECT *
+            FROM asset_factors_normalized_final 
+            WHERE asset_id = ? 
+            AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, [a_id, sim_date]).df()
+        col1 , col2 = st.columns(2)
+        if not factors_df.empty:
+            for factor in factors_df.columns[2:]: # first 2 columns are asset_id and timestamp
+                value = factors_df[factor].iloc[0]
+                if 'sector' in factor.lower():
+                    col1.metric(factor, f"{value:.2f}")
+                elif 'market' in factor.lower():
+                    col2.metric(factor, f"{value:.2f}")
+        else:
+            st.info("No factor data available for this asset.")
+            
+            
+# for strategy creating and editing
+def strategy_creating_component(con, portfolio_id):
+    # ---------------------------------------
+    # FACTORS DEFINITION
+    # ---------------------------------------
+    FACTORS = ["momentum", "value", "quality", "growth", "defensive", "size", "liquidity"]
+
+    # ---------------------------------------
+    # SESSION STATE INITIALIZATION
+    # ---------------------------------------
+    if "weights" not in st.session_state:
+        row = con.execute("""
+            SELECT momentum_preference, value_preference, quality_preference, 
+                   growth_preference, defensive_preference, size_preference, liquidity_preference
+            FROM user_preferences_strategy WHERE portfolio_id = ?
+        """, [portfolio_id]).fetchone()
+        
+        if row:
+            st.session_state.weights = dict(zip(FACTORS, row))
+        else:
+            st.session_state.weights = {f: 50.0 for f in FACTORS}
+
+    # This 'slider_rev' will be used to force-refresh sliders when questionnaire finishes
+    if "slider_rev" not in st.session_state:
+        st.session_state.slider_rev = 0
+
+    if "answers" not in st.session_state:
+        st.session_state.answers = [None] * 7
+    if "show_questions" not in st.session_state:
+        st.session_state.show_questions = False
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = 0
+
+    # ---------------------------------------
+    # LAYOUT
+    # ---------------------------------------
+    col_left, col_center, col_right = st.columns([1.2, 2, 1])
+
+    # =======================================
+    # LEFT COLUMN — QUESTIONNAIRE
+    # =======================================
+    with col_left:
+        st.header("Questions")
+        questions_list = [
+    "I prefer buying a safe, expensive brand over a cheap product that 'might' do the job.",
+    "If I hear about a stock in the news and everyone is talking about it, it makes me want to invest in it.",
+    "I'd rather sleep peacefully at night than wake up to a 30% jump in my portfolio.",
+    "If a stock is selling at rock-bottom prices, I want to buy it – even if it might not return to its peak.",
+    "I feel safe investing only in giant, stable companies everyone knows (like Amazon or Microsoft).",
+    "I get stressed by drops in my investment portfolio, even if they are small and temporary.",
+    "I prefer a company with proven profits today over potential for crazy growth in a few years."
+        ]
+        if st.button("🧠 Start Questionnaire"):
+            st.session_state.show_questions = True
+            st.session_state.current_question = 0
+            st.rerun()
+
+        if st.session_state.show_questions:
+            i = st.session_state.current_question
+            st.markdown("---")
+            if st.button("❌ Exit Questionnaire", use_container_width=True):
+                st.session_state.show_questions = False
+                st.rerun()
+            st.subheader(f"Question {i+1} / 7")
+            
+            st.write(f"**{questions_list[i]}**")
+            answer = st.radio("",
+                
+                ["Yes", "No"],
+                index=None,
+                key=f"q_radio_{portfolio_id}_{i}"
+            )
+
+            if answer == "Yes": st.session_state.answers[i] = True
+            elif answer == "No": st.session_state.answers[i] = False
+
+            nav1, nav2 = st.columns(2)
+            with nav1:
+                if i > 0 and st.button("⬅ Back"):
+                    st.session_state.current_question -= 1
+                    st.rerun()
+            with nav2:
+                if i < 6:
+                    if st.button("Next ➡"):
+                        st.session_state.current_question += 1
+                        st.rerun()
+                else:
+                    if st.button("✅ Finish"):
+                        # 1. Calculate weights
+                        q_data = build_questionnaire(*st.session_state.answers)
+                        new_weights = questionnaire_to_weights(q_data, FACTORS)
+                        
+                        # 2. Update the source of truth
+                        st.session_state.weights = new_weights
+                        
+                        # 3. IMPORTANT: Increment revision to force sliders to re-render
+                        st.session_state.slider_rev += 1
+                        
+                        # 4. Close questionnaire and refresh
+                        st.session_state.show_questions = False
+                        st.rerun()
+
+            st.progress((i + 1) / 7)
+
+    # =======================================
+    # CENTER COLUMN — SLIDERS
+    # =======================================
+    with col_center:
+        st.header("Strategy Builder")
+
+        # Define explanations for each factor
+        st.markdown("""
+            <style>
+            /* 1. המכולה הראשית - קביעת המידות והיחס */
+            div[data-baseweb="tooltip"] {
+                background-color: #1E1E1E !important;
+                border-radius: 12px !important;
+                border: 1px solid #4B4B4B !important;
+                
+                /* קביעת רוחב ויחס 16:9 */
+                width: 480px !important; 
+                aspect-ratio: 16 / 9 !important;
+                
+                /* מרכז את התוכן בפנים */
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                padding: 20px !important;
+                box-shadow: 0px 4px 15px rgba(0,0,0,0.5) !important;
+            }
+
+            /* 2. השכבה הפנימית - מניעת רקע לבן */
+            div[data-baseweb="tooltip"] > div {
+                background-color: transparent !important;
+                color: white !important;
+                display: block !important;
+            }
+
+            /* 3. עיצוב הטקסט */
+            div[data-baseweb="tooltip"] * {
+                background-color: transparent !important;
+                color: #FFFFFF !important;
+                font-size: 16px !important;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+                line-height: 1.5 !important;
+                text-align: center !important; /* טקסט ממורכז נראה טוב יותר ביחס כזה */
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        FACTOR_HELP = {
+            "momentum": 
+        "**Momentum Factor**\n\n"
+        "Identifies assets in a strong upward trend. Based on:\n\n"
+        "  **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n"
+        "  **Relative Strength:** Outperforming the S&P 500 index.\n\n"
+        "  **Trend Health:** Price position relative to long-term averages.",
+            
+            "value": 
+    "**Value Factor**\n\n"
+    "Identifies stocks trading at a discount relative to their fundamentals. Based on:\n\n"
+    "  **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n"
+    "  **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n"
+    "  **Dividend Yield:** Yearly dividend payments relative to the stock price.",
+    
+    
+            "quality": 
+    "**Quality Factor**\n\n"
+    "Focuses on companies with strong financial health and efficient operations. Based on:\n\n"
+    "  **Profitability:** Net income relative to revenue (Profit Margins).\n\n"
+    "  **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n"
+    "  **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
+            
+            
+            
+            "growth": 
+    "**Growth Factor**\n\n"
+    "Identifies companies expanding their business rapidly over the past year. Based on:\n\n"
+    "  **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n"
+    "  **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n"
+    "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
+            
+            
+            
+            "defensive": 
+    "**Defensive Factor**\n\n"
+    "Prioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n"
+    "  **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n"
+    "  **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n"
+    "  **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
+            
+            
+            
+            
+            "size": 
+    "**Size Factor**\n\n"
+    "Captures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n"
+    "  **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n"
+    "  **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n"
+    "  **Growth Potential:** Targets agile firms with more room for exponential expansion.",
+            
+            
+            
+           "liquidity": 
+    "**Liquidity Factor**\n\n"
+    "Measures how easily you can enter or exit a position without affecting the stock price.\n\n"
+    "  **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n"
+    "  **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n"
+    "  **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
+        }
+
+        for f in FACTORS:
+            # Fetch current value from session state
+            val_from_state = float(st.session_state.weights.get(f, 50.0))
+
+            # Dynamic key for revision tracking
+            slider_key = f"slider_{f}_{portfolio_id}_rev_{st.session_state.slider_rev}"
+            
+            # Fetch the specific help text for this factor
+            help_text = FACTOR_HELP.get(f, "Adjust preference for this factor.")
+
+            # Render slider with help icon (i)
+            st.session_state.weights[f] = st.slider(
+                label=f.capitalize(),
+                min_value=0.0,
+                max_value=100.0,
+                value=val_from_state,
+                step=1.0,
+                key=slider_key,
+                help=help_text  # This creates the hover (i) icon
+            )
+    # =======================================
+    # RIGHT COLUMN — ANALYTICS & LOAD
+    # =======================================
+    with col_right:
+        st.header("Analytics")
+        
+        # ---------------------------------------
+        # PART 1: LOAD EXISTING STRATEGIES
+        # ---------------------------------------
+        st.subheader("Saved Strategies")
+        
+        # Fetch strategies
+        saved_strategies = con.execute("""
+            SELECT strategy_name, 
+                   momentum_preference, value_preference, quality_preference, 
+                   growth_preference, defensive_preference, size_preference, 
+                   liquidity_preference, diversification_preference
+            FROM user_preferences_strategy 
+            WHERE portfolio_id = ?
+            ORDER BY timestamp DESC
+        """, [portfolio_id]).fetchall()
+
+        if saved_strategies:
+            # Map names to data
+            strategy_options = {
+                s[0]: {
+                    "momentum": s[1], "value": s[2], "quality": s[3],
+                    "growth": s[4], "defensive": s[5], "size": s[6],
+                    "liquidity": s[7], "diversification": s[8]
+                } for s in saved_strategies
+            }
+
+            # Callback function to handle automatic loading
+            def on_strategy_change():
+                new_selection = st.session_state[f"load_strat_{portfolio_id}"]
+                st.session_state.weights = strategy_options[new_selection]
+                st.session_state.slider_rev += 1
+
+            # Layout for Selectbox and Delete button
+            col_sel, col_del = st.columns([4, 1])
+
+            with col_sel:
+                selected_name = st.selectbox(
+                    "Select a strategy:", 
+                    options=list(strategy_options.keys()),
+                    key=f"load_strat_{portfolio_id}",
+                    on_change=on_strategy_change
+                )
+                
+            # 1. Initialize a toggle key for the popover if not exists
+            if f"pop_rev_{portfolio_id}" not in st.session_state:
+                st.session_state[f"pop_rev_{portfolio_id}"] = 0
+
+            with col_del:
+                st.write("") # Vertical alignment
+                st.write("") 
+
+                # 2. Use the session_state value in the key
+                pop_key = f"popover_{portfolio_id}_{st.session_state[f'pop_rev_{portfolio_id}']}"
+                
+                with st.popover("🗑️", help="Delete strategy", key=pop_key):
+                    st.warning(f"Delete '{selected_name}'?")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("✅", key=f"confirm_del_{portfolio_id}"):
+                            con.execute("""
+                                DELETE FROM user_preferences_strategy 
+                                WHERE strategy_name = ? AND portfolio_id = ?
+                            """, [selected_name, portfolio_id])
+                            st.toast(f"Deleted {selected_name}")
+                            st.rerun()
+                    with c2:
+                        # 3. This button increments the revision, forcing the popover to close
+                        if st.button("✖️", key=f"close_pop_{portfolio_id}"):
+                            st.session_state[f"pop_rev_{portfolio_id}"] += 1
+                            st.rerun()
+                            
+                            
+        else:
+            st.info("No saved strategies found.")
+
+        # ---------------------------------------
+        # PART 2: SAVE CURRENT STRATEGY
+        # ---------------------------------------
+        if st.button("💾 Save Current as New"):
+            st.session_state.show_save_box = True
+
+        if st.session_state.get("show_save_box", False):
+            with st.expander("Name your strategy", expanded=True):
+                new_strat_name = st.text_input("Strategy Name", key="new_strat_name_input")
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Confirm"):
+                        if new_strat_name.strip():
+                            # 1. Check if the name already exists for this specific portfolio
+                            existing_check = con.execute("""
+                                SELECT strategy_name FROM user_preferences_strategy 
+                                WHERE strategy_name = ? AND portfolio_id = ?
+                            """, [new_strat_name, portfolio_id]).fetchone()
+
+                            if existing_check:
+                                # 2. Block the save and show an error message
+                                st.error(f"'{new_strat_name}' is already used. Please choose a different name.")
+                            else:
+                                # 3. Proceed with INSERT since the name is unique
+                                try:
+                                    w = st.session_state.weights
+                                    con.execute("""
+                                        INSERT INTO user_preferences_strategy (
+                                            strategy_name, portfolio_id, timestamp,
+                                            momentum_preference, value_preference, quality_preference,
+                                            growth_preference, defensive_preference, size_preference,
+                                            liquidity_preference, diversification_preference
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, [
+                                        new_strat_name, portfolio_id, datetime.now(),
+                                        w.get("momentum", 50), w.get("value", 50), w.get("quality", 50),
+                                        w.get("growth", 50), w.get("defensive", 50), w.get("size", 50),
+                                        w.get("liquidity", 50), w.get("diversification", 50)
+                                    ])
+                                    
+                                    st.success(f"Strategy '{new_strat_name}' saved successfully!")
+                                    st.session_state.show_save_box = False
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error saving to database: {e}")
+                        else:
+                            st.warning("Please enter a name for your strategy.")
+                with c2:
+                    if st.button("Cancel"):
+                        st.session_state.show_save_box = False
+                        st.rerun()

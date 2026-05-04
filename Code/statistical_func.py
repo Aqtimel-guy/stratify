@@ -114,4 +114,3 @@ def find_optimal_k(clients, threshold):
 
 
 
-    print(f"Group {i}: {len(group)} clients, centroid: {avg(group):.2f}, std dev: {std_dev(group):.2f}")

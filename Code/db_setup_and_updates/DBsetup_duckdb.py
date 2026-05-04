@@ -1,5 +1,6 @@
 import duckdb
 
+
 # creating / opening connection
 con = duckdb.connect('C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb')  
 
@@ -249,8 +250,138 @@ con.execute("""
 );
             """)
 
+# Table 14 - Grouped factors normelized by percentile (for strategy)
+con.execute("""
+            -- normelized factors. both by sector and market
+            -- the information will be derived from asset_factors_raw_v1
+            -- higher = better , ranking will be between 0-100
+    CREATE TABLE IF NOT EXISTS asset_factors_normalized_percentile (
+        
+        asset_id INTEGER,
+        timestamp TIMESTAMP,
+        
+        momentum_factor_sector DOUBLE,      -- short&long - term price behavior
+        momentum_factor_market DOUBLE,      -- short&long - term price behavior
+        value_factor_sector DOUBLE,         -- valuation
+        value_factor_market DOUBLE,         -- valuation
+        quality_factor_sector DOUBLE,       -- profitability & leverage
+        quality_factor_market DOUBLE,       -- profitability & leverage
+        growth_factor_sector DOUBLE,        -- fundamental growth
+        growth_factor_market DOUBLE,        -- fundamental growth
+        defensive_factor_sector DOUBLE,     -- downside protection (vol + drawdown)
+        defensive_factor_market DOUBLE,     -- downside protection (vol + drawdown)
+        size_factor_sector DOUBLE,          -- optional but useful (smaller = better )
+        size_factor_market DOUBLE,          -- optional but useful (smaller = better )
+        liquidity_factor_sector DOUBLE,     -- execution quality
+        liquidity_factor_market DOUBLE,     -- execution quality
+        diversification_factor_sector DOUBLE, -- oposing correlation level
+        diversification_factor_market DOUBLE,   -- oposing correlation level
+
+        PRIMARY KEY (asset_id, timestamp),
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+);
+            """)
+
+# Table 15 - Grouped factors normelized by Z-score (for strategy)
+con.execute("""
+            -- normelized factors. both by sector and market
+            -- the information will be derived from asset_factors_raw_v1
+            -- higher = better , ranking will be between -3 to 3
+    CREATE TABLE IF NOT EXISTS asset_factors_normalized_zscore (
+        
+        asset_id INTEGER,
+        timestamp TIMESTAMP,
+        
+        momentum_factor_sector DOUBLE,      -- short&long - term price behavior
+        momentum_factor_market DOUBLE,      -- short&long - term price behavior
+        value_factor_sector DOUBLE,         -- valuation
+        value_factor_market DOUBLE,         -- valuation
+        quality_factor_sector DOUBLE,       -- profitability & leverage
+        quality_factor_market DOUBLE,       -- profitability & leverage
+        growth_factor_sector DOUBLE,        -- fundamental growth
+        growth_factor_market DOUBLE,        -- fundamental growth
+        defensive_factor_sector DOUBLE,     -- downside protection (vol + drawdown)
+        defensive_factor_market DOUBLE,     -- downside protection (vol + drawdown)
+        size_factor_sector DOUBLE,          -- optional but useful (smaller = better )
+        size_factor_market DOUBLE,          -- optional but useful (smaller = better )
+        liquidity_factor_sector DOUBLE,     -- execution quality
+        liquidity_factor_market DOUBLE,     -- execution quality
+        diversification_factor_sector DOUBLE, -- oposing correlation level
+        diversification_factor_market DOUBLE,   -- oposing correlation level
+
+        PRIMARY KEY (asset_id, timestamp),
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+);
+            """)
 
 
+
+
+
+# Table 16 - Grouped factors normelized to a final grade (UI LEVEL)(for strategy)
+con.execute("""
+            -- normelized factors. both by sector and market
+            -- the information will be derived from asset_factors_normalized_zscore and asset_factors_normalized_percentile
+            -- higher = better , ranking will be between 1 - 100
+    CREATE TABLE IF NOT EXISTS asset_factors_normalized_final (
+        
+        asset_id INTEGER,
+        timestamp TIMESTAMP,
+        
+        momentum_factor_sector DOUBLE,      -- short&long - term price behavior
+        momentum_factor_market DOUBLE,      -- short&long - term price behavior
+        value_factor_sector DOUBLE,         -- valuation
+        value_factor_market DOUBLE,         -- valuation
+        quality_factor_sector DOUBLE,       -- profitability & leverage
+        quality_factor_market DOUBLE,       -- profitability & leverage
+        growth_factor_sector DOUBLE,        -- fundamental growth
+        growth_factor_market DOUBLE,        -- fundamental growth
+        defensive_factor_sector DOUBLE,     -- downside protection (vol + drawdown)
+        defensive_factor_market DOUBLE,     -- downside protection (vol + drawdown)
+        size_factor_sector DOUBLE,          -- optional but useful (smaller = better )
+        size_factor_market DOUBLE,          -- optional but useful (smaller = better )
+        liquidity_factor_sector DOUBLE,     -- execution quality
+        liquidity_factor_market DOUBLE,     -- execution quality
+        diversification_factor_sector DOUBLE, -- oposing correlation level
+        diversification_factor_market DOUBLE,   -- oposing correlation level
+
+        PRIMARY KEY (asset_id, timestamp),
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+);
+            """)
+
+# Table 17 - user preferences (for strategy)
+con.execute("CREATE SEQUENCE IF NOT EXISTS portfolio_strategy_seq;")
+
+con.execute("""
+            -- user preferences for the strategy builder. this will be used to create the strategy and give feedback to the user
+            -- all values will be between 0-100, higher means the user prefer this factor more
+
+    CREATE TABLE IF NOT EXISTS user_preferences_strategy (
+        portfolio_strategy_id INTEGER PRIMARY KEY DEFAULT nextval('portfolio_strategy_seq'),
+        strategy_name VARCHAR(255),
+        user_id INTEGER,
+        portfolio_id INTEGER,
+        timestamp TIMESTAMP,
+        momentum_preference DOUBLE DEFAULT 50,
+        value_preference DOUBLE DEFAULT 50,
+        quality_preference DOUBLE DEFAULT 50,
+        growth_preference DOUBLE DEFAULT 50,
+        defensive_preference DOUBLE DEFAULT 50,
+        size_preference DOUBLE DEFAULT 50, -- bigger = prefer smaller companies
+        liquidity_preference DOUBLE DEFAULT 50,
+        diversification_preference DOUBLE DEFAULT 50,
+    
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id)
+);
+            """)
+
+
+
+print(con.execute("""
+            SELECT count(*) FROM user_preferences_strategy
+            """).fetchall())
 
 
 ## for clearing all users and their history
