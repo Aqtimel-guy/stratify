@@ -4,3 +4,4 @@ duckdb
 numpy
 matplotlib
 bcrypt
+plotly
