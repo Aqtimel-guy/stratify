@@ -5,3 +5,4 @@ numpy
 matplotlib
 bcrypt
 plotly
+os
