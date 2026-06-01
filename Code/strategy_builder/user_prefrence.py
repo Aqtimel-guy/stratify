@@ -207,8 +207,8 @@ def questionnaire_to_weights(answers, factors=[
 
 
 
-
-
+def build_user_strategy_final():
+    pass
 
 ###########################    testing      ############################
 

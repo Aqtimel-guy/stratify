@@ -76,13 +76,14 @@ def create_portfolio(user_id ,portfolio_name ,starting_at):
 # for deleting a portfolio 
 def delete_portfolio(portfolio_id):
     """
-    Deletes a portfolio and all its associated data (history, holdings, transactions).
+    Deletes a portfolio and all its associated data to respect foreign key constraints.
+    All comments are translated to English.
     """
     logger = logging.getLogger(__name__)
     con = duckdb.connect(DB_PATH)
     
     try:
-        # 1. בדיקה אם הפורטפוליו קיים
+        # 1. Verify if the target portfolio exists before attempting deletion
         portfolio_exists = con.execute(
             "SELECT portfolio_name FROM portfolios WHERE portfolio_id = ?", 
             [portfolio_id]
@@ -95,29 +96,34 @@ def delete_portfolio(portfolio_id):
         
         p_name = portfolio_exists[0]
 
-        # 2. מחיקת נתונים מטבלאות מקושרות (Foreign Key Constraints)
-        # סדר המחיקה חשוב! קודם הטבלאות התלויות
+        # 2. Clear out all child tables referenced by foreign keys (Order matters!)
         
-        # מחיקת היסטוריית ערך התיק (הטבלה החדשה שיצרנו)
+        # Delete portfolio snapshot logs
         con.execute("DELETE FROM portfolio_history WHERE portfolio_id = ?", [portfolio_id])
         
-        # מחיקת אחזקות נוכחיות
+        # Delete historical performance metrics (Fixes the constraint error)
+        con.execute("DELETE FROM portfolio_performance WHERE portfolio_id = ?", [portfolio_id])
+        
+        # Delete user preference strategy profiles associated with this portfolio
+        con.execute("DELETE FROM user_preferences_strategy WHERE portfolio_id = ?", [portfolio_id])
+        
+        # Delete current open positions/holdings
         con.execute("DELETE FROM holdings WHERE portfolio_id = ?", [portfolio_id])
         
-        # מחיקת היסטוריית טרנזקציות (מזומן ונכסים)
+        # Delete all types of ledger transactions (Cash flow and Assets trades)
         con.execute("DELETE FROM cash_transactions WHERE portfolio_id = ?", [portfolio_id])
         con.execute("DELETE FROM assets_transactions WHERE portfolio_id = ?", [portfolio_id])
         
-        # 3. מחיקת הפורטפוליו עצמו מהטבלה הראשית
+        # 3. Safely delete the main tracking row from parent portfolios table
         con.execute("DELETE FROM portfolios WHERE portfolio_id = ?", [portfolio_id])
         
-        logger.info(f"Portfolio '{p_name}' (ID: {portfolio_id}) and all associated data deleted successfully.")
+        logger.info(f"Portfolio '{p_name}' (ID: {portfolio_id}) and all child records deleted successfully.")
         
-        # 4. ניקוי ה-session_state במידה והפורטפוליו שנמחק הוא זה שכרגע בשימוש
+        # 4. Clean up active session state environments if the deleted portfolio was active
         if st.session_state.get('current_portfolio_id') == portfolio_id:
             st.session_state.current_portfolio_id = None
             st.session_state.current_portfolio_name = None
-            # אם יש לך משתנים נוספים כמו current_available_cash, כדאי לאפס גם אותם
+            
             if 'current_available_cash' in st.session_state:
                 st.session_state.current_available_cash = 0.0
 
@@ -129,7 +135,7 @@ def delete_portfolio(portfolio_id):
         if con:
             con.close()
         return False, f"Error deleting portfolio: {str(e)}"
-    
+
 # for going forward in time of the simulation
 def move_time_forward(portfolio_id, amount_of_time="1d"):
     con = duckdb.connect(DB_PATH)

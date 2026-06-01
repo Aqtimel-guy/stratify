@@ -58,6 +58,9 @@ def main():
         show_login_page()
     elif st.session_state.page == "regestration_page":
         show_registration_page()
+        
+    elif st.session_state.page == "password_recovery_page":
+        show_password_recovery_page()
     
     elif st.session_state.page == "home_page":
         show_home_page()

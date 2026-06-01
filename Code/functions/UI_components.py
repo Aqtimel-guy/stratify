@@ -129,7 +129,6 @@ def display_asset_card(asset):
     # כפתור אנליזה - הוספנו שימוש ב-is_action_allowed גם כאן לביטחון
     
 
-
 # for showing purchese 
 def show_buy_component(ticker, asset_price):
     """
@@ -205,11 +204,99 @@ def show_buy_component(ticker, asset_price):
                     st.session_state[confirm_key] = False
                     st.rerun()
 
-# for showing holding positions
+# For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):
     st.subheader("🏢 Current Holdings (FIFO)")
 
-    # 1. שליפת כל הטרנזקציות ההיסטוריות לחישוב FIFO
+    # --- INJECTING TARGETED STYLE FOR HOLDINGS TABLE ---
+    st.markdown(
+        """
+        <style>
+        /* Base row container alignment */
+        .holding-row-item {
+            display: flex;
+            align-items: center;
+            height: 96px; 
+            font-size: 18px; 
+            color: #1E293B;
+            font-weight: 500;
+            padding: 0 8px;
+        }
+
+        /* Force the entire Streamlit column row block to adopt a subtle background color 
+           whenever an alternating row marker class is active inside it.
+        */
+        div[data-testid="stHorizontalBlock"]:has(.zebra-marker-even) {
+            background-color: #F8FAFC !important;
+            border-radius: 6px;
+            padding: 4px 0;
+        }
+        
+        /* PnL Badge configurations */
+        .pnl-badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 13px; 
+            font-weight: 600;
+            display: inline-block;
+            margin-top: 2px;
+        }
+        .pnl-green {
+            background-color: rgba(34, 197, 94, 0.15);
+            color: #16A34A;
+        }
+        .pnl-red {
+            background-color: rgba(239, 110, 110, 0.15);
+            color: #DC2626;
+        }
+
+        /* Central Trade Button (Popover Wrapper) */
+        div[data-testid="stPopover"]:has(button:contains("Trade")) > button {
+            background-color: #6366F1 !important; /* Indigo Blue */
+            color: #FFFFFF !important;
+            border: 1px solid #4F46E5 !important;
+            border-radius: 6px !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+            height: 32px !important;
+            padding: 0 12px !important;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+            transition: all 0.2s ease-in-out !important;
+        }
+
+        div[data-testid="stPopover"]:has(button:contains("Trade")) > button:hover {
+            background-color: #4F46E5 !important; /* Darker Indigo */
+            border-color: #4338CA !important;
+            box-shadow: 0 2px 4px rgba(79, 70, 229, 0.2) !important;
+            transform: translateY(-0.5px);
+        }
+
+        /* Secondary Analyze Button (Outline Style) */
+        button[key^="analyze_hold_"] {
+            background-color: #FFFFFF !important;
+            color: #4F46E5 !important; 
+            border: 1px solid #E0E7FF !important; /* Soft Indigo Border */
+            border-radius: 6px !important;
+            font-weight: 500 !important;
+            font-size: 13px !important;
+            height: 32px !important;
+            padding: 0 12px !important;
+            margin-top: 6px !important; /* Visual breathing room from top button */
+            transition: all 0.2s ease-in-out !important;
+        }
+
+        button[key^="analyze_hold_"]:hover {
+            background-color: #F5F7FF !important; 
+            border-color: #C7D2FE !important;
+            color: #3730A3 !important;
+            transform: translateY(-0.5px);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # 1. Fetch historical transactions for FIFO calculation
     tx_query = """
     SELECT asset_id, quantity, price_per_share, side, timestamp
     FROM assets_transactions
@@ -218,12 +305,13 @@ def render_holdings_table(con, portfolio_id, sim_date):
     """
     all_tx = con.execute(tx_query, [portfolio_id, sim_date]).df()
 
-    # 2. שליפת האחזקות הנוכחיות
+    # 2. Fetch current holdings
     holdings_query = """
-    SELECT a.asset_id, a.ticker, a.name, h.quantity
+    SELECT a.asset_id, a.ticker, a.name, a.industry, h.quantity
     FROM holdings h
     JOIN assets a ON h.asset_id = a.asset_id
     WHERE h.portfolio_id = ? AND h.quantity > 0
+    ORDER BY h.quantity DESC
     """
     holdings_df = con.execute(holdings_query, [portfolio_id]).df()
 
@@ -231,23 +319,34 @@ def render_holdings_table(con, portfolio_id, sim_date):
         st.info("Your portfolio is currently empty.")
         return
 
-    # כותרות הטבלה
-    header_cols = st.columns([1, 2, 1, 1, 1, 1, 1.2 ])
-    cols_names = ["Ticker", "Name", "Qty", "Avg Buy", "Current", "Value", "Action" , ""]
+    # --- TABLE HEADER ---
+    col_ratios = [1.0, 1.8, 1.8, 0.8, 1.0, 1.0, 1.3, 1.6]
+    header_cols = st.columns(col_ratios)
+    cols_names = ["Ticker", "Asset Name", "Industry", "Quantity", "Avg Buy", "Current Price", "Market Value & PnL", "Actions"]
+    
     for col, name in zip(header_cols, cols_names):
-        col.markdown(f"**{name}**")
-    st.divider()
+        col.markdown(f"<p style='color:#64748B; font-weight:600; font-size:13px; margin:0; padding:0 8px;'>{name}</p>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin: 8px 0 12px 0; border-color: rgba(0,0,0,0.08);'>", unsafe_allow_html=True)
 
-    for _, row in holdings_df.iterrows():
-        asset_id = row['asset_id']
-        ticker = row['ticker']
-        available_qty = int(row['quantity'])
+    # --- TABLE BODY ROWS ---
+    # Using enumerate to track row positions for absolute accuracy
+    for idx, row in enumerate(holdings_df.iterrows()):
+        # unpack iterrows tuple
+        _, row_data = row
         
-        # א) חישוב FIFO
+        asset_id = row_data['asset_id']
+        ticker = row_data['ticker']
+        industry = row_data['industry']
+        available_qty = int(row_data['quantity'])
+        
+        # Check if row is even to attach our targetable style marker class
+        zebra_marker = "zebra-marker-even" if idx % 2 == 0 else ""
+        
+        # A) Calculate FIFO metrics
         asset_tx = all_tx[all_tx['asset_id'] == asset_id]
         avg_buy_price = calculate_fifo_avg_price(asset_tx)
         
-        # ב) שליפת מחיר עדכני
+        # B) Fetch most recent asset closing price
         current_price = con.execute("""
             SELECT close FROM prices 
             WHERE asset_id = ? AND timestamp <= ? 
@@ -256,71 +355,155 @@ def render_holdings_table(con, portfolio_id, sim_date):
 
         total_value = available_qty * current_price
         pnl_perc = ((current_price / avg_buy_price) - 1) * 100 if avg_buy_price > 0 else 0
+        pnl_class = "pnl-green" if pnl_perc >= 0 else "pnl-red"
 
-        # ג) רינדור השורה
-        cols = st.columns([1, 2, 1, 1, 1, 1, 1.2 , 0.5])
-        cols[0].write(ticker)
-        cols[1].write(row['name'])
-        cols[2].write(f"{available_qty:,}")
-        cols[3].write(f"${avg_buy_price:,.2f}")
-        cols[4].write(f"${current_price:,.2f}")
-        cols[5].write(f"${total_value:,.2f}")
+        # C) Render current table row
+        cols = st.columns(col_ratios)
         
-        pnl_color = "green" if pnl_perc >= 0 else "red"
-        cols[5].caption(f":{pnl_color}[{pnl_perc:+.2f}%]")
+        # We put the marker class inside the first column wrapper to activate the CSS row rule
+        cols[0].markdown(f"<div class='holding-row-item {zebra_marker}'><strong>{ticker}</strong></div>", unsafe_allow_html=True)
+        cols[1].markdown(f"<div class='holding-row-item' style='color:#475569;'>{row_data['name']}</div>", unsafe_allow_html=True)
+        cols[2].markdown(f"<div class='holding-row-item' style='color:#475569;'>{industry}</div>", unsafe_allow_html=True)
+        cols[3].markdown(f"<div class='holding-row-item'>{available_qty:,}</div>", unsafe_allow_html=True)
+        cols[4].markdown(f"<div class='holding-row-item'>${avg_buy_price:,.2f}</div>", unsafe_allow_html=True)
+        cols[5].markdown(f"<div class='holding-row-item'>${current_price:,.2f}</div>", unsafe_allow_html=True)
         
-        # ד) מנגנון מכירה חסין
-        with cols[6]:
-            with st.popover("📉 Sell", use_container_width=True):
-                st.write(f"Available to sell: **{available_qty}**")
-                
-                # הסרנו את max_value כדי למנוע תיקון אוטומטי של Streamlit
-                sell_qty = st.number_input(
-                    "Quantity to sell", 
-                    min_value=1, 
-                    value=available_qty, 
-                    step=1, 
-                    key=f"s_input_{ticker}"
+        # Combined Value & PnL Block
+        cols[6].markdown(
+            f"""
+            <div class='holding-row-item' style='display: flex; flex-direction: column; justify-content: center;'>
+                <span style='font-weight: 600; font-size: 16px; color: #1E293B;'>${total_value:,.2f}</span>
+                <div><span class='pnl-badge {pnl_class}'>{pnl_perc:+.2f}%</span></div>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+        
+        # D) Combined Actions Layout (Trade Popover / Deep Analysis Dialog)
+        with cols[7]:
+            p_cash = st.session_state.get('current_available_cash', 0)  
+
+            with st.popover("💼 Trade", use_container_width=True):
+                # 1. Select Trade Side
+                trade_side = st.radio(
+                    "Direction",
+                    options=["Buy", "Sell"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"side_{ticker}"
                 )
                 
-                if st.button("Confirm Sale", key=f"btn_s_{ticker}", type="primary", use_container_width=True):
-                    # בדיקת חסימה ידנית
-                    if sell_qty > available_qty:
-                        st.error(f"❌ Cannot sell {sell_qty}. You only have {available_qty} shares.")
-                    else:
-                        success, msg = execute_asset_trade(
-                            con, portfolio_id, ticker, sim_date, sell_qty, side='sell'
-                        )
-                        if success:
-                            st.success("Sold!")
-                            st.rerun()
+                st.markdown("<hr style='margin: 8px 0; border-color: rgba(0,0,0,0.05);'>", unsafe_allow_html=True)
+                
+                if trade_side == "Sell":
+                    st.markdown(f"<p style='font-size:12px; margin:0 0 8px 0; color:#64748B;'>Available to sell: <strong style='color:#1E293B;'>{available_qty:,} shares</strong></p>", unsafe_allow_html=True)
+                    
+                    trade_qty = st.number_input(
+                        "Quantity to sell", 
+                        min_value=1, 
+                        value=available_qty, 
+                        step=1, 
+                        key=f"t_input_sell_{ticker}",
+                        label_visibility="collapsed"
+                    )
+                    
+                    # Estimated credit display
+                    est_credit = trade_qty * current_price
+                    st.markdown(f"<p style='font-size:11px; color:#64748B; margin-top:2px;'>Est. Credit: <strong>${est_credit:,.2f}</strong></p>", unsafe_allow_html=True)
+                    
+                    if st.button("Confirm Sale", key=f"btn_s_{ticker}", type="primary", use_container_width=True):
+                        if trade_qty > available_qty:
+                            st.error(f"❌ Cannot sell {trade_qty}. You only have {available_qty} shares.")
                         else:
-                            st.error(msg)
-        if cols[7].button("🔍", key=f"analyze_hold_{ticker}", help="View Deep Analysis"):
-            show_asset_analysis_dialog(ticker)
-    st.divider()
+                            success, msg = execute_asset_trade(
+                                con, portfolio_id, ticker, sim_date, trade_qty, side='sell'
+                            )
+                            if success:
+                                st.toast(f"📉 Successfully sold {trade_qty:,} shares of {ticker}!")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                                
+                else: # BUY SIDE
+                    st.markdown(f"<p style='font-size:12px; margin:0 0 8px 0; color:#64748B;'>Available Cash: <strong style='color:#1E293B;'>${p_cash:,.2f}</strong></p>", unsafe_allow_html=True)
+                    
+                    trade_qty = st.number_input(
+                        "Quantity to buy", 
+                        min_value=1, 
+                        value=1, 
+                        step=1, 
+                        key=f"t_input_buy_{ticker}",
+                        label_visibility="collapsed"
+                    )
+                    
+                    # Estimated cost calculation
+                    est_cost = trade_qty * current_price
+                    max_affordable = int(p_cash // current_price)
+                    
+                    st.markdown(
+                        f"""
+                        <p style='font-size:11px; color:#64748B; margin: 2px 0 0 0;'>Est. Cost: <strong>${est_cost:,.2f}</strong></p>
+                        <p style='font-size:10px; color:#94A3B8; margin: 0 0 4px 0;'>Max affordable: {max_affordable:,} shares</p>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                    
+                    if st.button("Confirm Purchase", key=f"btn_b_{ticker}", type="primary", use_container_width=True):
+                        if est_cost > p_cash:
+                            st.error(f"❌ Insufficient cash. Total cost is ${est_cost:,.2f} but you only have ${p_cash:,.2f}")
+                        else:
+                            success, msg = execute_asset_trade(
+                                con, portfolio_id, ticker, sim_date, trade_qty, side='buy'
+                            )
+                            if success:
+                                st.toast(f"🚀 Successfully purchased {trade_qty:,} shares of {ticker}!")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                            
+            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}", help="View Deep Analysis", use_container_width=True):
+                show_asset_analysis_dialog(ticker)
+
+        # Subtle structural line break between rows 
+        st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
 
 
-# for plotting the graph
+# for portfolio performance analsys 
 def render_performance_chart(df, title="Portfolio Performance History"):
+    """
+    Renders a clean performance chart with safe return calculations
+    that are robust to deposits and zero-start portfolios.
+    """
+
     if df is None or df.empty:
         st.warning("No performance data available.")
         return
 
-    # 1. בחירת טווח זמן ע"י המשתמש (במקום הכפתורים של Plotly)
-    col_t1, col_t2 = st.columns([2, 1])
-    with col_t2:
+    # =======================================
+    # DATA PREPARATION
+    # =======================================
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+
+    last_date = df["timestamp"].max()
+
+    # =======================================
+    # TIME RANGE SELECTION
+    # =======================================
+    col_left, col_right = st.columns([3, 1])
+
+    with col_right:
         time_range = st.selectbox(
-            "Select Timeframe",
-            ["1 Week","1 Month", "6 Months", "Year to Date", "1 Year", "All Time"],
+            "Timeframe",
+            ["1 Week", "1 Month", "6 Months", "Year to Date", "1 Year", "All Time"],
             index=4,
-            label_visibility="collapsed"
+            label_visibility="collapsed",
         )
 
-    # 2. פילטור הנתונים ידנית
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    last_date = df['timestamp'].max()
-    
+    # =======================================
+    # TIME FILTERING
+    # =======================================
     if time_range == "1 Week":
         start_date = last_date - pd.Timedelta(days=7)
     elif time_range == "1 Month":
@@ -332,61 +515,107 @@ def render_performance_chart(df, title="Portfolio Performance History"):
     elif time_range == "1 Year":
         start_date = last_date - pd.Timedelta(days=365)
     else:
-        start_date = df['timestamp'].min()
+        start_date = df["timestamp"].min()
 
-    filtered_df = df[df['timestamp'] >= start_date].copy()
+    filtered_df = df[df["timestamp"] >= start_date].copy()
 
-    # 3. חישוב טווח ציר Y על בסיס הנתונים המפולטרים בלבד
-    y_min = filtered_df['value'].min()
-    y_max = filtered_df['value'].max()
-    y_range = y_max - y_min
-    
-    # הוספת מרווח עדין (5%) כדי שהקו לא ייגע בתקרה/רצפה
-    padding = y_range * 0.05 if y_range > 0 else y_min * 0.05
-    y_limit_min = y_min - padding
-    y_limit_max = y_max + padding
+    if filtered_df.empty:
+        st.warning("No data in selected timeframe.")
+        return
 
-    # --- חישובי תשואה (רק לטווח הנבחר) ---
-    p_start = filtered_df['value'].iloc[0]
-    p_end = filtered_df['value'].iloc[-1]
-    ret_pct = ((p_end / p_start) - 1) * 100
-    ret_cash = p_end - p_start
+    # =======================================
+    # SAFE RETURN CALCULATION
+    # (prevents INF / fake returns from deposits)
+    # =======================================
 
-    # הצגת מטריקות
+    valid_values = filtered_df[filtered_df["value"] > 0]
+
+    if len(valid_values) < 2:
+        p_start = None
+        p_end = None
+    else:
+        p_start = valid_values["value"].iloc[0]
+        p_end = valid_values["value"].iloc[-1]
+
+    if p_start and p_start > 0:
+        ret_pct = ((p_end / p_start) - 1) * 100
+        ret_cash = p_end - p_start
+    else:
+        ret_pct = 0.0
+        ret_cash = 0.0
+
+    # =======================================
+    # METRICS DISPLAY
+    # =======================================
     m1, m2, m3 = st.columns(3)
-    m1.metric("Value", f"${p_end:,.0f}")
-    m2.metric("Return in Period ($)", f"${ret_cash:,.0f}", delta=f"{ret_cash:,.0f}")
-    m3.metric("Return in Period (%)", f"{ret_pct:.2f}%", delta=f"{ret_pct:.2f}%")
 
-    # 4. יצירת הגרף
+    m1.metric(
+        "Portfolio Value",
+        f"${filtered_df['value'].iloc[-1]:,.0f}",
+    )
+
+    m2.metric(
+        "Absolute Change",
+        f"${ret_cash:,.0f}",
+    )
+
+    m3.metric(
+        "Return (%)",
+        f"{ret_pct:.2f}%",
+    )
+
+    # =======================================
+    # CHART STYLING
+    # =======================================
+    y_min = filtered_df["value"].min()
+    y_max = filtered_df["value"].max()
+
+    y_range = y_max - y_min
+    padding = y_range * 0.05 if y_range > 0 else y_max * 0.05
+
+    y_min -= padding
+    y_max += padding
+
+    # Color based on performance
     line_color = "#2ecc71" if ret_cash >= 0 else "#e74c3c"
+
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
-        x=filtered_df['timestamp'],
-        y=filtered_df['value'],
-        mode='lines',
-        line=dict(width=3, color=line_color, shape='spline'),
-        fill='tonexty',
-        fillcolor=f"rgba{tuple(list(int(line_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + [0.05])}",
-        hovertemplate="<b>Value:</b> $%{y:,.0f}<extra></extra>"
-    ))
-
-    fig.update_layout(
-        template="plotly_white",
-        height=400,
-        margin=dict(l=0, r=0, t=20, b=0),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(
-            range=[y_limit_min, y_limit_max], # כאן אנחנו כופים את הטווח המחושב
-            showgrid=True,
-            gridcolor="#f0f0f0",
-            tickprefix="$",
-            separatethousands=True
+    fig.add_trace(
+        go.Scatter(
+            x=filtered_df["timestamp"],
+            y=filtered_df["value"],
+            mode="lines",
+            line=dict(width=3, color=line_color, shape="spline"),
+            fill="tozeroy",
+            fillcolor=f"rgba{tuple(list(int(line_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + [0.08])}",
+            hovertemplate="<b>Value:</b> $%{y:,.0f}<extra></extra>",
         )
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    fig.update_layout(
+        template="plotly_white",
+        height=420,
+        margin=dict(l=0, r=0, t=20, b=0),
+        xaxis=dict(
+            showgrid=False,
+            title=None,
+        ),
+        yaxis=dict(
+            range=[y_min, y_max],
+            showgrid=True,
+            gridcolor="#f2f2f2",
+            tickprefix="$",
+            separatethousands=True,
+        ),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+
 
 # for the assets serch component
 def asset_search_component(con):
@@ -461,15 +690,15 @@ def show_asset_analysis_dialog( asset_ticker):
                                
                                """ , [a_id, sim_date, sim_date]).df()
     
-    # יצירת טאבים בתוך הדיאלוג
-    tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🏆 Performance", "🔍 Analysis"])
+    # tab creation
+    tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
 
     with tab1:
     # 1. בחירת טווח זמן
         time_range = st.segmented_control(
         "Select Range",
         options=["1W" ,"1M", "6M", "1Y", "All"],
-        default="All",
+        default="1W",
         key=f"range_{asset_ticker}"
     )
 
@@ -576,403 +805,1788 @@ def show_asset_analysis_dialog( asset_ticker):
             st.info("No fundamental data recorded up to this date.")
 
     with tab3:
-        if not price_df.empty:
-            start_p = price_df['close'].iloc[0]
-            end_p = price_df['close'].iloc[-1]
-            total_ret = ((end_p / start_p) - 1) * 100
-            
-            st.write(f"**Period Performance:** {total_ret:.2f}%")
-            st.write(f"**Start Price:** ${start_p:,.2f}")
-            st.write(f"**Current Price (Sim):** ${end_p:,.2f}")
-            
-            # כאן אפשר להוסיף כפתורי קנייה/מכירה מהירים בתוך הניתוח
-            st.divider()
-            if st.button(f"Trade {asset_ticker}", use_container_width=True):
-                st.session_state.trade_target = asset_ticker
-                st.rerun()
-    with tab4:
-        factors_df = con.execute("""
-            SELECT *
-            FROM asset_factors_normalized_final 
-            WHERE asset_id = ? 
-            AND timestamp <= ?
-            ORDER BY timestamp DESC
-            LIMIT 1
-        """, [a_id, sim_date]).df()
-        col1 , col2 = st.columns(2)
-        if not factors_df.empty:
-            for factor in factors_df.columns[2:]: # first 2 columns are asset_id and timestamp
-                value = factors_df[factor].iloc[0]
-                if 'sector' in factor.lower():
-                    col1.metric(factor, f"{value:.2f}")
-                elif 'market' in factor.lower():
-                    col2.metric(factor, f"{value:.2f}")
-        else:
-            st.info("No factor data available for this asset.")
-            
-            
-# for strategy creating and editing
-def strategy_creating_component(con, portfolio_id):
-    # ---------------------------------------
-    # FACTORS DEFINITION
-    # ---------------------------------------
-    FACTORS = ["momentum", "value", "quality", "growth", "defensive", "size", "liquidity"]
-
-    # ---------------------------------------
-    # SESSION STATE INITIALIZATION
-    # ---------------------------------------
-    if "weights" not in st.session_state:
-        row = con.execute("""
-            SELECT momentum_preference, value_preference, quality_preference, 
-                   growth_preference, defensive_preference, size_preference, liquidity_preference
-            FROM user_preferences_strategy WHERE portfolio_id = ?
-        """, [portfolio_id]).fetchone()
+        u_id = int(st.session_state.get('user_id', 1))
+        p_id = int(st.session_state.get('current_portfolio_id', 0))
         
+        # 1. Fetch strategies
+        strategies_df = con.execute("""
+            SELECT * FROM user_preferences_strategy 
+            WHERE user_id = ? AND portfolio_id = ?
+        """, [u_id, p_id]).df()
+
+
+    
+        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market" , placeholder="Select a strategy or create one in the Strategy Builder page")
+        if not strategies_df.empty:
+            strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
+
+        # 2. Check if asset exists
+        check_asset = con.execute("SELECT asset_id FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
+        
+        if not check_asset:
+            st.error(f"Ticker {asset_ticker} not found in 'assets' table.")
+        else:
+            a_id = check_asset[0]
+            # Fetch data directly by ID without JOIN to avoid errors
+            stock_data = con.execute("""
+                SELECT * FROM asset_factors_normalized_final 
+                WHERE asset_id = ? 
+                ORDER BY timestamp DESC LIMIT 1
+            """, [a_id]).df()
+
+            if stock_data.empty:
+                st.warning(f"No factors found for {asset_ticker} (ID: {a_id}) in 'asset_factors_normalized_final'.")
+                # checking if the table is empty or if the asset_id is missing
+                count_test = con.execute("SELECT COUNT(*) FROM asset_factors_normalized_final").fetchone()[0]
+                st.write(f"Total rows in factors table: {count_test}")
+            else:
+                # 3. data mapping
+                comparison_map = {
+                    "momentum_preference": "momentum_factor_market", 
+                    "value_preference": "value_factor_market",
+                    "quality_preference": "quality_factor_market",
+                    "growth_preference": "growth_factor_market",
+                    "defensive_preference": "defensive_factor_market",
+                    "size_preference": "size_factor_market",
+                }
+                
+
+                
+                # --- Table Headers ---
+                h1, h2, h3 = st.columns([1, 2, 1.5])
+                h1.caption("FACTOR")
+                h2.caption("ASSET PERFORMANCE (0-100)")
+                h3.caption("STRATEGY MATCH")
+
+                for pref_col, actual_col in comparison_map.items():
+                    # 1. Extract values and calculate logic
+                    if strategies_df.empty:
+                        target_val = 0
+                    else:
+                        target_val = float(strat_row.get(pref_col, 50))
+                        
+                    actual_val = float(stock_data.iloc[0].get(actual_col, 0))
+                    
+                    # Calculate match percentage (100 - absolute distance)
+                    diff = abs(target_val - actual_val)
+                    match_pct = max(0, 100 - diff)
+                    gap = actual_val - target_val
+
+                    # 2. Score Color (Center Column): Higher is usually "Stronger" in factor terms
+                    if actual_val >= 70:
+                        score_color = "#28a745"  # Green
+                    elif actual_val >= 40:
+                        score_color = "#ffc107"  # Yellow
+                    else:
+                        score_color = "#dc3545"  # Red
+
+                    # 3. Match Color (Right Column): Based on proximity to Target
+                    if match_pct >= 70:
+                        match_color = "#28a745"  # Perfect/Strong match
+                    elif match_pct >= 50:
+                        match_color = "#1f77b4"  # Good/Blue match
+                    elif match_pct >= 30:
+                        match_color = "#ffc107"  # Moderate match
+                    else:
+                        match_color = "#dc3545"  # Poor match (Red)
+
+                    # 4. Create the 3-column layout
+                    c1, c2, c3 = st.columns([1, 2, 1.5])
+
+                    # --- Column 1: Factor Name with Tooltip (Corrected) ---
+
+                    # 1. Clean the label and find the matching key for FACTOR_HELP
+                    factor_key = actual_col.replace('_factor_market', '').replace('_factor_sector', '').lower()
+                    label = factor_key.capitalize()
+
+                    # 2. Get the help text from the dictionary
+                    FACTOR_HELP = {
+
+
+
+                        "momentum":
+
+
+
+                    "**Momentum Factor**\n\n"
+
+
+
+                    "Identifies assets in a strong upward trend. Based on:\n\n"
+
+
+
+                    "  **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n"
+
+
+
+                    "  **Relative Strength:** Outperforming the S&P 500 index.\n\n"
+
+
+
+                    "  **Trend Health:** Price position relative to long-term averages.",
+
+
+
+                    
+
+
+
+                        "value":
+
+
+
+                "**Value Factor**\n\n"
+
+
+
+                "Identifies stocks trading at a discount relative to their fundamentals. Based on:\n\n"
+
+
+
+                "  **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n"
+
+
+
+                "  **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n"
+
+
+
+                "  **Dividend Yield:** Yearly dividend payments relative to the stock price.",
+
+
+
+            
+
+
+
+            
+
+
+
+                        "quality":
+
+
+
+                "**Quality Factor**\n\n"
+
+
+
+                "Focuses on companies with strong financial health and efficient operations. Based on:\n\n"
+
+
+
+                "  **Profitability:** Net income relative to revenue (Profit Margins).\n\n"
+
+
+
+                "  **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n"
+
+
+
+                "  **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    
+
+
+
+                        "growth":
+
+
+
+                "**Growth Factor**\n\n"
+
+
+
+                "Identifies companies expanding their business rapidly over the past year. Based on:\n\n"
+
+
+
+                "  **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n"
+
+
+
+                "  **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n"
+
+
+
+                "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    
+
+
+
+                        "defensive":
+
+
+
+                "**Defensive Factor**\n\n"
+
+
+
+                "Prioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n"
+
+
+
+                "  **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n"
+
+
+
+                "  **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n"
+
+
+
+                "  **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    
+
+
+
+                        "size":
+
+
+
+                "**Size Factor**\n\n"
+
+
+
+                "Captures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n"
+
+
+
+                "  **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n"
+
+
+
+                "  **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n"
+
+
+
+                "  **Growth Potential:** Targets agile firms with more room for exponential expansion.",
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    
+
+
+
+                    "liquidity":
+
+
+
+                "**Liquidity Factor**\n\n"
+
+
+
+                "Measures how easily you can enter or exit a position without affecting the stock price.\n\n"
+
+
+
+                "  **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n"
+
+
+
+                "  **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n"
+
+
+
+                "  **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
+
+
+
+                    }
+
+                    
+                    help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
+
+                    # 3. Render the label with a help icon in Column 1
+                    with c1:
+                        # Adding a small vertical space to align with the middle/right columns
+                        st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
+                        
+                        # st.markdown supports the 'help' parameter for tooltips
+                        st.markdown(f"**{label}**", help=help_text)
+
+                    # --- Column 2: Actual Asset Score (Visual) ---
+                    # Color reflects the score itself (High=Green, Low=Red)
+                    bar_html = f"""
+                    <div style="margin-top: 5px; padding-right: 15px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+                            <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
+                            <span style="font-size: 0.7rem; color: gray;"></span>
+                        </div>
+                        <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
+                            <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
+                        </div>
+                    </div>
+                    """
+                    c2.markdown(bar_html, unsafe_allow_html=True)
+
+                    # --- Column 3: User-Friendly Strategy Fit ---
+                    if strategies_df.empty:
+                        c3.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
+                    
+                    else:
+
+
+                        # 1. Logic for human-readable labels
+                        if match_pct >= 85:
+                            fit_label = "Perfect Match"
+                            icon = "🌟"
+                        elif match_pct >= 70:
+                            fit_label = "Good Fit"
+                            icon = "✅"
+                        elif match_pct >= 50:
+                            fit_label = "Slight Deviation"
+                            icon = "⚖️"
+                        else:
+                            # Check direction of deviation for the label
+                            if gap > 0:
+                                fit_label = "Too High"
+                            else:
+                                fit_label = "Too Low"
+                            icon = "⚠️"
+
+                        # 2. Render the human-friendly column
+                        c3.markdown(f"""
+                            <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
+                                <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
+                                    {icon} {fit_label}
+                                </div>
+                                <div style='font-size: 0.75rem; color: #888;'>
+                                    {match_pct:.0f}% similarity
+                                </div>
+                                <div style='margin-top: 4px;'>
+                                    <span style='font-size: 0.65rem; background-color: #f1f3f5; padding: 2px 6px; border-radius: 10px; color: #444;'>
+                                        Target: {target_val:.0f}
+                                    </span>
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                    st.divider()     
+    
+    
+    
+                           
+    with tab4:
+            # ----------------------------------------------------
+            # Factor visualization section (non-intrusive addition)
+            # ----------------------------------------------------
+            try:
+                st.divider()
+                
+                st.subheader("📊 Factor Positioning")
+
+                # Render 3 factor maps for selected asset
+                render_stock_factor_maps(con, asset_ticker)
+                
+                st.divider()
+            
+            except Exception as e:
+                # Fail-safe: UI should never break due to visualization layer
+                st.warning(f"Factor visualization unavailable: {e}")
+          
+
+# Strategy creation and editing component
+def strategy_creating_component(con, portfolio_id):
+
+    # =======================================
+    # FACTORS DEFINITION
+    # =======================================
+    FACTORS = [
+        "momentum",
+        "value",
+        "quality",
+        "growth",
+        "defensive",
+        "size",
+    ]
+
+    # =======================================
+    # SESSION STATE INITIALIZATION
+    # =======================================
+    if "weights" not in st.session_state:
+
+        row = con.execute(
+            """
+            SELECT momentum_preference, value_preference, quality_preference, 
+                   growth_preference, defensive_preference, size_preference, liquidity_preference 
+            FROM user_preferences_strategy
+            WHERE portfolio_id = ?
+            """,
+            [portfolio_id],
+        ).fetchone()
+
         if row:
-            st.session_state.weights = dict(zip(FACTORS, row))
+            # Map only the first 7 elements to FACTORS
+            st.session_state.weights = dict(zip(FACTORS, row[:7]))
         else:
             st.session_state.weights = {f: 50.0 for f in FACTORS}
 
-    # This 'slider_rev' will be used to force-refresh sliders when questionnaire finishes
     if "slider_rev" not in st.session_state:
         st.session_state.slider_rev = 0
 
     if "answers" not in st.session_state:
         st.session_state.answers = [None] * 7
+
     if "show_questions" not in st.session_state:
         st.session_state.show_questions = False
+
     if "current_question" not in st.session_state:
         st.session_state.current_question = 0
 
-    # ---------------------------------------
-    # LAYOUT
-    # ---------------------------------------
-    col_left, col_center, col_right = st.columns([1.2, 2, 1])
+    if "show_save_box" not in st.session_state:
+        st.session_state.show_save_box = False
+        
+    if "active_tab" not in st.session_state:
+        st.session_state.active_tab = 0
 
     # =======================================
-    # LEFT COLUMN — QUESTIONNAIRE
+    # TAB CONFIG
     # =======================================
-    with col_left:
-        st.header("Questions")
+    tab_options = [
+        "🧠 Questionnaire",
+        "⚙️ Strategies Settings",
+        "📊 Multi-Strategy Allocation",
+        "🏆 Final Step",
+    ]
+
+    # =======================================
+    # STATE INIT
+    # =======================================
+    # FIX: Initialize with integer index 0 instead of the string name
+    if "active_tab" not in st.session_state:
+        st.session_state.active_tab = 0
+
+    # Render the radio selector with the correct integer index
+    tab_selector = st.radio(
+        "",
+        tab_options,
+        horizontal=True,
+        index=st.session_state.active_tab,
+    )
+
+    # FIX: Update the session state to the newly selected index dynamically
+    new_index = tab_options.index(tab_selector)
+    if new_index != st.session_state.active_tab:
+        st.session_state.active_tab = new_index
+        st.rerun()
+
+    # =======================================
+    # STEP 1 — QUESTIONNAIRE
+    # =======================================
+    if st.session_state.active_tab == 0:
+
+        st.markdown(
+            """
+            <div class="section-card">
+                <h2>🧠 Investment Personality Questionnaire</h2>
+                <p style="font-size:15px; opacity:0.75; margin-top:10px;">
+                    Answer a few simple questions to automatically generate
+                    an investment strategy tailored to your preferences.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        
         questions_list = [
-    "I prefer buying a safe, expensive brand over a cheap product that 'might' do the job.",
-    "If I hear about a stock in the news and everyone is talking about it, it makes me want to invest in it.",
-    "I'd rather sleep peacefully at night than wake up to a 30% jump in my portfolio.",
-    "If a stock is selling at rock-bottom prices, I want to buy it – even if it might not return to its peak.",
-    "I feel safe investing only in giant, stable companies everyone knows (like Amazon or Microsoft).",
-    "I get stressed by drops in my investment portfolio, even if they are small and temporary.",
-    "I prefer a company with proven profits today over potential for crazy growth in a few years."
-        ]
-        if st.button("🧠 Start Questionnaire"):
-            st.session_state.show_questions = True
-            st.session_state.current_question = 0
-            st.rerun()
+    "I prefer paying more for a trusted, reliable brand rather than taking a chance on a cheaper alternative.",
+    
+    "When a stock is getting a lot of attention in the news, I feel more interested in investing in it.",
+    
+    "I prefer stable and predictable investments over the possibility of very large short-term gains.",
+    
+    'When a stock becomes chaper than it "supposed" to be, I see it as a buying opportunity - even if recovery is uncertain.',
+    
+    "I only feel comfortable investing in large, well-established companies that most people recognize.",
+    
+    "Even small temporary declines in my portfolio can make me feel uncomfortable or stressed. (up to 10 %)",
+    
+    "I prefer companies with strong and proven profits today over companies promising rapid future growth.",
+]
 
-        if st.session_state.show_questions:
+        if not st.session_state.show_questions:
+
+            st.info(
+                "You may skip this step and configure everything manually in the next tab."
+            )
+            col_start , col_skip = st.columns([3,2])
+            with col_start:
+                if st.button("Skip Questionnaire"):
+                    st.session_state.active_tab = 1
+                    st.rerun()
+            with col_skip:
+                if st.button(
+                    "🚀 Start Questionnaire",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state.show_questions = True
+                    st.session_state.current_question = 0
+                    st.rerun()
+
+        else:
             i = st.session_state.current_question
-            st.markdown("---")
-            if st.button("❌ Exit Questionnaire", use_container_width=True):
-                st.session_state.show_questions = False
-                st.rerun()
-            st.subheader(f"Question {i+1} / 7")
-            
-            st.write(f"**{questions_list[i]}**")
-            answer = st.radio("",
-                
-                ["Yes", "No"],
-                index=None,
-                key=f"q_radio_{portfolio_id}_{i}"
+
+            st.markdown(
+                f"""
+                <div class="question-box">
+                    <div style="font-size:13px; font-weight:600; color:#4f46e5; margin-bottom:12px;">
+                        QUESTION {i+1} OF 7
+                    </div>
+                    <div style="font-size:24px; font-weight:700; line-height:1.5;">
+                        {questions_list[i]}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
-            if answer == "Yes": st.session_state.answers[i] = True
-            elif answer == "No": st.session_state.answers[i] = False
+            answer = st.radio(
+                "Choose your answer:",
+                ["Yes", "No"],
+                horizontal=True,
+                index=None,
+                key=f"q_radio_{portfolio_id}_{i}",
+            )
 
-            nav1, nav2 = st.columns(2)
-            with nav1:
-                if i > 0 and st.button("⬅ Back"):
-                    st.session_state.current_question -= 1
+            if answer == "Yes":
+                st.session_state.answers[i] = True
+            elif answer == "No":
+                st.session_state.answers[i] = False
+
+            st.progress((i + 1) / 7)
+            st.write("")
+
+            # Action layout inside the questionnaire step
+            col1, col2, col3 = st.columns([1, 1, 1])
+
+            with col1:
+                if i > 0:
+                    if st.button("⬅ Previous", use_container_width=True):
+                        st.session_state.current_question -= 1
+                        st.rerun()
+
+            with col2:
+                if st.button("❌ Exit", use_container_width=True):
+                    st.session_state.show_questions = False
                     st.rerun()
-            with nav2:
+
+            with col3:
                 if i < 6:
-                    if st.button("Next ➡"):
+                    if st.button("Next ➡", use_container_width=True, type="primary"):
                         st.session_state.current_question += 1
                         st.rerun()
                 else:
-                    if st.button("✅ Finish"):
-                        # 1. Calculate weights
+                    if st.button("✅ Proceed to Sliders", use_container_width=True, type="primary"):
+
+                        @st.dialog("Processing your strategy 🧠")
+                        def processing_modal():
+
+                            st.write("We received your answers.")
+                            st.write("Building a personalized investment strategy...")
+
+                            with st.spinner("Calculating..."):
+                                time.sleep(5)
+
+                            st.success("Done! Redirecting...")
+
+                        processing_modal()
+
                         q_data = build_questionnaire(*st.session_state.answers)
                         new_weights = questionnaire_to_weights(q_data, FACTORS)
-                        
-                        # 2. Update the source of truth
+
                         st.session_state.weights = new_weights
-                        
-                        # 3. IMPORTANT: Increment revision to force sliders to re-render
                         st.session_state.slider_rev += 1
-                        
-                        # 4. Close questionnaire and refresh
                         st.session_state.show_questions = False
+                        st.session_state.active_tab = 1
+
                         st.rerun()
-
-            st.progress((i + 1) / 7)
-
     # =======================================
-    # CENTER COLUMN — SLIDERS
+    # STEP 2 — STRATEGY SETTINGS AND SAVING
     # =======================================
-    with col_center:
-        st.header("Strategy Builder")
-
-        # Define explanations for each factor
-        st.markdown("""
+    if st.session_state.active_tab == 1:
+        
+        # Modern global UI styling for main container action buttons
+        st.markdown(
+            """
             <style>
-            /* 1. המכולה הראשית - קביעת המידות והיחס */
-            div[data-baseweb="tooltip"] {
-                background-color: #1E1E1E !important;
-                border-radius: 12px !important;
-                border: 1px solid #4B4B4B !important;
-                
-                /* קביעת רוחב ויחס 16:9 */
-                width: 480px !important; 
-                aspect-ratio: 16 / 9 !important;
-                
-                /* מרכז את התוכן בפנים */
-                display: flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                padding: 20px !important;
-                box-shadow: 0px 4px 15px rgba(0,0,0,0.5) !important;
+            /* Target step action button specifically */
+            div[data-testid="stColumn"] button[key^="proceed_btn"] {
+                background-color: #2563EB !important; 
+                color: #FFFFFF !important; 
+                border-radius: 8px !important;
+                font-weight: 600 !important; 
+                font-size: 14px !important;
+                border: none !important;
+                box-shadow: 0px 4px 6px rgba(37, 99, 235, 0.15) !important;
+                transition: all 0.2s ease-in-out !important;
+                padding: 10px 20px !important;
+                height: 44px !important;
             }
-
-            /* 2. השכבה הפנימית - מניעת רקע לבן */
-            div[data-baseweb="tooltip"] > div {
-                background-color: transparent !important;
-                color: white !important;
-                display: block !important;
-            }
-
-            /* 3. עיצוב הטקסט */
-            div[data-baseweb="tooltip"] * {
-                background-color: transparent !important;
-                color: #FFFFFF !important;
-                font-size: 16px !important;
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
-                line-height: 1.5 !important;
-                text-align: center !important; /* טקסט ממורכז נראה טוב יותר ביחס כזה */
+            
+            div[data-testid="stColumn"] button[key^="proceed_btn"]:hover {
+                background-color: #1D4ED8 !important;
+                box-shadow: 0px 4px 12px rgba(29, 78, 216, 0.3) !important;
+                transform: translateY(-1px);
             }
             </style>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True
+        )
         
-        FACTOR_HELP = {
-            "momentum": 
-        "**Momentum Factor**\n\n"
-        "Identifies assets in a strong upward trend. Based on:\n\n"
-        "  **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n"
-        "  **Relative Strength:** Outperforming the S&P 500 index.\n\n"
-        "  **Trend Health:** Price position relative to long-term averages.",
+        # Top Section: Strategy Header Block
+        with st.container(border=True):
+            col_text, col_btn = st.columns([7, 3])
             
-            "value": 
-    "**Value Factor**\n\n"
-    "Identifies stocks trading at a discount relative to their fundamentals. Based on:\n\n"
-    "  **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n"
-    "  **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n"
-    "  **Dividend Yield:** Yearly dividend payments relative to the stock price.",
-    
-    
-            "quality": 
-    "**Quality Factor**\n\n"
-    "Focuses on companies with strong financial health and efficient operations. Based on:\n\n"
-    "  **Profitability:** Net income relative to revenue (Profit Margins).\n\n"
-    "  **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n"
-    "  **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
-            
-            
-            
-            "growth": 
-    "**Growth Factor**\n\n"
-    "Identifies companies expanding their business rapidly over the past year. Based on:\n\n"
-    "  **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n"
-    "  **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n"
-    "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
-            
-            
-            
-            "defensive": 
-    "**Defensive Factor**\n\n"
-    "Prioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n"
-    "  **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n"
-    "  **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n"
-    "  **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
-            
-            
-            
-            
-            "size": 
-    "**Size Factor**\n\n"
-    "Captures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n"
-    "  **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n"
-    "  **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n"
-    "  **Growth Potential:** Targets agile firms with more room for exponential expansion.",
-            
-            
-            
-           "liquidity": 
-    "**Liquidity Factor**\n\n"
-    "Measures how easily you can enter or exit a position without affecting the stock price.\n\n"
-    "  **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n"
-    "  **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n"
-    "  **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
-        }
-
-        for f in FACTORS:
-            # Fetch current value from session state
-            val_from_state = float(st.session_state.weights.get(f, 50.0))
-
-            # Dynamic key for revision tracking
-            slider_key = f"slider_{f}_{portfolio_id}_rev_{st.session_state.slider_rev}"
-            
-            # Fetch the specific help text for this factor
-            help_text = FACTOR_HELP.get(f, "Adjust preference for this factor.")
-
-            # Render slider with help icon (i)
-            st.session_state.weights[f] = st.slider(
-                label=f.capitalize(),
-                min_value=0.0,
-                max_value=100.0,
-                value=val_from_state,
-                step=1.0,
-                key=slider_key,
-                help=help_text  # This creates the hover (i) icon
-            )
-    # =======================================
-    # RIGHT COLUMN — ANALYTICS & LOAD
-    # =======================================
-    with col_right:
-        st.header("Analytics")
-        
-        # ---------------------------------------
-        # PART 1: LOAD EXISTING STRATEGIES
-        # ---------------------------------------
-        st.subheader("Saved Strategies")
-        
-        # Fetch strategies
-        saved_strategies = con.execute("""
-            SELECT strategy_name, 
-                   momentum_preference, value_preference, quality_preference, 
-                   growth_preference, defensive_preference, size_preference, 
-                   liquidity_preference, diversification_preference
-            FROM user_preferences_strategy 
-            WHERE portfolio_id = ?
-            ORDER BY timestamp DESC
-        """, [portfolio_id]).fetchall()
-
-        if saved_strategies:
-            # Map names to data
-            strategy_options = {
-                s[0]: {
-                    "momentum": s[1], "value": s[2], "quality": s[3],
-                    "growth": s[4], "defensive": s[5], "size": s[6],
-                    "liquidity": s[7], "diversification": s[8]
-                } for s in saved_strategies
-            }
-
-            # Callback function to handle automatic loading
-            def on_strategy_change():
-                new_selection = st.session_state[f"load_strat_{portfolio_id}"]
-                st.session_state.weights = strategy_options[new_selection]
-                st.session_state.slider_rev += 1
-
-            # Layout for Selectbox and Delete button
-            col_sel, col_del = st.columns([4, 1])
-
-            with col_sel:
-                selected_name = st.selectbox(
-                    "Select a strategy:", 
-                    options=list(strategy_options.keys()),
-                    key=f"load_strat_{portfolio_id}",
-                    on_change=on_strategy_change
+            with col_text:
+                st.markdown(
+                    """
+                    <div style="padding: 0px 0px;">
+                        <h2 style="margin: 0; font-weight: 700; color: #1E293B; font-size: 24px;">⚙️ Strategy Configuration</h2>
+                        <p style="font-size: 14px; color: #64748B; margin-top: 0px; margin-bottom: 0;">
+                            Fine-tune the importance weights of each core investment factor. 
+                            Higher value states reflect a stronger model priority preference.
+                        </p>
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
                 )
                 
-            # 1. Initialize a toggle key for the popover if not exists
-            if f"pop_rev_{portfolio_id}" not in st.session_state:
-                st.session_state[f"pop_rev_{portfolio_id}"] = 0
+            with col_btn:
+                # Vertical alignment structural spacing
+                st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+                # Replace the standalone button with an interactive popover component
+                # 1. Toast listener: check if a success message was pending from a previous rerun
+                toast_key = f"save_success_msg_{portfolio_id}"
+                if toast_key in st.session_state:
+                    st.toast(st.session_state[toast_key], icon="✅")
+                    del st.session_state[toast_key] # Clean up state immediately after triggering
 
-            with col_del:
-                st.write("") # Vertical alignment
-                st.write("") 
+                # Initialize a revision counter for the popover to force close it when needed
+                if f"pop_rev_{portfolio_id}" not in st.session_state:
+                    st.session_state[f"pop_rev_{portfolio_id}"] = 0
 
-                # 2. Use the session_state value in the key
-                pop_key = f"popover_{portfolio_id}_{st.session_state[f'pop_rev_{portfolio_id}']}"
-                
-                with st.popover("🗑️", help="Delete strategy", key=pop_key):
-                    st.warning(f"Delete '{selected_name}'?")
+                # Render popover with a dynamic key configuration
+                with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", use_container_width=True):
+                    st.markdown("<p style='font-size:14px; font-weight:600; margin-bottom:4px;'>Strategy Name</p>", unsafe_allow_html=True)
                     
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button("✅", key=f"confirm_del_{portfolio_id}"):
-                            con.execute("""
-                                DELETE FROM user_preferences_strategy 
-                                WHERE strategy_name = ? AND portfolio_id = ?
-                            """, [selected_name, portfolio_id])
-                            st.toast(f"Deleted {selected_name}")
-                            st.rerun()
-                    with c2:
-                        # 3. This button increments the revision, forcing the popover to close
-                        if st.button("✖️", key=f"close_pop_{portfolio_id}"):
-                            st.session_state[f"pop_rev_{portfolio_id}"] += 1
-                            st.rerun()
-                            
-                            
-        else:
-            st.info("No saved strategies found.")
+                    new_strat_name = st.text_input(
+                        label="Strategy Name Input",
+                        placeholder="Example: Defensive Growth",
+                        key=f"pop_new_strat_name_{portfolio_id}",
+                        label_visibility="collapsed"
+                    )
 
-        # ---------------------------------------
-        # PART 2: SAVE CURRENT STRATEGY
-        # ---------------------------------------
-        if st.button("💾 Save Current as New"):
-            st.session_state.show_save_box = True
-
-        if st.session_state.get("show_save_box", False):
-            with st.expander("Name your strategy", expanded=True):
-                new_strat_name = st.text_input("Strategy Name", key="new_strat_name_input")
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Confirm"):
+                    # Dynamic database injection execution block
+                    if st.button("✅ Save Configuration", use_container_width=True, type="primary", key=f"pop_save_confirm_{portfolio_id}"):
                         if new_strat_name.strip():
-                            # 1. Check if the name already exists for this specific portfolio
-                            existing_check = con.execute("""
-                                SELECT strategy_name FROM user_preferences_strategy 
-                                WHERE strategy_name = ? AND portfolio_id = ?
-                            """, [new_strat_name, portfolio_id]).fetchone()
+                            u_id = int(st.session_state.get("user_id", 0))
+                            p_id = int(portfolio_id)
 
-                            if existing_check:
-                                # 2. Block the save and show an error message
-                                st.error(f"'{new_strat_name}' is already used. Please choose a different name.")
-                            else:
-                                # 3. Proceed with INSERT since the name is unique
-                                try:
-                                    w = st.session_state.weights
-                                    con.execute("""
-                                        INSERT INTO user_preferences_strategy (
-                                            strategy_name, portfolio_id, timestamp,
-                                            momentum_preference, value_preference, quality_preference,
-                                            growth_preference, defensive_preference, size_preference,
-                                            liquidity_preference, diversification_preference
-                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """, [
-                                        new_strat_name, portfolio_id, datetime.now(),
-                                        w.get("momentum", 50), w.get("value", 50), w.get("quality", 50),
-                                        w.get("growth", 50), w.get("defensive", 50), w.get("size", 50),
-                                        w.get("liquidity", 50), w.get("diversification", 50)
-                                    ])
+                            # Check the total number of strategies already saved for this specific portfolio and user
+                            strategy_count_check = con.execute(
+                                """
+                                SELECT COUNT(*) 
+                                FROM user_preferences_strategy 
+                                WHERE portfolio_id = ? AND user_id = ?
+                                """,
+                                [p_id, u_id]
+                            ).fetchone()
+
+                            # Extract count value safely
+                            current_strategy_count = strategy_count_check[0] if strategy_count_check else 0
+
+                            # Enforce a maximum limit of 4 strategies per portfolio
+                            if current_strategy_count >= 4:
+                                st.error(
+                                    """
+                                    ❌ Limit reached: You cannot save more than 4 strategies per portfolio.
                                     
-                                    st.success(f"Strategy '{new_strat_name}' saved successfully!")
-                                    st.session_state.show_save_box = False
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Error saving to database: {e}")
+                                    Delete one of your strategies to make room.
+                                    """
+                                )
+                            else:
+                                # Verify that the targeted strategy identity does not cause a collision
+                                existing_check = con.execute(
+                                    """
+                                    SELECT strategy_name
+                                    FROM user_preferences_strategy
+                                    WHERE strategy_name = ? AND portfolio_id = ? AND user_id = ?
+                                    """,
+                                    [new_strat_name.strip(), p_id, u_id],
+                                ).fetchone()
+
+                                if existing_check:
+                                    st.error("This strategy name already exists.")
+                                else:
+                                    try:
+                                        w = st.session_state.weights
+                                        
+                                        con.execute(
+                                            """
+                                            INSERT INTO user_preferences_strategy (
+                                                strategy_name, user_id, portfolio_id, timestamp,
+                                                momentum_preference, value_preference, quality_preference,
+                                                growth_preference, defensive_preference, size_preference,
+                                                liquidity_preference, diversification_preference
+                                            )
+                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,)
+                                            """,
+                                            [
+                                                new_strat_name.strip(),
+                                                u_id,
+                                                p_id,
+                                                datetime.now(),
+                                                w.get("momentum", 50),
+                                                w.get("value", 50),
+                                                w.get("quality", 50),
+                                                w.get("growth", 50),
+                                                w.get("defensive", 50),
+                                                w.get("size", 50),
+                                                w.get("liquidity", 50),
+                                                w.get("diversification", 50),
+                                            ]
+                                        )
+                                        # 2. Store success message into session state before forcing page mutation refresh
+                                        st.session_state[f"is_custom_{portfolio_id}"] = False
+                                        st.session_state[toast_key] = f"Strategy '{new_strat_name.strip()}' saved successfully!"
+                                        
+                                        # Increment key revision to force close the popover component layout
+                                        st.session_state[f"pop_rev_{portfolio_id}"] += 1
+                                        
+                                        st.rerun()
+
+                                    except Exception as e:
+                                        st.error(f"Database error: {e}")
                         else:
-                            st.warning("Please enter a name for your strategy.")
-                with c2:
-                    if st.button("Cancel"):
-                        st.session_state.show_save_box = False
-                        st.rerun()
+                            st.warning("Please enter a strategy name.")
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+        # ===================================
+        # Main Dashboard Grid Layout
+        # ===================================
+        col_strategies, col_sliders = st.columns([2, 5])
+        
+        # Left Configuration Sidebar Pane
+        with col_strategies:
+        
+            # Block 1: Saved Profiles Management
+            with st.container(border=True):
+                # Initialize custom flag state if missing
+                if f"is_custom_{portfolio_id}" not in st.session_state:
+                    st.session_state[f"is_custom_{portfolio_id}"] = False
+
+                # Dynamic title displaying "(Custom)" badge when sliders are modified
+                if st.session_state[f"is_custom_{portfolio_id}"]:
+                    st.markdown("<p style='font-size: 16px; font-weight: 700; margin: 0 0 12px 0; color: #0F172A;'>📂 Saved Profiles <span style='color: #EA580C; font-size: 12px; font-weight: 500; background-color: #FFEDD5; padding: 2px 6px; border-radius: 4px; margin-left: 4px;'>Custom</span></p>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<p style='font-size: 16px; font-weight: 700; margin: 0 0 12px 0; color: #0F172A;'>📂 Saved Profiles</p>", unsafe_allow_html=True)
+                saved_strategies = con.execute(
+                    """
+                    SELECT strategy_name,
+                        momentum_preference, value_preference, quality_preference,
+                        growth_preference, defensive_preference, size_preference,
+                        liquidity_preference, diversification_preference
+                    FROM user_preferences_strategy
+                    WHERE portfolio_id = ?
+                    ORDER BY timestamp DESC
+                    """,
+                    [portfolio_id],
+                ).fetchall()
+
+                if saved_strategies:
+                    strategy_options = {
+                        s[0]: {
+                            "momentum": s[1],
+                            "value": s[2],
+                            "quality": s[3],
+                            "growth": s[4],
+                            "defensive": s[5],
+                            "size": s[6],
+                            "liquidity": s[7],
+                            "diversification": s[8],
+                        }
+                        for s in saved_strategies
+                    }
+
+                    def on_strategy_change():
+                        new_selection = st.session_state[f"load_strat_{portfolio_id}"]
+                        st.session_state.weights = strategy_options[new_selection]
+                        
+                        # Reset custom flag when a clean saved profile is loaded
+                        st.session_state[f"is_custom_{portfolio_id}"] = False
+                        st.session_state.slider_rev += 1
+
+                    selected_name = st.selectbox(
+                        "Active Strategy Profile",
+                        options=list(strategy_options.keys()),
+                        key=f"load_strat_{portfolio_id}",
+                        on_change=on_strategy_change,
+                        label_visibility="collapsed"
+                    )
+
+                    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+                    
+                    with st.popover("🗑 Delete Strategy", use_container_width=True):
+                        st.write(f"Permanently delete '{selected_name}'?")
+                        
+                        # The actual inner confirmation execution action button
+                        if st.button("⚠️ Confirm Delete", key=f"pop_del_btn_{portfolio_id}", use_container_width=True, type="primary"):
+                            con.execute(
+                                """
+                                DELETE FROM user_preferences_strategy
+                                WHERE strategy_name = ? AND portfolio_id = ?
+                                """,
+                                [selected_name, portfolio_id],
+                            )
+                            st.success(f"Deleted '{selected_name}'")
+                            st.rerun()
+                            
+                        
+                        
+                        
+                        
+                        
+                        
+                        
+                else:
+                    st.info("No saved strategy profiles detected.")
+            
+            
+            # Block 3: AI Copilot Placeholder Panel
+            with st.container(border=True):
+                st.markdown("<p style='font-size: 15px; font-weight: 700; margin: 0 0 6px 0; color: #475569;'>🤖 AI Assistant</p>", unsafe_allow_html=True)
+                st.markdown("<p style='font-size: 13px; color: #94A3B8; font-style: italic; margin: 0;'>Interactive strategy generation copilot coming soon.</p>", unsafe_allow_html=True)
+
+        # Right Sliders Grid (Your existing sliders block rendering goes directly here)
+        with col_sliders:
+            pass # Keep your exact slider rendering loop intact here as it was setup before
+            
+            
+            
+            
+            
+            
+            
+        # =======================================
+        # SHOW THE SLIDERS IN A 2-COLUMN GRID
+        # =======================================
+        FACTOR_HELP = {
+            "momentum": "Favors assets with strong upward trends.",
+            "value": "Focuses on undervalued companies.",
+            "quality": "Prioritizes financially healthy businesses.",
+            "growth": "Targets companies with rapid expansion.",
+            "defensive": "Reduces risk and volatility.",
+            "size": "Focuses more on small-cap opportunities.",
+            "liquidity": "Prioritizes easier buying and selling.",
+        }
+        
+        with col_sliders:
+            # Callback logic triggered upon moving any slider item
+            def on_slider_touch(factor_name):
+                # Construct the dynamic slider key based on the current revision
+                specific_slider_key = f"slider_{factor_name}_{portfolio_id}_rev_{st.session_state.slider_rev}"
+                
+                # Check if the key exists in session_state to prevent KeyError during state transitions
+                if specific_slider_key in st.session_state:
+                    # Safely update the factor weight with the slider's current value
+                    st.session_state.weights[factor_name] = st.session_state[specific_slider_key]
+                    
+                    # Mark this portfolio configuration as custom/modified
+                    st.session_state[f"is_custom_{portfolio_id}"] = True
+
+            # Loop through factors two at a time to build a neat responsive grid layout
+            for i in range(0, len(FACTORS), 2):
+                
+                # Get the current pair of factors for this row
+                pair = FACTORS[i:i+2]
+                
+                # Dynamic column mapping for 2 items per row
+                grid_cols = st.columns([1, 1])
+                
+                for idx, f in enumerate(pair):
+                    with grid_cols[idx]:
+                        
+                        val_from_state = float(st.session_state.weights.get(f, 50.0))
+                        slider_key = f"slider_{f}_{portfolio_id}_rev_{st.session_state.slider_rev}"
+
+                        st.markdown(
+                            f"""
+                            <div class="slider-card">
+                                <div class="factor-title">{f.capitalize()}</div>
+                                <div class="factor-description">{FACTOR_HELP[f]}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                        # Render the native slider bound directly underneath its visual custom header card
+                        st.session_state.weights[f] = st.slider(
+                            label="",
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=val_from_state,
+                            step=1.0,
+                            key=slider_key,
+                            on_change=on_slider_touch,
+                            args=(f,),
+                            label_visibility="collapsed" 
+                        )
+                        st.write("") # Spacer padding below each individual pair block
+
+    # =======================================
+    # STEP 3 — MULTI-STRATEGY ALLOCATION AND VISUAL SYNCHRONIZATION
+    # =======================================
+
+    if st.session_state.active_tab == 2:
+
+            # =======================================
+            # Modern Styling
+            # =======================================
+            st.html(
+                """
+                <style>
+                /* Main header card */
+                .allocation-header-card {
+                    background: white;
+                    border: 1px solid #E2E8F0;
+                    border-radius: 18px;
+                    padding: 22px;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+                    margin-bottom: 18px;
+                }
+
+                /* Section title */
+                .allocation-title {
+                    font-size: 28px;
+                    font-weight: 700;
+                    color: #0F172A;
+                    margin-bottom: 6px;
+                }
+
+                /* Section subtitle */
+                .allocation-subtitle {
+                    color: #64748B;
+                    font-size: 15px;
+                    line-height: 1.5;
+                }
+
+                /* Targeted styling for st.container(border=True) to match your design */
+                div[data-testid="stVVerticalBlockBorderContainer"] {
+                    background-color: white !important;
+                    border: 1px solid #E2E8F0 !important;
+                    border-radius: 16px !important;
+                    padding: 16px !important;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.02) !important;
+                }
+
+                /* Execute button styling */
+                div.stButton > button[kind="primary"] {
+                    border-radius: 14px !important;
+                    font-weight: 700 !important;
+                    height: 48px !important;
+                    background-color: #2563EB !important;
+                    border: none !important;
+                }
+
+                div.stButton > button[kind="primary"]:hover {
+                    background-color: #1D4ED8 !important;
+                }
+                </style>
+                """
+            )
+
+            # =======================================
+            # Header Section
+            # =======================================
+            st.html(
+                """
+                <div class="allocation-header-card">
+                    <div class="allocation-title">
+                        📊 Multi-Strategy Allocation
+                    </div>
+                    <div class="allocation-subtitle">
+                        Distribute your portfolio across your saved strategies.
+                        Slider colors are synchronized with the portfolio chart
+                        for faster visual understanding.
+                    </div>
+                </div>
+                """
+            )
+
+            # =======================================
+            # Load Saved Strategies
+            # =======================================
+            u_id = int(st.session_state.get("user_id", 0))
+            p_id = int(portfolio_id)
+
+            saved_strategies = con.execute(
+                """
+                SELECT strategy_name
+                FROM user_preferences_strategy
+                WHERE portfolio_id = ?
+                AND user_id = ?
+                ORDER BY timestamp DESC
+                """,
+                [p_id, u_id]
+            ).fetchall()
+
+            strategy_names = [row[0] for row in saved_strategies]
+
+            if not strategy_names:
+                st.info(
+                    "💡 You haven't saved any strategies yet. "
+                    "Go back to previous steps to create one."
+                )
+            else:
+                # =======================================
+                # Strategy Colors
+                # =======================================
+                strategy_colors = [
+                    "#3B82F6", "#10B981", "#F59E0B", "#EF4444",
+                    "#8B5CF6", "#EC4899", "#14B8A6", "#F97316"
+                ]
+
+                strategy_color_map = {
+                    name: strategy_colors[i % len(strategy_colors)]
+                    for i, name in enumerate(strategy_names)
+                }
+
+                num_strategies = len(strategy_names)
+                default_weight = round(100.0 / num_strategies, 1)
+
+                # =======================================
+                # Hidden Strategies State
+                # =======================================
+                if "hidden_strategies" not in st.session_state:
+                    st.session_state.hidden_strategies = set()
+
+                # =======================================
+                # Slider Sync Logic
+                # =======================================
+                def sync_sliders(changed_strategy):
+                    new_val = st.session_state[f"alloc_slider_{p_id}_{changed_strategy}"]
+                    visible_strategies = [
+                        s for s in strategy_names
+                        if s not in st.session_state.hidden_strategies
+                    ]
+
+                    if len(visible_strategies) == 1:
+                        st.session_state[f"alloc_slider_{p_id}_{changed_strategy}"] = 100.0
+                        return
+
+                    remaining_pool = 100.0 - new_val
+                    other_strategies = [name for name in visible_strategies if name != changed_strategy]
+                    current_other_total = sum(st.session_state[f"alloc_slider_{p_id}_{name}"] for name in other_strategies)
+
+                    if current_other_total > 0:
+                        for name in other_strategies:
+                            current_val = st.session_state[f"alloc_slider_{p_id}_{name}"]
+                            proportional_share = (current_val / current_other_total) * remaining_pool
+                            st.session_state[f"alloc_slider_{p_id}_{name}"] = round(proportional_share, 1)
+                    else:
+                        even_share = remaining_pool / len(other_strategies)
+                        for name in other_strategies:
+                            st.session_state[f"alloc_slider_{p_id}_{name}"] = round(even_share, 1)
+
+                # =======================================
+                # Layout Setup
+                # =======================================
+                col_controls, col_chart = st.columns([1.2, 1], gap="large")
+                allocations = {}
+
+
+                # =======================================
+                # LEFT SIDE — CONTROLS
+                # =======================================
+                with col_controls:
+                    # Header info for controls inside a clean container
+                    with st.container(border=True):
+                        st.html(
+                            """
+                            <div style="font-size:20px; font-weight:700; color:#0F172A; margin-bottom:6px;">
+                                🎛 Strategy Controls
+                            </div>
+                            <div style="color:#64748B; font-size:14px; margin-bottom:12px;">
+                                Adjust allocations, set monthly deposits, or temporarily hide strategies.
+                            </div>
+                            """
+                        )
+                        
+                        
+                    # Loop through strategies
+                    # Create the layout columns once outside the loop (50/50 split)
+                    left, right = st.columns([1, 1])
+
+                    # Single loop over all strategies using 'enumerate' to track the layout index
+                    for idx, name in enumerate(strategy_names):
+                        slider_key = f"alloc_slider_{p_id}_{name}"
+
+                        # Initialize the session state for the slider if it doesn't exist yet
+                        if slider_key not in st.session_state:
+                            st.session_state[slider_key] = default_weight
+
+                        # Check state conditions
+                        is_hidden = name in st.session_state.hidden_strategies
+                        strategy_color = strategy_color_map[name]
+
+                        # Dynamic Column Assignment: Even indices go to Left column, Odd to Right
+                        target_column = left if idx % 2 == 0 else right
+
+                        # Inject the entire card UI into the selected column
+                        with target_column:
+                            with st.container(border=True):
+                                # Split the top header area: Title on the left, Visibility toggle on the right
+                                top_left, top_right = st.columns([5, 1])
+
+                                # Render strategy title alongside its specific indicator color
+                                with top_left:
+                                    st.html(
+                                        f"""
+                                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                                            <div style="width:14px; height:14px; border-radius:50%; background:{strategy_color}; flex-shrink:0;"></div>
+                                            <div style="font-weight:700; font-size:16px; color:#1E293B;">{name}</div>
+                                        </div>
+                                        """
+                                    )
+
+                                # Visibility Button: Using 'idx' and 'p_id' in the key to guarantee absolute uniqueness
+                                
+                                    # Inject custom CSS scoped to this specific slider's HTML data attribute
+                                    st.html(
+                                        f"""
+                                        <style>
+                                        div[data-testid="stSliderKey-{slider_key}"] div[data-testid="stSliderTrack"] > div div[style*="background"] {{
+                                            background: {strategy_color} !important;
+                                        }}
+                                        div[data-testid="stSliderKey-{slider_key}"] div[data-basebutton="true"] {{
+                                            background-color: {strategy_color} !important;
+                                        }}
+                                        div[data-testid="stSliderKey-{slider_key}"] div[role="slider"] {{
+                                            background-color: {strategy_color} !important;
+                                            border-color: {strategy_color} !important;
+                                            box-shadow: 0 0 0 2px white, 0 0 0 40px {strategy_color}33 !important;
+                                        }}
+                                        </style>
+                                        """
+                                    )
+
+                                    # Render the responsive interactive slider component
+                                    allocations[name] = st.slider(
+                                        label="",
+                                        min_value=0.0,
+                                        max_value=100.0,
+                                        step=1.0,
+                                        key=slider_key,
+                                        on_change=sync_sliders,
+                                        args=(name,)
+                                    )
+                                    
+    
+                # =======================================
+                # RIGHT SIDE — PIE CHART
+                # =======================================
+                total_allocated = sum(allocations.values())
+
+                with col_chart:
+
+                    active_labels = [name for name, val in allocations.items() if val > 0]
+                    active_values = [val for name, val in allocations.items() if val > 0]
+                    active_colors = [strategy_color_map[name] for name, val in allocations.items() if val > 0]
+
+                    if active_values:
+                        fig = go.Figure(data=[
+                            go.Pie(
+                                labels=active_labels,
+                                values=active_values,
+                                hole=0.48,
+                                textinfo='percent+label',
+                                hoverinfo='label+value+percent',
+                                marker=dict(
+                                    colors=active_colors,
+                                    line=dict(color='white', width=3)
+                                ),
+                                textfont=dict(size=14, color="#0F172A")
+                            )
+                        ])
+
+                        fig.update_layout(
+                            showlegend=False,
+                            margin=dict(t=10, b=10, l=10, r=10),
+                            height=420,
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)',
+                        )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            config={'displayModeBar': False}
+                        )
+                    else:
+                        st.html(
+                            """
+                            <div style="height:350px; display:flex; align-items:center; justify-content:center; background:#F8FAFC; border:2px dashed #CBD5E1; border-radius:18px;">
+                                <p style="color:#94A3B8; font-size:16px;">
+                                    No active strategies selected
+                                </p>
+                            </div>
+                            """
+                        )
+
+                # =======================================
+                # Footer Summary
+                # =======================================
+                st.write("")
+                if abs(total_allocated - 100.0) < 0.1:
+                    pass
+                else:
+                    st.warning(f"⚠ Current allocation total: {total_allocated:.1f}%")
+
+                # =======================================
+                # Further Button
+                # =======================================
+                st.write("")
+                if st.button(
+                    " 🚀 Procceed to the last step",
+                    type="primary",
+                    use_container_width=True
+                ):
+                    st.session_state.active_tab = 3
+                    st.rerun()
+
+
+
+    # =======================================
+    # STEP 4 - FINAL PORTFOLIO CONFIG
+    # =======================================
+    if st.session_state.active_tab == 3:
+
+        p_id = int(portfolio_id)
+
+        # -------------------------------
+        # HEADER
+        # -------------------------------
+        st.markdown(
+            """
+            <div style="
+                padding: 18px;
+                border-radius: 16px;
+                background: linear-gradient(135deg, #0f172a, #1e293b);
+                color: white;
+                margin-bottom: 20px;
+            ">
+                <div style="font-size:20px; font-weight:700;">
+                    🚀 Final Portfolio Setup
+                </div>
+                <div style="font-size:13px; opacity:0.8; margin-top:6px;">
+                    Simple preferences → optimized portfolio construction
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # ======================================================
+        # INJECT GLOBAL EQUAL-HEIGHT LAYOUT & ALIGNMENT CSS
+        # ======================================================
+        st.html(
+            """
+            <style>
+            /* 1. Force the main layout container blocks to stretch to 100% height */
+            div[data-testid="stHorizontalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] > div {
+                height: 100% !important;
+                display: flex !important;
+                flex-direction: column !important;
+            }
+            
+            /* 2. Make the inner wrapper grow evenly so all main container card borders line up perfectly */
+            div[data-testid="stHorizontalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] {
+                height: 100% !important;
+                flex-grow: 1 !important;
+                display: flex !important;
+                flex-direction: column !important;
+                justify-content: flex-start !important;
+            }
+
+            /* 3. Micro-alignment for execution settings sub-headers to prevent height gaps if text wraps */
+            .fee-section-title {
+                font-size: 13px;
+                font-weight: 600;
+                color: #475569;
+                margin-bottom: -10px;
+                min-height: 38px; /* Ensures titles with different line counts stay perfectly aligned */
+                display: flex;
+                align-items: center;
+            }
+            </style>
+            """
+        )
+
+        # Main layout generation with a 1:1:2 container width ratio
+        col_left, center_col, col_right = st.columns([1, 1, 2], gap="medium")
+
+        # ======================================================
+        # LEFT COLUMN: INVESTMENT FOCUS
+        # ======================================================
+        with col_left:
+            with st.container(border=True):
+                st.markdown("### 🎯 Investment Focus")
+
+                # Fetch the master list of unique available sectors from the database
+                sector_query = con.execute("""
+                    SELECT sector 
+                    FROM assets
+                    WHERE sector IS NOT NULL
+                    GROUP BY sector
+                """).df()
+                master_sector_list = sector_query["sector"].tolist()
+                
+                # Setup specific unique session state tracking keys
+                pref_key = f"pref_sectors_{p_id}"
+                excl_key = f"excl_sectors_{p_id}"
+
+                # Preferred Sectors (Focus) - Filter out anything already excluded
+                currently_excluded = st.session_state.get(excl_key, [])
+                focus_options = [s for s in master_sector_list if s not in currently_excluded]
+
+                preferred_sectors = st.multiselect(
+                    "Sectors you want to focus on",
+                    options=focus_options,
+                    key=pref_key,
+                    help="We will slightly overweight these sectors in your portfolio."
+                )
+
+                # Excluded Sectors (Avoid) - Filter out anything already focused
+                currently_focused = st.session_state.get(pref_key, [])
+                avoid_options = [s for s in master_sector_list if s not in currently_focused]
+
+                excluded_sectors = st.multiselect(
+                    "Sectors you want to avoid",
+                    options=avoid_options,
+                    key=excl_key,
+                    help="These sectors will be fully removed from recommendations."
+                )
+
+        # ======================================================
+        # CENTER COLUMN: DEPOSITS
+        # ======================================================
+        with center_col:
+            with st.container(border=True):
+                st.markdown("### 💰 Deposits")
+
+                # Monthly ongoing investment configuration
+                monthly_deposit = st.number_input(
+                    "Monthly deposit (€)",
+                    min_value=0,
+                    step=50,
+                    key=f"monthly_{p_id}",
+                    help="How much you plan to invest every month."
+                )
+
+                # Optional initial up-front capital injection input
+                lump_sum = st.number_input(
+                    "One-time investment (€)",
+                    min_value=0,
+                    step=100,
+                    key=f"lump_{p_id}",
+                    help="Initial capital injection (if any)."
+                )
+
+        # ======================================================
+        # RIGHT COLUMN: EXECUTION SETTINGS (FEES)
+        # ======================================================
+        with col_right:
+            with st.container(border=True):
+                st.markdown("### ⚙️ Execution Settings")
+
+                # Split execution settings into 2 symmetrical sub-columns for fees
+                fee_col1, fee_col2 = st.columns(2, gap="small")
+                
+                # Sub-Section A: Individual trading metrics
+                with fee_col1:
+                    st.html("<div class='fee-section-title'>💼 Transaction fees ($ per trade)</div>")
+
+                    buy_fee = st.number_input(
+                        "Buy fee",
+                        min_value=0.0,
+                        step=0.1,
+                        key=f"buy_fee_{p_id}"
+                    )
+
+                    sell_fee = st.number_input(
+                        "Sell fee",
+                        min_value=0.0,
+                        step=0.1,
+                        key=f"sell_fee_{p_id}"
+                    )
+                
+                # Sub-Section B: Capital actions metrics
+                with fee_col2:
+                    st.html("<div class='fee-section-title'>🏦 Deposit/Withdrawals fees ($ per action)</div>")
+
+                    deposit_fee = st.number_input(
+                        "Deposit fee",
+                        min_value=0.0,
+                        step=0.1,
+                        key=f"dep_fee_{p_id}"
+                    )
+
+                    withdrawal_fee = st.number_input(
+                        "Withdrawal fee",
+                        min_value=0.0,
+                        step=0.1,
+                        key=f"with_fee_{p_id}"
+                    )
+            
+            
+            
+        # ======================================================
+        # DIVERSIFICATION LEVEL 
+        # ======================================================
+
+        st.markdown("### 📊 Diversification Level")
+
+        div_key = f"div_{p_id}"
+
+        if div_key not in st.session_state:
+            st.session_state[div_key] = "Medium"
+
+        div_options = {
+            "Low": {
+                "icon": "🎯",
+                "range": 'Maximum 10 different assets',
+                "desc": "Invests in fewer assets. Bigger gains possible, but also bigger risks."
+            },
+            "Medium": {
+                "icon": "⚖️",
+                "range": "10 - 20 different assets",
+                "desc": "Balanced mix of assets. Good balance between growth and stability."
+            },
+            "High": {
+                "icon": "🧱",
+                "range": "no limit on number of assets",
+                "desc": "Spreads money across many assets. Lower risk, but usually slower growth."
+            }
+        }
+
+        # Callback function to handle the card selection cleanly
+        def set_diversification(selected_option):
+            st.session_state[div_key] = selected_option
+
+        # CSS to make the selection look tight and clean
+        st.html(
+            """
+            <style>
+            .div-card {
+                padding: 5px;
+                text-align: center;
+            }
+            /* Scope styling to button container just for vertical alignment */
+            div[data-testid="stBlock"] {
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+            }
+            </style>
+            """
+        )
+
+        cols = st.columns(3, gap="small")
+
+        for i, (option, data) in enumerate(div_options.items()):
+            with cols[i]:
+                selected = st.session_state[div_key] == option
+                
+                # 1. Native container with border
+                with st.container(border=True):
+                    
+                    # 2. Rich HTML Content for the description
+                    st.html(
+                        f"""
+                        <div class="div-card">
+                            <div style="font-size: 26px; margin-bottom: 4px;">{data['icon']}</div>
+                            <div style="font-weight: 700; font-size: 16px; color: {'#2563EB' if selected else '#0F172A'};">{option}</div>
+                            <div style="font-size: 13px; font-weight: 600; color: {'#3B82F6' if selected else '#64748B'}; margin-top: 2px;">
+                                {data['range']}
+                            </div>
+                            <div style="font-size: 11px; color: #94A3B8; margin-top: 6px; line-height: 1.2; min-height: 28px;">
+                                {data['desc']}
+                            </div>
+                        </div>
+                        """
+                    )
+                    
+                    # 3. Fixed Native Button (Replaced 'kind' with native 'type')
+                    st.button(
+                        label="✓ Selected" if selected else f"Select {option}",
+                        key=f"native_click_{div_key}_{option}",
+                        use_container_width=True,
+                        type="primary" if selected else "secondary", # Primary colors it blue based on your theme
+                        on_click=set_diversification,
+                        args=(option,)
+                    )
+
+        # Final value for your recommendation system
+        diversification = st.session_state[div_key]
+
+
+        
+        
+        # ======================================================
+        # FOOTER ACTION
+        # ======================================================
+        st.write("")
+
+        if st.button(
+            "🚀 Generate Portfolio",
+            type="primary",
+            use_container_width=True
+        ):
+
+            st.toast("Building your optimized portfolio...", icon="⚙️")
+
+            #st.session_state.active_tab = 4
+            st.rerun()
+        
+        
+        
+        
+        
+        
+# for showing easily the factors of an asset
+def render_stock_factor_maps(con, ticker: str):
+    """
+    Displays 3 factor scatter plots for a selected stock:
+    1. Defensive vs Growth
+    2. Size vs Value
+    3. Quality vs Momentum
+    """
+
+
+    # ----------------------------
+    # Load latest snapshot
+    # ----------------------------
+    df = con.execute("""
+        SELECT 
+            a.ticker,
+            a.name,
+
+            f.defensive_factor_market,
+            f.growth_factor_market,
+            f.size_factor_market,
+            f.value_factor_market,
+            f.quality_factor_market,
+            f.momentum_factor_market
+
+        FROM asset_factors_normalized_final f
+        JOIN assets a ON a.asset_id = f.asset_id
+        WHERE f.timestamp = (SELECT MAX(timestamp) FROM asset_factors_normalized_final)
+    """).df()
+
+    if df.empty:
+        st.warning("No data available")
+        return
+
+    # ----------------------------
+    # Clean numeric data ONCE (important fix)
+    # ----------------------------
+    factor_cols = [
+        "defensive_factor_market",
+        "growth_factor_market",
+        "size_factor_market",
+        "value_factor_market",
+        "quality_factor_market",
+        "momentum_factor_market"
+    ]
+
+    for col in factor_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=factor_cols)
+
+    selected = df[df["ticker"] == ticker]
+
+    # ----------------------------
+    # Helper function
+    # ----------------------------
+    def make_scatter(x, y, title, x_label, y_label):
+
+        fig = go.Figure()
+
+        # ensure numeric safety (critical fix)
+        x_vals = pd.to_numeric(df[x], errors="coerce")
+        y_vals = pd.to_numeric(df[y], errors="coerce")
+
+        mask = x_vals.notna() & y_vals.notna()
+
+        x_vals = x_vals[mask]
+        y_vals = y_vals[mask]
+        tickers = df["ticker"][mask]
+
+        x_mean = x_vals.mean()
+        y_mean = y_vals.mean()
+
+        # ----------------------------
+        # Universe
+        # ----------------------------
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode='markers',
+            marker=dict(
+                size=5,
+                opacity=0.25,
+                color='lightgray'
+            ),
+            text=tickers,
+            hovertemplate="%{text}<br>X: %{x}<br>Y: %{y}<extra></extra>",
+            name="Universe"
+        ))
+
+        # ----------------------------
+        # Mean lines
+        # ----------------------------
+        fig.add_shape(
+            type="line",
+            x0=x_mean, x1=x_mean,
+            y0=y_vals.min(), y1=y_vals.max(),
+            line=dict(color="rgba(0,0,0,0.25)", width=1, dash="dot")
+        )
+
+        fig.add_shape(
+            type="line",
+            x0=x_vals.min(), x1=x_vals.max(),
+            y0=y_mean, y1=y_mean,
+            line=dict(color="rgba(0,0,0,0.25)", width=1, dash="dot")
+        )
+
+        # ----------------------------
+        # Selected stock
+        # ----------------------------
+        selected_row = df[df["ticker"] == ticker]
+
+        if not selected_row.empty:
+            sx = pd.to_numeric(selected_row[x], errors="coerce").values[0]
+            sy = pd.to_numeric(selected_row[y], errors="coerce").values[0]
+
+            fig.add_trace(go.Scatter(
+                x=[sx],
+                y=[sy],
+                mode='markers+text',
+                marker=dict(
+                    size=16,
+                    color='#ff4b4b',
+                    line=dict(width=3, color='white')
+                ),
+                text=[ticker],
+                textposition="top center",
+                hovertemplate=f"<b>{ticker}</b><br>X: {sx}<br>Y: {sy}<extra></extra>",
+                name="Selected"
+            ))
+
+        # ----------------------------
+        # Layout
+        # ----------------------------
+        fig.update_layout(
+            title=title,
+            xaxis_title=x_label,
+            yaxis_title=y_label,
+            height=360,
+            margin=dict(l=10, r=10, t=40, b=10),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            showlegend=False
+        )
+
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
+
+        return fig
+
+    # ----------------------------
+    # Render charts
+    # ----------------------------
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.plotly_chart(
+            make_scatter(
+                "growth_factor_market",
+                "defensive_factor_market",
+                "Defensive vs Growth",
+                "Growth",
+                "Defensive"
+            ),
+            use_container_width=True
+        )
+
+    with col2:
+        st.plotly_chart(
+            make_scatter(
+                "value_factor_market",
+                "size_factor_market",
+                "Size vs Value",
+                "Value",
+                "Size"
+            ),
+            use_container_width=True
+        )
+
+    with col3:
+        st.plotly_chart(
+            make_scatter(
+                "momentum_factor_market",
+                "quality_factor_market",
+                "Quality vs Momentum",
+                "Momentum",
+                "Quality"
+            ),
+            use_container_width=True
+        )

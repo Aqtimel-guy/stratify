@@ -183,6 +183,7 @@ con.execute("""
                 timestamp TIMESTAMP,
                 amount DOUBLE,
                 transaction_type VARCHAR, -- deposit/withdraw
+                reference VARCHAR,
                 FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id)
             )""")
 
@@ -379,12 +380,41 @@ con.execute("""
 
 
 
-print(con.execute("""
-            SELECT count(*) FROM user_preferences_strategy
-            """).fetchall())
+# Table 18 - Multi-strategy
+con.execute("CREATE SEQUENCE IF NOT EXISTS multi_strategy_seq;")
+con.execute("""
+    CREATE TABLE IF NOT EXISTS multi_strategy (
+        multi_strategy_id INTEGER PRIMARY KEY DEFAULT nextval('multi_strategy_seq'),
+        user_id INTEGER,
+        portfolio_id INTEGER,
+        
+        -- Strategy 1 Allocation
+        strategy_1_id INTEGER DEFAULT NULL,
+        strategy_1_pct DOUBLE DEFAULT 0,
+        
+        -- Strategy 2 Allocation
+        strategy_2_id INTEGER DEFAULT NULL,
+        strategy_2_pct DOUBLE DEFAULT 0,
+        
+        -- Strategy 3 Allocation
+        strategy_3_id INTEGER DEFAULT NULL,
+        strategy_3_pct DOUBLE DEFAULT 0,
+        
+        -- Strategy 4 Allocation
+        strategy_4_id INTEGER DEFAULT NULL,
+        strategy_4_pct DOUBLE DEFAULT 0,
+        
+        -- Overall monthly investment amount for this multi-strategy mix
+        monthly_deposit INTEGER DEFAULT 0
+    );
+""")
 
 
+#df_test = con.execute("SELECT * FROM user_preferences_strategy").df()
+#print(df_test)
 ## for clearing all users and their history
+
+
 def db_reset():
     # 1. Delete transaction and history data (The most specific data)
     con.execute("DELETE FROM holdings")
@@ -392,6 +422,7 @@ def db_reset():
     con.execute("DELETE FROM cash_transactions")
     con.execute("DELETE FROM portfolio_history")
     con.execute("DELETE FROM portfolio_performance")
+    con.execute("DELETE FROM user_preferences_strategy")
 
     # 2. Delete the portfolios (Which depend on users)
     con.execute("DELETE FROM portfolios")
@@ -400,6 +431,15 @@ def db_reset():
     con.execute("DELETE FROM users")
 
     print("Cleanup successful! All user-related data has been wiped.")
+
+
+
+print(
+    con.execute("""
+            SELECT sector , COUNT(*) as num_assets
+            FROM assets
+            """).df()
+      )
 
 
 con.close()
