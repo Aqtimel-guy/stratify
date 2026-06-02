@@ -2,75 +2,113 @@ import duckdb
 import streamlit as st
 import logging
 import time
+import pandas as pd
+from sqlalchemy import create_engine
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
 
 # for easy querying 
-def get_data(query, params=None):
-    # 1. בדיקה אם קיים חיבור פעיל בסטייט
+# Ensure you have your SQLAlchemy engine ready (either globally or imported from your db_manager)
+def get_supabase_engine():
+    db_password = st.secrets["database"]["password"]
+    db_user = "postgres.nbmxcagcaftevvsplsxj"
+    db_host = "aws-1-eu-central-1.pooler.supabase.com"
+    db_port = 6543
+    db_name = "postgres"
+    connection_string = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    return create_engine(connection_string)
+
+# for getting assets details 
+def get_data(query, params=None, use_cloud=False):
+    """
+    Unified data fetching function.
+    If use_cloud=True, queries the external Supabase database with safe parameter casting.
+    If use_cloud=False (default), queries the local DuckDB database using active session state if available.
+    """
+    import pandas as pd
+
+    # ---- OPTION A: Querying the Cloud Database (Supabase) ----
+    if use_cloud:
+        engine = get_supabase_engine()
+        
+        # PostgreSQL uses %s for parameters instead of ?
+        cloud_query = query.replace('?', '%s')
+        
+        # Convert list/single params to a tuple that Pandas/SQLAlchemy expects
+        if params is not None:
+            if isinstance(params, list):
+                params = tuple(params)
+            elif not isinstance(params, (tuple, dict)):
+                params = (params,)
+        
+        return pd.read_sql(cloud_query, con=engine, params=params)
+
+    # ---- OPTION B: Querying the Local Database (DuckDB) ----
+    # 1. Check if an active connection exists in Streamlit session state
     if 'con' in st.session_state:
         con = st.session_state.con
         if params:
             return con.execute(query, params).df()
         return con.execute(query).df()
     
-    # 2. fallback למקרה שאין חיבור (למשל בהרצה ראשונית)
-    # שים לב: הורדנו את ה-read_only=True כדי למנוע התנגשויות קונפיגורציה
+    # 2. Fallback if no active session connection exists (e.g., initial startup)
+    import duckdb
     with duckdb.connect(DB_PATH) as con:
         if params:
             return con.execute(query, params).df()
         return con.execute(query).df()
-    
+
 # for getting assets details 
-def get_asset_snapshot(con, ticker, sim_date):
+def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
-    שולפת מידע מקיף על נכס ספציפי נכון לזמן הסימולציה,
-    כולל תאריך תחילת מסחר במידה והמניה עדיין לא קיימת בתאריך המבוקש.
+    Fetches comprehensive info about a specific asset as of the simulation date,
+    including inception date if the asset did not trade yet on the requested date.
     """
-    # 1. שליפת מידע בסיסי מה-Assets
-    asset_info = con.execute("""
-        SELECT asset_id, ticker, name, sector, industry
-        FROM assets
-        WHERE ticker = ?
-    """, [ticker.upper()]).fetchone()
+    ASSETS_SOURCE = "assets_cloud" if use_cloud else "assets"
+    PRICES_SOURCE = "prices_cloud" if use_cloud else "prices"
     
-    if not asset_info:
+    # 1. Fetch core metadata from assets catalog using unified get_data
+    query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {ASSETS_SOURCE} WHERE ticker = ?"
+    df_asset = get_data(query_asset, [ticker.upper()], use_cloud=use_cloud)
+    
+    if df_asset.empty:
         return None
 
-    asset_id, ticker_name, name, sector, industry = asset_info
+    # Extract first row values from DataFrame
+    asset_id = df_asset.iloc[0]['asset_id']
+    ticker_name = df_asset.iloc[0]['ticker']
+    name = df_asset.iloc[0]['name']
+    sector = df_asset.iloc[0]['sector']
+    industry = df_asset.iloc[0]['industry']
 
-    # 2. שליפת המחיר האחרון הזמין (לפני או ביום הסימולציה)
-    price_info = con.execute("""
-        SELECT close, timestamp
-        FROM prices
-        WHERE asset_id = ? AND timestamp <= ?
-        ORDER BY timestamp DESC
+    # 2. Fetch the latest available price up to the current simulation date
+    query_price = f"""
+        SELECT close, timestamp 
+        FROM {PRICES_SOURCE} 
+        WHERE asset_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC 
         LIMIT 1
-    """, [asset_id, sim_date]).fetchone()
+    """
+    df_price = get_data(query_price, [int(asset_id), sim_date], use_cloud=use_cloud)
+    current_price = df_price.iloc[0]['close'] if not df_price.empty else None
 
-    current_price = price_info[0] if price_info else None
+    # 3. Fetch the first historical trading date
+    query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {PRICES_SOURCE} WHERE asset_id = ?"
+    df_first_date = get_data(query_first_date, [int(asset_id)], use_cloud=use_cloud)
+    first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
 
-    # 3. שליפת התאריך הראשון בו המניה נסחרה (עבור הודעת שגיאה ידידותית)
-    first_date_info = con.execute("""
-        SELECT MIN(timestamp) 
-        FROM prices 
-        WHERE asset_id = ?
-    """, [asset_id]).fetchone()
-    
-    first_trade_date = first_date_info[0] if first_date_info else None
-
-    # 4. בדיקה אם יש אחזקות קיימות בתיק הנוכחי
+    # 4. Check for existing holdings within the active portfolio context
     portfolio_id = st.session_state.get('current_portfolio_id')
     shares_held = 0
     if portfolio_id:
-        holding_info = con.execute("""
-            SELECT quantity
-            FROM holdings
-            WHERE portfolio_id = ? AND asset_id = ?
-        """, [portfolio_id, asset_id]).fetchone()
-        shares_held = holding_info[0] if holding_info else 0
+        use_cloud_portfolio = st.session_state.get('use_cloud', False)
+        HOLDINGS_SOURCE = "holdings_cloud" if use_cloud_portfolio else "holdings"
+        
+        query_holdings = f"SELECT quantity FROM {HOLDINGS_SOURCE} WHERE portfolio_id = ? AND asset_id = ?"
+        df_holdings = get_data(query_holdings, [int(portfolio_id), int(asset_id)], use_cloud=use_cloud_portfolio)
+        shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
 
     return {
         "asset_id": asset_id,
@@ -79,7 +117,7 @@ def get_asset_snapshot(con, ticker, sim_date):
         "sector": sector,
         "industry": industry,
         "current_price": current_price,
-        "first_trade_date": first_trade_date, # תאריך תחילת מסחר
+        "first_trade_date": first_trade_date,
         "shares_held": shares_held,
         "total_value_held": shares_held * current_price if current_price else 0
     }
@@ -130,22 +168,46 @@ def get_asset_full_data(ticker, sim_time, portfolio_id=None):
 # for recording snapshots of portfolios 
 def capture_portfolio_snapshot(con, portfolio_id, sim_date):
     """
-    מחשבת את השווי הכולל של התיק ושומרת שורה בטבלת ההיסטוריה.
+    Calculates total portfolio value and records a snapshot in history.
+    Saves to both local DuckDB and external Supabase (Dual-Write).
     """
-    # 1. חישוב שווי התיק (מזומן + שווי שוק של מניות)
-    # אני מניח שיש לך פונקציה כזו, אם לא - נשתמש בחישוב מהיר:
+    # 1. Calculate portfolio value (Runs locally on DuckDB)
     total_value = portfolio_value_calculator(portfolio_id, sim_date)
     
-    # 2. שליפת המזומן הפנוי בלבד
+    # 2. Fetch available cash from local DuckDB
     cash_res = con.execute("SELECT available_cash FROM portfolios WHERE portfolio_id = ?", [portfolio_id]).fetchone()
     available_cash = cash_res[0] if cash_res else 0
     
-    # 3. שמירה להיסטוריה
-    # אנחנו משתמשים ב-UPSERT (INSERT ON CONFLICT) כדי שאם מריצים פעמיים באותו יום, זה פשוט יעדכן
+    # ---- STEP A: LOCAL WRITE (DuckDB) ----
     con.execute("""
         INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
         VALUES (?, ?, ?, ?)
     """, [portfolio_id, sim_date, total_value, available_cash])
+
+    # ---- STEP B: CLOUD WRITE (Supabase) ----
+    try:
+        # Optimized: Reusing the existing global engine generator function
+        engine = get_supabase_engine()
+        
+        # Explicit PostgreSQL UPSERT syntax to prevent duplicate primary key crashes
+        cloud_upsert_query = """
+            INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (portfolio_id, timestamp) 
+            DO UPDATE SET 
+                portfolio_value = EXCLUDED.portfolio_value,
+                available_cash = EXCLUDED.available_cash;
+        """
+        
+        # Execute the write directly to the cloud
+        with engine.begin() as cloud_con:
+            cloud_con.execute(cloud_upsert_query, (portfolio_id, sim_date, total_value, available_cash))
+            
+    except Exception as e:
+        # We log the error but don't crash the app, ensuring the local user experience remains unaffected
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Cloud portfolio snapshot sync failed: {e}")
 
 
 # for serching assets
@@ -184,7 +246,7 @@ def portfolio_value_calculator(portfolio_id , timestamp , con=None):
     
      # connecting to DB and loggin
     if con is None:
-        con = duckdb.connect('C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb')
+        con = duckdb.connect(DB_PATH)
         should_close = True
     else:
         should_close = False
