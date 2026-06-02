@@ -1681,8 +1681,7 @@ def dashboard_sidebar():
             st.session_state.page = "portfolios"
             st.rerun()
             
-            
-            
+#########################       
             
 def show_asset_explorer():
     dashboard_sidebar()
@@ -1703,10 +1702,15 @@ def show_asset_explorer():
     selected_ticker = st.session_state.get('selected_ticker_for_analysis')
     
     if selected_ticker:
+        # Check if the application is running in cloud mode or local development
+        # This parameter determines if we pull from the cloud storage bucket or local tables
+        use_cloud_storage = st.session_state.get('use_cloud', False)
+        
         asset = get_asset_snapshot(
             con, 
             selected_ticker, 
-            st.session_state.current_sim_date
+            st.session_state.current_sim_date,
+            use_cloud=use_cloud_storage
         )
         
         # Ensure asset exists before rendering UI
@@ -1731,18 +1735,14 @@ def show_asset_explorer():
                         st.session_state.last_inspected_ticker = asset['ticker']
                         st.rerun()
             
-           
-            
             # ----------------------------------------------------
             # Existing analysis dialog logic (unchanged)
             # ----------------------------------------------------
-            
             if st.session_state.get('last_inspected_ticker') == asset['ticker']:
                 st.session_state.last_inspected_ticker = None
                 show_asset_analysis_dialog(asset['ticker'])
                 
         st.divider()
-    
 
        
 def show_portfolio_performance_analysis():

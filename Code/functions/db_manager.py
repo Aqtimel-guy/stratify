@@ -20,20 +20,29 @@ def get_supabase_engine():
     connection_string = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     return create_engine(connection_string)
 
+# for getting assets details 
 def get_data(query, params=None, use_cloud=False):
     """
     Unified data fetching function.
-    If use_cloud=True, queries the external Supabase database.
-    If use_cloud=False (default), queries the local DuckDB database.
+    If use_cloud=True, queries the external Supabase database with safe parameter casting.
+    If use_cloud=False (default), queries the local DuckDB database using active session state if available.
     """
+    import pandas as pd
+
     # ---- OPTION A: Querying the Cloud Database (Supabase) ----
     if use_cloud:
         engine = get_supabase_engine()
+        
         # PostgreSQL uses %s for parameters instead of ?
-        # If your local query uses ?, you might need to replace it with %s for the cloud
         cloud_query = query.replace('?', '%s')
         
-        # Using pandas read_sql to execute and return a DataFrame directly
+        # Convert list/single params to a tuple that Pandas/SQLAlchemy expects
+        if params is not None:
+            if isinstance(params, list):
+                params = tuple(params)
+            elif not isinstance(params, (tuple, dict)):
+                params = (params,)
+        
         return pd.read_sql(cloud_query, con=engine, params=params)
 
     # ---- OPTION B: Querying the Local Database (DuckDB) ----
@@ -45,42 +54,73 @@ def get_data(query, params=None, use_cloud=False):
         return con.execute(query).df()
     
     # 2. Fallback if no active session connection exists (e.g., initial startup)
+    import duckdb
     with duckdb.connect(DB_PATH) as con:
         if params:
             return con.execute(query, params).df()
         return con.execute(query).df()
-    
-# for getting assets details 
-def get_data(query, params=None, use_cloud=False):
-    """
-    Fetches data from either local DuckDB or Supabase Cloud.
-    """
-    if use_cloud:
-        engine = get_supabase_engine()
-        
-        # Adjust query syntax for PostgreSQL from '?' to '%s'
-        cloud_query = query.replace('?', '%s')
-        
-        # --- FIX STARTS HERE ---
-        # Convert list/single params to a tuple that Pandas/SQLAlchemy expects
-        if params is not None:
-            if isinstance(params, list):
-                params = tuple(params)
-            elif not isinstance(params, (tuple, dict)):
-                params = (params,)
-        # --- FIX ENDS HERE ---
-        
-        import pandas as pd
-        return pd.read_sql(cloud_query, con=engine, params=params)
-        
-    else:
-        # Local DuckDB logic
-        import duckdb
-        with duckdb.connect(DB_PATH) as con:
-            if params:
-                return con.execute(query, params).df()
-            return con.execute(query).df()
 
+# for getting assets details 
+def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
+    """
+    Fetches comprehensive info about a specific asset as of the simulation date,
+    including inception date if the asset did not trade yet on the requested date.
+    """
+    ASSETS_SOURCE = "assets_cloud" if use_cloud else "assets"
+    PRICES_SOURCE = "prices_cloud" if use_cloud else "prices"
+    
+    # 1. Fetch core metadata from assets catalog using unified get_data
+    query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {ASSETS_SOURCE} WHERE ticker = ?"
+    df_asset = get_data(query_asset, [ticker.upper()], use_cloud=use_cloud)
+    
+    if df_asset.empty:
+        return None
+
+    # Extract first row values from DataFrame
+    asset_id = df_asset.iloc[0]['asset_id']
+    ticker_name = df_asset.iloc[0]['ticker']
+    name = df_asset.iloc[0]['name']
+    sector = df_asset.iloc[0]['sector']
+    industry = df_asset.iloc[0]['industry']
+
+    # 2. Fetch the latest available price up to the current simulation date
+    query_price = f"""
+        SELECT close, timestamp 
+        FROM {PRICES_SOURCE} 
+        WHERE asset_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    """
+    df_price = get_data(query_price, [int(asset_id), sim_date], use_cloud=use_cloud)
+    current_price = df_price.iloc[0]['close'] if not df_price.empty else None
+
+    # 3. Fetch the first historical trading date
+    query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {PRICES_SOURCE} WHERE asset_id = ?"
+    df_first_date = get_data(query_first_date, [int(asset_id)], use_cloud=use_cloud)
+    first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
+
+    # 4. Check for existing holdings within the active portfolio context
+    portfolio_id = st.session_state.get('current_portfolio_id')
+    shares_held = 0
+    if portfolio_id:
+        use_cloud_portfolio = st.session_state.get('use_cloud', False)
+        HOLDINGS_SOURCE = "holdings_cloud" if use_cloud_portfolio else "holdings"
+        
+        query_holdings = f"SELECT quantity FROM {HOLDINGS_SOURCE} WHERE portfolio_id = ? AND asset_id = ?"
+        df_holdings = get_data(query_holdings, [int(portfolio_id), int(asset_id)], use_cloud=use_cloud_portfolio)
+        shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
+
+    return {
+        "asset_id": asset_id,
+        "ticker": ticker_name,
+        "name": name,
+        "sector": sector,
+        "industry": industry,
+        "current_price": current_price,
+        "first_trade_date": first_trade_date,
+        "shares_held": shares_held,
+        "total_value_held": shares_held * current_price if current_price else 0
+    }
 
 # for getting all the data over an asset up to a sim_time
 def get_asset_full_data(ticker, sim_time, portfolio_id=None):
