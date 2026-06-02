@@ -1,5 +1,5 @@
 import streamlit as st
-from .db_manager import get_data
+from .db_manager import *
 import logging
 import datetime
 import re
@@ -29,51 +29,53 @@ def check_password(password: str, hashed_password: str) -> bool:
     except Exception:
         return False
     
-# for logging in   
+# for logging in    
 def loggin_func(email, entered_password):
     """
-    user give their ID data to log in
-    if the data is correct returns the user_id , first_name
-    if there is no match of email / password - return FALSE
+    Authenticates a user by checking their credentials against the cloud database (Supabase).
+    If successful, returns (user_id, first_name).
+    If authentication fails, returns (None, None).
     """
+    # 1. Fetch user data using %s format for PostgreSQL and LOWER() for case insensitivity
+    query = """
+        SELECT user_id, first_name, email, password_hash 
+        FROM users
+        WHERE LOWER(email) = LOWER(%s)
+        LIMIT 1
+    """
+    # Pass params as a tuple (email,) instead of a list [email]
+    df_login = get_data(query, (email,), use_cloud=True)
     
-    # We only fetch the data by email first
-    df_loggin = get_data("""SELECT user_id, first_name ,email, password_hash 
-                            FROM users
-                            WHERE
-                            email = ?
-                            LIMIT 1
-                         """, [email])
-    
-    # checking if EMAIL exists
-    if df_loggin.empty:
+    # 2. Validate if the email exists in the system
+    if df_login.empty:
         st.warning("Unknown Email")
-        return None , None
+        return None, None
     
-    # Extract the stored hash from the database
-    stored_hash = df_loggin.iloc[0]['password_hash']
+    # 3. Extract the stored cryptographic hash
+    stored_hash = df_login.iloc[0]['password_hash']
     
-    # checking if password matches using bcrypt
-    # bcrypt.checkpw expects bytes, so we encode both the password and the hash
+    # 4. Verify the password match using bcrypt
     if not bcrypt.checkpw(entered_password.encode('utf-8'), stored_hash.encode('utf-8')):
         st.warning("Wrong password")
-        return None , None
+        return None, None
     
-    # returning user_id if everything is correct
-    return df_loggin.iloc[0]['user_id'] , df_loggin.iloc[0]['first_name'] 
+    # 5. Credentials are valid; return session identifiers
+    return int(df_login.iloc[0]['user_id']), df_login.iloc[0]['first_name']
+    
     
     
 # for registration  
-def registration_func(email, first_name, middle_name, last_name, date_of_birth, raw_password , raw_password_confirm):
+def registration_func(email, first_name, middle_name, last_name, date_of_birth, raw_password, raw_password_confirm):
     """
-    this function check the arg's, and update the DB with our new user
-    if somthing fails, returns FALSE
+    Validates user credentials and signs up a new user.
+    Coordinates a Dual-Write process to save user details to both 
+    the external Supabase cloud database and the local DuckDB instance.
     """
     logger = logging.getLogger(__name__)
     
-    #### first validating args ####
+    # ---- STEP 1: Argument Validation ----
 
-    # --- Email validation ---
+    # Email validation
     if not email or not isinstance(email, str):
         return False
     
@@ -81,7 +83,7 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
     if not re.match(email_pattern, email):
         return False
 
-    # --- First name validation ---
+    # First name validation
     if not first_name or not isinstance(first_name, str):
         return False
         
@@ -91,64 +93,94 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
     if len(first_name.strip()) < 2:
         return False
 
-    # --- Last name validation ---
+    # Last name validation
     if not last_name or not isinstance(last_name, str):
         return False
     
     if len(last_name.strip()) < 2:
         return False
 
-    # --- Date of birth validation ---
+    # Date of birth validation
     if not isinstance(date_of_birth, (datetime.date, datetime.datetime)):
         return False
     
-    # --- Password validation and hashing ---
+    # Password validation and hashing
     if not raw_password or not isinstance(raw_password, str) or len(raw_password) < 6:
         logger.warning("Password does not meet security requirements")
         return False
     if not raw_password == raw_password_confirm:
         logger.warning("Password confirmation must be identical to your password")
-    # Hashing the password before saving to DB
+        return False
+
+    # Generate secure cryptographic hash
     salt = bcrypt.gensalt()
     hashed_password = bcrypt.hashpw(raw_password.encode('utf-8'), salt).decode('utf-8')
 
-    #### if everything passed ####
-    con = duckdb.connect(DB_PATH)
+    # ---- STEP 2: Database Cross-Checking (Cloud First) ----
     
-    # check if Email is available
-    df_email = con.execute("""
-                           SELECT 1 FROM users
-                           WHERE email = ?
-                           LIMIT 1
-                           """ ,[email]).df()
+    # Verify if email already exists globally in the cloud database
+    email_check_query = "SELECT 1 FROM users WHERE email = ? LIMIT 1"
+    df_email = get_data(email_check_query, [email], use_cloud=True)
+    
     if not df_email.empty:
-        logger.warning("Email is already has an account")
-        con.close()
-        return False
-        
-    # creating a new user in the DB
-    try:
-        con.execute("""
-                    INSERT INTO users (
-                        user_id, 
-                        email, 
-                        first_name, 
-                        middle_name, 
-                        last_name, 
-                        date_of_birth, 
-                        password_hash
-                    )
-                    VALUES (
-                        (SELECT COALESCE(MAX(user_id), 0) + 1 FROM users), -- for ID
-                        ?, ?, ?, ?, ?, ? )
-                    """, [email, first_name, middle_name, last_name, date_of_birth, hashed_password])
-    except Exception as e:
-        logger.error(f"DB Error {e}")
-        con.close()
+        logger.warning(f"Registration failed: Email '{email}' is already registered.")
         return False
 
-    # logging and closing connection
-    logger.info("new user have been registerd successfuly")
-    con.close()
-    return True
+    # Format date for database insertion
+    dob_str = date_of_birth.strftime('%Y-%m-%d') if isinstance(date_of_birth, (datetime.date, datetime.datetime)) else date_of_birth
+
+    # ---- STEP 3: Dual-Write Execution (Atomic ID Generation in Cloud) ----
     
+    new_user_id = None
+
+    # A. Execute Cloud Write (Supabase) with Atomic ID Generation
+    try:
+        engine = get_supabase_engine()
+        
+        # FIXED: Using SQLAlchemy named parameters (:key) and passing a dictionary
+        cloud_insert_query = """
+            INSERT INTO users (user_id, email, first_name, middle_name, last_name, date_of_birth, password_hash)
+            VALUES (
+                (SELECT COALESCE(MAX(user_id), 0) + 1 FROM users),
+                :email, :first_name, :middle_name, :last_name, :date_of_birth, :password_hash
+            )
+            RETURNING user_id;
+        """
+        
+        # Mapping the variables strictly to a dictionary
+        param_dict = {
+            "email": email,
+            "first_name": first_name,
+            "middle_name": middle_name,
+            "last_name": last_name,
+            "date_of_birth": dob_str,
+            "password_hash": hashed_password
+        }
+        
+        from sqlalchemy import text
+        with engine.begin() as cloud_con:
+            # text() is required by SQLAlchemy for literal SQL strings with named parameters
+            result = cloud_con.execute(text(cloud_insert_query), param_dict)
+            new_user_id = result.fetchone()[0]
+            
+    except Exception as e:
+        logger.error(f"Cloud Registration Write Failed: {e}")
+        import streamlit as st
+        st.error(f"Supabase Real Cloud Error: {e}")
+        return False  # If cloud insert fails, abort entire signup process
+
+    # B. Execute Local Write (DuckDB) - Keeping local mirror synchronized with the exact same ID
+    if new_user_id is not None:
+        try:
+            with duckdb.connect(DB_PATH) as local_con:
+                local_con.execute("""
+                    INSERT INTO users (user_id, email, first_name, middle_name, last_name, date_of_birth, password_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, [new_user_id, email, first_name, middle_name, last_name, dob_str, hashed_password])
+                
+        except Exception as e:
+            # Log the issue but don't crash since the source-of-truth (cloud) succeeded
+            logger.error(f"Local database sync during registration failed: {e}")
+
+    logger.info(f"New user with ID {new_user_id} has been registered successfully across systems.")
+    return True

@@ -6,14 +6,10 @@ from .UI_components import *
 from .trading_logic import *
 
 
-
-
-
 def go_to(page_name):
     st.session_state.page = page_name
     st.rerun()
     
-
 
 def show_login_page():
     # Check if redirected from a successful registration - display green success message
@@ -107,9 +103,6 @@ def show_login_page():
                 go_to("password_recovery_page")
         
   
-        
-
-
 def show_registration_page():
     # Centered and styled Title using custom HTML/CSS
     st.markdown(
@@ -136,7 +129,7 @@ def show_registration_page():
                 with col_first:
                     first_name = st.text_input("First name *", placeholder="John")
                 with col_middle:
-                    middle_name = st.text_input("Middle name", placeholder="Snow")  # Swapped the placeholder slightly for cleaner look
+                    middle_name = st.text_input("Middle name", placeholder="Snow")
                 with col_last:
                     last_name = st.text_input("Last name *", placeholder="Stark")
                 
@@ -202,7 +195,8 @@ def show_registration_page():
                         st.error("Please enter a valid email address.")
                         is_valid = False
                         
-                    if is_valid and not get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [user_email]).empty:
+                    # MODIFIED: Added use_cloud=True to check email from Supabase global database instead of local DuckDB
+                    if is_valid and not get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [user_email], use_cloud=True).empty:
                         st.error("Email is already in use at Stratify")
                         is_valid = False
                         
@@ -238,7 +232,6 @@ def show_registration_page():
             go_to("login_page")
         
  
-
 def show_password_recovery_page():
     # Centered and styled Title using custom HTML/CSS
     st.markdown(
@@ -292,7 +285,8 @@ def show_password_recovery_page():
                     if email.strip():
                         if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
                             st.error("Please enter a valid email address.")
-                        elif get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [email]).empty:
+                        # MODIFIED: Added use_cloud=True to check the recovery email in the global database
+                        elif get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [email], use_cloud=True).empty:
                             st.error("No account found with that email.")
                         # Placeholder for future logic
                         else:
@@ -306,6 +300,7 @@ def show_password_recovery_page():
             go_to("login_page")
             
             
+######################################           
 
 def show_home_page():
     # 1. Check and fetch user data (only if not already present in session state)
@@ -658,7 +653,6 @@ def show_portfolios_page():
         }
 
         /* --- PREMIUM DARK SIDEBAR CORE STYLES --- */
-        /* Forces a strict 200px layout width footprint and sets deep premium dark slate background */
         [data-testid="stSidebar"], [data-testid="stSidebarUserContent"] {
             width: 200px !important; 
             min-width: 200px !important;
@@ -668,30 +662,25 @@ def show_portfolios_page():
             border-right: 1px solid rgba(0, 0, 0, 0.1);
         }
 
-        /* Completely removes the default sidebar collapse toggle arrow button */
         [data-testid="stSidebarCollapseButton"] {
             display: none !important;
         }
         
-        /* Forces all internal sidebar content to snap directly to the absolute top edge */
         [data-testid="stSidebarUserContent"] {
             padding-top: 0.2rem !important;
         }
 
-        /* Wipes out hidden default padding/margin gaps on the first structural inner block */
         [data-testid="stSidebarUserContent"] > div:first-child {
             padding-top: 0px !important;
             margin-top: 0px !important;
         }
         
-        /* Typography corrections for clear dark-mode contrast readability */
         [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p {
             color: #F8FAFC !important;
             font-weight: 600 !important;
         }
 
         /* --- TARGETED SIDEBAR NAVIGATION OVERRIDES --- */
-        /* Forced base style for all navigation sidebar buttons */
         [data-testid="stSidebar"] button:not([key="sidebar_logout_small"]) {
             border-radius: 10px !important;
             border: 1px solid rgba(255, 255, 255, 0.15) !important;
@@ -750,7 +739,6 @@ def show_portfolios_page():
     # ==========================================
     # SIDEBAR GENERATION & RENDER FRAME
     # ==========================================
-    # --- App Branding Header ---
     st.sidebar.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
@@ -761,7 +749,6 @@ def show_portfolios_page():
         unsafe_allow_html=True
     )
 
-    # --- Investor Profile Header Section ---
     first_name = st.session_state.get("first_name", "Investor")
     st.sidebar.markdown(
         f"""
@@ -783,19 +770,17 @@ def show_portfolios_page():
         unsafe_allow_html=True
     )
     
-    st.sidebar.write("") # Micro-spacer
+    st.sidebar.write("") 
     
-    # --- System Logout Trigger Action Wrapped in Custom Div Container ---
     st.sidebar.markdown('<div class="custom-logout-container">', unsafe_allow_html=True)
     if st.sidebar.button("Logout", key="sidebar_logout_small"):
-        st.session_state.clear()  # Clear all memory frame cache states
-        st.sidebar.rerun()  # Rerun the app context back to the authentication screen
+        st.session_state.clear()  
+        st.sidebar.rerun()  
     st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
     # ==========================================
     # MAIN SURFACE SURFACE: PORTFOLIOS GRID
     # ==========================================
-    # --- Header ---
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 15px;">
@@ -808,7 +793,6 @@ def show_portfolios_page():
 
     user_id = int(st.session_state.user_id)
 
-    # Always fetch fresh data to avoid stale state issues
     user_portfolios = get_data("""
         SELECT 
             portfolio_id, 
@@ -824,7 +808,6 @@ def show_portfolios_page():
     if user_portfolios.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
     else:
-        # Generate 2 columns layout for portfolio cards grid
         cols = st.columns(2)
 
         for index, row in user_portfolios.iterrows():
@@ -832,13 +815,12 @@ def show_portfolios_page():
             p_name = row['portfolio_name']
             
             with cols[index % 2]:
-                # Custom Glass container wrapping each portfolio element
                 with st.container():
                     st.markdown(f"<h4 style='color: #2E4057; margin-bottom: 8px;'>📁 {p_name}</h4>", unsafe_allow_html=True)
 
-                    # Format dates safely
-                    start_dt = row["starting_at"].strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
-                    curr_dt = row["current_sim_date"].strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
+                    # תיקון בטוח: המרה ל-datetime לפני ביצוע ה-strftime למניעת קריסה על מחרוזות
+                    start_dt = pd.to_datetime(row["starting_at"]).strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
+                    curr_dt = pd.to_datetime(row["current_sim_date"]).strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
 
                     # Calculate live portfolio value
                     try:
@@ -847,7 +829,6 @@ def show_portfolios_page():
                     except Exception:
                         val_str = "Error calculating"
 
-                    # Display portfolio details compactly with scaled typography for advanced readability
                     m_col1, m_col2, m_col3 = st.columns(3)
                     with m_col1:
                         st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>📅 Start<br><strong style='color:#2E4057; font-size: 18px;'>{start_dt}</strong></p>", unsafe_allow_html=True)
@@ -856,9 +837,8 @@ def show_portfolios_page():
                     with m_col3:
                         st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>💰 Net Value<br><strong style='color:#4CAF50; font-size: 18px;'>{val_str}</strong></p>", unsafe_allow_html=True)
                     
-                    st.write("") # Tiny vertical spacer inside the card
+                    st.write("") 
                     
-                    # Inside-card action row split into 2 compact halves (Enter / Delete)
                     btn_col_left, btn_col_right = st.columns([2, 1])
                     
                     with btn_col_left:
@@ -870,7 +850,6 @@ def show_portfolios_page():
                             go_to("dashboard_home")
                             
                     with btn_col_right:
-                        # FIX 1: Explicit key bound to p_id forces delete popover to auto-close on deletion
                         with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", use_container_width=True):
                             st.markdown("<p style='font-size: 11px; color:#F44336; font-weight:bold;'>⚠️ Permanent Action</p>", unsafe_allow_html=True)
                             
@@ -884,11 +863,10 @@ def show_portfolios_page():
 
     st.write("---")
 
-    # --- Footer Action Bar (Create New / Return Home) ---
+    # --- Footer Action Bar ---
     col_a, col_b = st.columns(2)
 
     with col_b:
-        # FIX 2: Dynamic state version key to automatically close the creation popover form after submit
         create_popover_key = f"create_portfolio_popover_v{st.session_state.portfolio_create_version}"
         
         with st.popover("➕ Create New Portfolio", key=create_popover_key, use_container_width=True):
@@ -903,7 +881,6 @@ def show_portfolios_page():
             )
             
             with st.form("create_portfolio_form", clear_on_submit=True):
-                # Clean split columns for balanced data layout
                 form_col1, form_col2 = st.columns(2)
                 
                 with form_col1:
@@ -921,9 +898,8 @@ def show_portfolios_page():
                         help="Select a historical benchmark date starting from Feb 2nd, 2000."
                     )
                     
-                st.write("") # Micro spacer
+                st.write("") 
                 
-                # Center the submit option
                 submit_col_left, submit_btn_col, submit_col_right = st.columns([1, 2, 1])
                 
                 with submit_btn_col:
@@ -935,7 +911,6 @@ def show_portfolios_page():
                     else:
                         success, message = create_portfolio(user_id, new_name, start_date)
                         if success:
-                            # Advanced state mutation to force re-render components as closed
                             st.session_state.portfolio_create_version += 1
                             st.toast(f"🚀 Portfolio '{new_name}' created successfully!")
                             st.rerun()
@@ -944,9 +919,11 @@ def show_portfolios_page():
 
     with col_a:
         if st.button("🏠 Back to Home", use_container_width=True):
-            go_to("home_page")          
+            go_to("home_page")  
             
-
+            
+#############################
+            
 def show_dashboard_home():
     # ==========================================
     # STEP 1: INITIAL VALIDATION & AUTH CHECK
@@ -976,11 +953,20 @@ def show_dashboard_home():
     # ==========================================
     # STEP 2: DATA EXTRACTION & CALCULATIONS
     # ==========================================
+    # First, try to fetch the data from the cloud database
     portfolio_data = get_data("""
         SELECT portfolio_name, available_cash, created_at, starting_at, current_sim_date 
         FROM portfolios 
         WHERE portfolio_id = ? AND user_id = ?
-    """, [portfolio_id, user_id])
+    """, [portfolio_id, user_id], use_cloud=True)
+
+    # Fallback: If not found in cloud, try fetching from the local DuckDB instance
+    if portfolio_data.empty:
+        portfolio_data = get_data("""
+            SELECT portfolio_name, available_cash, created_at, starting_at, current_sim_date 
+            FROM portfolios 
+            WHERE portfolio_id = ? AND user_id = ?
+        """, [portfolio_id, user_id], use_cloud=False)
 
     if portfolio_data.empty:
         st.error("⚠️ Portfolio not found or access denied.")
@@ -991,11 +977,11 @@ def show_dashboard_home():
     # Extract raw record variables
     p_row = portfolio_data.iloc[0]
     p_name = p_row['portfolio_name']
-    p_cash = p_row['available_cash']
+    p_cash = float(p_row['available_cash'])
     sim_date = p_row['current_sim_date']
     
     # Calculate global real-time metric assets value valuation
-    p_value = portfolio_value_calculator(portfolio_id, sim_date, con)
+    p_value = float(portfolio_value_calculator(portfolio_id, sim_date, con))
     
     # Commit synchronized application memory context updates
     st.session_state.current_available_cash = p_cash
@@ -1006,15 +992,15 @@ def show_dashboard_home():
     # Extract net historical deposit transaction flows
     cash_stats = con.execute("""
         SELECT 
-            SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END) - 
-            SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END) as net_invested
+            COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END), 0) - 
+            COALESCE(SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END), 0) as net_invested
         FROM cash_transactions 
         WHERE portfolio_id = ?
     """, [portfolio_id]).fetchone()
 
-    net_invested = cash_stats[0] if cash_stats and cash_stats[0] is not None else 0
+    net_invested = float(cash_stats[0]) if cash_stats and cash_stats[0] is not None else 0.0
     total_profit_cash = p_value - net_invested
-    profit_pct = (total_profit_cash / net_invested * 100) if net_invested > 0 else 0
+    profit_pct = (total_profit_cash / net_invested * 100) if net_invested > 0 else 0.0
 
     # ==========================================
     # STEP 3: USER INTERFACE & CSS STYLING
@@ -1458,7 +1444,7 @@ def show_dashboard_home():
     
     render_holdings_table(con, portfolio_id, sim_date)
     
-    
+###########################    
     
 def dashboard_sidebar():
     with st.sidebar:
