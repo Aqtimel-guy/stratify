@@ -6,3 +6,4 @@ matplotlib
 bcrypt
 plotly
 psycopg2-binary
+sqlalchemy
