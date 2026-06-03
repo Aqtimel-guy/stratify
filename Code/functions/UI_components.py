@@ -205,6 +205,7 @@ def show_buy_component(ticker, asset_price):
                     st.rerun()
 
 # For showing holding positions
+# For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):
     st.subheader("🏢 Current Holdings (FIFO)")
 
@@ -470,8 +471,6 @@ def render_holdings_table(con, portfolio_id, sim_date):
 
         # Subtle structural line break between rows 
         st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
-
-
 
 # for portfolio performance analsys 
 def render_performance_chart(df, title="Portfolio Performance History"):
