@@ -22,18 +22,45 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if "mount/src" in BASE_DIR.replace("\\", "/"):
     # Streamlit Cloud Linux structure (Assumes Data_Storage is in your root or synced subfolder)
     DB_PATH = os.path.join(BASE_DIR, "Data_Storage", "stratify.duckdb")
+    # Mark cloud environment as active for downstream query engine routers
+    if 'use_cloud' not in st.session_state:
+        st.session_state.use_cloud = True
 else:
     # Local fallback using your absolute path structure
     DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
+    if 'use_cloud' not in st.session_state:
+        st.session_state.use_cloud = False
 
 # Update streamlit session state with the globally resolved database path
 st.session_state.DB_PATH = DB_PATH
 
 
 def main():
-    # setting initial states
+    # setting initial states (Establishes st.session_state.con driver mapping)
     init_session_state()
     
+    # -------------------------------------------------------------------------
+    # CLOUD DATABASE ENGINE INJECTION LAYER
+    # Registers remote Parquet references into active memory context schema
+    # -------------------------------------------------------------------------
+    if st.session_state.get('use_cloud', False) and 'con' in st.session_state:
+        con = st.session_state.con
+        base_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
+        
+        try:
+            # Install and configure httpfs driver parameters cleanly
+            con.execute("INSTALL httpfs;")
+            con.execute("LOAD httpfs;")
+            
+            # Map logical relation targets directly to underlying cloud storage binaries
+            con.execute(f"CREATE OR REPLACE VIEW assets AS SELECT * FROM read_parquet('{base_url}/assets.parquet');")
+            con.execute(f"CREATE OR REPLACE VIEW prices AS SELECT * FROM read_parquet('{base_url}/prices.parquet');")
+            con.execute(f"CREATE OR REPLACE VIEW fundamentals AS SELECT * FROM read_parquet('{base_url}/fundamentals.parquet');")
+            con.execute(f"CREATE OR REPLACE VIEW asset_factors_normalized_final AS SELECT * FROM read_parquet('{base_url}/asset_factors_normalized_final.parquet');")
+            con.execute(f"CREATE OR REPLACE VIEW holdings_cloud AS SELECT * FROM read_parquet('{base_url}/holdings.parquet');")
+        except Exception as schema_err:
+            st.sidebar.error(f"⚠️ Cloud catalog registration failed: {schema_err}")
+
     ###########################################
     ###                                     ###
     ###              PAGES - UI             ###

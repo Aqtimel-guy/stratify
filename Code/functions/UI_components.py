@@ -707,86 +707,42 @@ def show_asset_analysis_dialog(asset_ticker):
         return
         
     con = st.session_state.con
-    use_cloud = st.session_state.get('use_cloud', False)
-    base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
     asset_ticker_upper = asset_ticker.upper()
     
-    # Resolve core asset details based on infrastructure state
-    if use_cloud:
-        try:
-            df_all_assets = pd.read_parquet(f"{base_cloud_url}/assets.parquet")
-            df_selected_asset = df_all_assets[df_all_assets['ticker'] == asset_ticker_upper]
-            if df_selected_asset.empty:
-                st.error("Asset not found in cloud layer")
-                return
-            a_id = int(df_selected_asset.iloc[0]['asset_id'])
-            a_name = df_selected_asset.iloc[0]['name']
-            a_sector = df_selected_asset.iloc[0]['sector']
-        except Exception as cloud_err:
-            st.error(f"Cloud metadata sync failed: {cloud_err}")
-            return
-    else:
-        asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker_upper]).fetchone()
-        if not asset_data:
-            st.error("Asset not found locally")
-            return
-        a_id, a_name, a_sector = asset_data
+    # Context query executed smoothly via standard database driver routing
+    asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker_upper]).fetchone()
+    if not asset_data:
+        st.error("Asset not found")
+        return
         
+    a_id, a_name, a_sector = asset_data
     sim_date = st.session_state.current_sim_date
 
     st.title(f"{a_name} ({asset_ticker_upper})")
     st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d')}")
 
-    # 2. Fetch datasets dynamically from Cloud (Pandas) or Local (DuckDB)
-    if use_cloud:
-        try:
-            # Pricing dataset acquisition
-            df_all_prices = pd.read_parquet(f"{base_cloud_url}/prices.parquet")
-            price_df = df_all_prices[
-                (df_all_prices['asset_id'] == a_id) & 
-                (df_all_prices['timestamp'] <= sim_date)
-            ].sort_values(by='timestamp', ascending=True)
-            
-            # Fundamentals dataset acquisition
-            df_all_fund = pd.read_parquet(f"{base_cloud_url}/fundamentals.parquet")
-            df_filtered_fund = df_all_fund[
-                (df_all_fund['asset_id'] == a_id) & 
-                (df_all_fund['timestamp'] <= sim_date)
-            ].sort_values(by='timestamp', ascending=False)
-            fund_data = df_filtered_fund.iloc[0][['pe_ratio', 'market_cap', 'revenue', 'eps']].tolist() if not df_filtered_fund.empty else None
-            
-            # Strategic factor indices acquisition
-            df_all_factors = pd.read_parquet(f"{base_cloud_url}/asset_factors_normalized_final.parquet")
-            factors_data = df_all_factors[
-                (df_all_factors['asset_id'] == a_id) & 
-                (df_all_factors['timestamp'] <= sim_date) & 
-                (df_all_factors['timestamp'] >= sim_date - pd.Timedelta(weeks=1))
-            ]
-        except Exception as data_cloud_err:
-            st.error(f"Failed to fetch sub-tables from cloud layer: {data_cloud_err}")
-            return
-    else:
-        price_df = con.execute("""
-            SELECT timestamp, close, volume 
-            FROM prices 
-            WHERE asset_id = ? AND timestamp <= ?
-            ORDER BY timestamp ASC
-        """, [a_id, sim_date]).df()
+    # 2. Fetch tracking datasets via modern virtual relation routing architectures
+    price_df = con.execute("""
+        SELECT timestamp, close, volume 
+        FROM prices 
+        WHERE asset_id = ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+    """, [a_id, sim_date]).df()
 
-        fund_data = con.execute("""
-            SELECT pe_ratio, market_cap, revenue, eps 
-            FROM fundamentals 
-            WHERE asset_id = ? AND timestamp <= ?
-            ORDER BY timestamp DESC LIMIT 1
-        """, [a_id, sim_date]).fetchone()
-        
-        factors_data = con.execute("""
-            SELECT *
-            FROM asset_factors_normalized_final
-            WHERE asset_id = ?
-              AND timestamp <= ?
-              AND timestamp >= ? + INTERVAL '-1 week'
-        """, [a_id, sim_date, sim_date]).df()
+    fund_data = con.execute("""
+        SELECT pe_ratio, market_cap, revenue, eps 
+        FROM fundamentals 
+        WHERE asset_id = ? AND timestamp <= ?
+        ORDER BY timestamp DESC LIMIT 1
+    """, [a_id, sim_date]).fetchone()
+    
+    factors_data = con.execute("""
+        SELECT *
+        FROM asset_factors_normalized_final
+        WHERE asset_id = ?
+          AND timestamp <= ?
+          AND timestamp >= ? + INTERVAL '-1 week'
+    """, [a_id, sim_date, sim_date]).df()
     
     # Presentation initialization via tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
@@ -808,21 +764,18 @@ def show_asset_analysis_dialog(asset_ticker):
             start_date = end_date - timedelta(days=180)
         elif time_range == "1Y":
             start_date = end_date - timedelta(days=365)
-        else: # "All"
+        else:
             start_date = pd.Timestamp.min
 
-        # Slice price dataset using vectorized pandas filtering for cloud or standard SQL for local
-        if use_cloud:
-            filtered_price_df = price_df[(price_df['timestamp'] <= end_date) & (price_df['timestamp'] >= start_date)].sort_values(by='timestamp', ascending=True)
-        else:
-            filtered_price_df = con.execute("""
-                SELECT timestamp, close 
-                FROM prices 
-                WHERE asset_id = ? 
-                  AND timestamp <= ? 
-                  AND timestamp >= ?
-                ORDER BY timestamp ASC
-            """, [a_id, end_date, start_date]).df()
+        # Direct SQL pipeline fetch executed flawlessly
+        filtered_price_df = con.execute("""
+            SELECT timestamp, close 
+            FROM prices 
+            WHERE asset_id = ? 
+              AND timestamp <= ? 
+              AND timestamp >= ?
+            ORDER BY timestamp ASC
+        """, [a_id, end_date, start_date]).df()
 
         if not filtered_price_df.empty:
             first_price = filtered_price_df['close'].iloc[0]
@@ -896,7 +849,6 @@ def show_asset_analysis_dialog(asset_ticker):
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
         
-        # User defined metrics (Kept on local engine stack)
         strategies_df = con.execute("""
             SELECT * FROM user_preferences_strategy 
             WHERE user_id = ? AND portfolio_id = ?
@@ -906,15 +858,11 @@ def show_asset_analysis_dialog(asset_ticker):
         if not strategies_df.empty and selected_name:
             strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-        # Extract context matrix records
-        if use_cloud:
-            stock_data = factors_data.sort_values(by='timestamp', ascending=False).head(1)
-        else:
-            stock_data = con.execute("""
-                SELECT * FROM asset_factors_normalized_final 
-                WHERE asset_id = ? 
-                ORDER BY timestamp DESC LIMIT 1
-            """, [a_id]).df()
+        stock_data = con.execute("""
+            SELECT * FROM asset_factors_normalized_final 
+            WHERE asset_id = ? 
+            ORDER BY timestamp DESC LIMIT 1
+        """, [a_id]).df()
 
         if stock_data.empty:
             st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
