@@ -96,23 +96,25 @@ def get_data(query, params=None, use_cloud=False):
         return con.execute(query).df()
 
 # for getting assets details 
+# for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
     Fetches comprehensive info about a specific asset as of the simulation date,
     including inception date if the asset did not trade yet on the requested date.
     """
-    ASSETS_SOURCE = "assets_cloud" if use_cloud else "assets"
-    PRICES_SOURCE = "prices_cloud" if use_cloud else "prices"
+    base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
     
-    # 1. Fetch core metadata from assets catalog using unified get_data
+    # Define source string based on environment state (Cloud public URLs vs Local database tables)
     if use_cloud:
-        query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {ASSETS_SOURCE} WHERE ticker = :ticker"
-        params_asset = {"ticker": ticker.upper()}
+        assets_source = f"read_parquet('{base_cloud_url}/assets.parquet')"
+        prices_source = f"read_parquet('{base_cloud_url}/prices.parquet')"
     else:
-        query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {ASSETS_SOURCE} WHERE ticker = ?"
-        params_asset = [ticker.upper()]
-        
-    df_asset = get_data(query_asset, params_asset, use_cloud=use_cloud)
+        assets_source = "assets"
+        prices_source = "prices"
+    
+    # 1. Fetch core metadata from assets catalog using dynamic location targets
+    query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {assets_source} WHERE ticker = '{ticker.upper()}'"
+    df_asset = con.execute(query_asset).df()
     
     if df_asset.empty:
         return None
@@ -125,54 +127,34 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     industry = df_asset.iloc[0]['industry']
 
     # 2. Fetch the latest available price up to the current simulation date
-    if use_cloud:
-        query_price = f"""
-            SELECT close, timestamp 
-            FROM {PRICES_SOURCE} 
-            WHERE asset_id = :asset_id AND timestamp <= :sim_date 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """
-        params_price = {"asset_id": int(asset_id), "sim_date": sim_date}
-    else:
-        query_price = f"""
-            SELECT close, timestamp 
-            FROM {PRICES_SOURCE} 
-            WHERE asset_id = ? AND timestamp <= ? 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """
-        params_price = [int(asset_id), sim_date]
-        
-    df_price = get_data(query_price, params_price, use_cloud=use_cloud)
+    query_price = f"""
+        SELECT close, timestamp 
+        FROM {prices_source} 
+        WHERE asset_id = {int(asset_id)} AND timestamp <= '{sim_date}' 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    """
+    df_price = con.execute(query_price).df()
     current_price = df_price.iloc[0]['close'] if not df_price.empty else None
 
     # 3. Fetch the first historical trading date
-    if use_cloud:
-        query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {PRICES_SOURCE} WHERE asset_id = :asset_id"
-        params_first = {"asset_id": int(asset_id)}
-    else:
-        query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {PRICES_SOURCE} WHERE asset_id = ?"
-        params_first = [int(asset_id)]
-        
-    df_first_date = get_data(query_first_date, params_first, use_cloud=use_cloud)
+    query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {prices_source} WHERE asset_id = {int(asset_id)}"
+    df_first_date = con.execute(query_first_date).df()
     first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
 
-    # 4. Check for existing holdings within the active portfolio context
+    # 4. Check for existing holdings within the active portfolio context (Kept local/Supabase logic)
     portfolio_id = st.session_state.get('current_portfolio_id')
     shares_held = 0
     if portfolio_id:
         use_cloud_portfolio = st.session_state.get('use_cloud', False)
-        HOLDINGS_SOURCE = "holdings_cloud" if use_cloud_portfolio else "holdings"
+        holdings_source = "holdings_cloud" if use_cloud_portfolio else "holdings"
         
         if use_cloud_portfolio:
-            query_holdings = f"SELECT quantity FROM {HOLDINGS_SOURCE} WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"
-            params_holdings = {"portfolio_id": int(portfolio_id), "asset_id": int(asset_id)}
+            query_holdings = f"SELECT quantity FROM {holdings_source} WHERE portfolio_id = {int(portfolio_id)} AND asset_id = {int(asset_id)}"
         else:
-            query_holdings = f"SELECT quantity FROM {HOLDINGS_SOURCE} WHERE portfolio_id = ? AND asset_id = ?"
-            params_holdings = [int(portfolio_id), int(asset_id)]
+            query_holdings = f"SELECT quantity FROM {holdings_source} WHERE portfolio_id = {int(portfolio_id)} AND asset_id = {int(asset_id)}"
             
-        df_holdings = get_data(query_holdings, params_holdings, use_cloud=use_cloud_portfolio)
+        df_holdings = con.execute(query_holdings).df()
         shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
 
     return {
@@ -186,6 +168,7 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         "shares_held": shares_held,
         "total_value_held": shares_held * current_price if current_price else 0
     }
+    
     
 # for getting all the data over an asset up to a sim_time
 def get_asset_full_data(ticker, sim_time, portfolio_id=None):
