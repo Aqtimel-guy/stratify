@@ -799,7 +799,8 @@ def show_portfolios_page():
 
     user_id = int(st.session_state.user_id)
 
-    # CRITICAL FIX: Replaced PostgreSQL unsupported positional placeholder '?' with named value syntax '%s'
+    # FIXED: Swapped out %s/list mapping for a dictionary with explicit named parameters (:user_id) 
+    # to perfectly align with the core SQLAlchemy text() compilation layer in get_data.
     user_portfolios = get_data("""
         SELECT 
             portfolio_id, 
@@ -808,9 +809,9 @@ def show_portfolios_page():
             starting_at,
             current_sim_date
         FROM portfolios
-        WHERE user_id = %s
+        WHERE user_id = :user_id
         ORDER BY created_at DESC
-    """, [user_id], use_cloud=True)
+    """, {"user_id": user_id}, use_cloud=True)
 
     if user_portfolios.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
@@ -931,7 +932,7 @@ def show_portfolios_page():
     with col_a:
         if st.button("🏠 Back to Home", use_container_width=True):
             go_to("home_page")
-            
+
 #############################
             
 def show_dashboard_home():
