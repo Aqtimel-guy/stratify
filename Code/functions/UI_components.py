@@ -329,11 +329,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
     st.markdown("<hr style='margin: 8px 0 12px 0; border-color: rgba(0,0,0,0.08);'>", unsafe_allow_html=True)
 
     # --- TABLE BODY ROWS ---
-    # Using enumerate to track row positions for absolute accuracy
-    for idx, row in enumerate(holdings_df.iterrows()):
-        # unpack iterrows tuple
-        _, row_data = row
-        
+    for idx, row_data in holdings_df.iterrows():
         asset_id = row_data['asset_id']
         ticker = row_data['ticker']
         industry = row_data['industry']
@@ -347,11 +343,13 @@ def render_holdings_table(con, portfolio_id, sim_date):
         avg_buy_price = calculate_fifo_avg_price(asset_tx)
         
         # B) Fetch most recent asset closing price
-        current_price = con.execute("""
+        current_price_res = con.execute("""
             SELECT close FROM prices 
             WHERE asset_id = ? AND timestamp <= ? 
             ORDER BY timestamp DESC LIMIT 1
-        """, [asset_id, sim_date]).fetchone()[0]
+        """, [asset_id, sim_date]).fetchone()
+        
+        current_price = current_price_res[0] if current_price_res else 0.0
 
         total_value = available_qty * current_price
         pnl_perc = ((current_price / avg_buy_price) - 1) * 100 if avg_buy_price > 0 else 0
@@ -381,16 +379,21 @@ def render_holdings_table(con, portfolio_id, sim_date):
         
         # D) Combined Actions Layout (Trade Popover / Deep Analysis Dialog)
         with cols[7]:
-            p_cash = st.session_state.get('current_available_cash', 0)  
+            # Safeguard cash extraction from session state layout
+            p_cash = st.session_state.get('current_available_cash', 0.0)
+            if hasattr(p_cash, 'fetchone'):
+                p_cash = float(p_cash.fetchone()[0])
+            else:
+                p_cash = float(p_cash)
 
             with st.popover("💼 Trade", use_container_width=True):
-                # 1. Select Trade Side
+                # 1. Select Trade Side using a unique persistent key anchor blueprint
                 trade_side = st.radio(
                     "Direction",
                     options=["Buy", "Sell"],
                     horizontal=True,
                     label_visibility="collapsed",
-                    key=f"side_{ticker}"
+                    key=f"trade_side_radio_{ticker}_{idx}"
                 )
                 
                 st.markdown("<hr style='margin: 8px 0; border-color: rgba(0,0,0,0.05);'>", unsafe_allow_html=True)
@@ -401,9 +404,10 @@ def render_holdings_table(con, portfolio_id, sim_date):
                     trade_qty = st.number_input(
                         "Quantity to sell", 
                         min_value=1, 
+                        max_value=max(1, available_qty),
                         value=available_qty, 
                         step=1, 
-                        key=f"t_input_sell_{ticker}",
+                        key=f"t_input_sell_val_{ticker}_{idx}",
                         label_visibility="collapsed"
                     )
                     
@@ -411,7 +415,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                     est_credit = trade_qty * current_price
                     st.markdown(f"<p style='font-size:11px; color:#64748B; margin-top:2px;'>Est. Credit: <strong>${est_credit:,.2f}</strong></p>", unsafe_allow_html=True)
                     
-                    if st.button("Confirm Sale", key=f"btn_s_{ticker}", type="primary", use_container_width=True):
+                    if st.button("Confirm Sale", key=f"btn_s_commit_{ticker}_{idx}", type="primary", use_container_width=True):
                         if trade_qty > available_qty:
                             st.error(f"❌ Cannot sell {trade_qty}. You only have {available_qty} shares.")
                         else:
@@ -432,13 +436,13 @@ def render_holdings_table(con, portfolio_id, sim_date):
                         min_value=1, 
                         value=1, 
                         step=1, 
-                        key=f"t_input_buy_{ticker}",
+                        key=f"t_input_buy_val_{ticker}_{idx}",
                         label_visibility="collapsed"
                     )
                     
                     # Estimated cost calculation
                     est_cost = trade_qty * current_price
-                    max_affordable = int(p_cash // current_price)
+                    max_affordable = int(p_cash // current_price) if current_price > 0 else 0
                     
                     st.markdown(
                         f"""
@@ -448,7 +452,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                         unsafe_allow_html=True
                     )
                     
-                    if st.button("Confirm Purchase", key=f"btn_b_{ticker}", type="primary", use_container_width=True):
+                    if st.button("Confirm Purchase", key=f"btn_b_commit_{ticker}_{idx}", type="primary", use_container_width=True):
                         if est_cost > p_cash:
                             st.error(f"❌ Insufficient cash. Total cost is ${est_cost:,.2f} but you only have ${p_cash:,.2f}")
                         else:
@@ -461,11 +465,12 @@ def render_holdings_table(con, portfolio_id, sim_date):
                             else:
                                 st.error(msg)
                             
-            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}", help="View Deep Analysis", use_container_width=True):
+            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}_{idx}", help="View Deep Analysis", use_container_width=True):
                 show_asset_analysis_dialog(ticker)
 
         # Subtle structural line break between rows 
         st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
+
 
 
 # for portfolio performance analsys 
