@@ -803,7 +803,7 @@ def show_portfolios_page():
         FROM portfolios
         WHERE user_id = ?
         ORDER BY created_at DESC
-    """, [user_id])
+    """, [user_id], use_cloud=True)
 
     if user_portfolios.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
