@@ -1640,9 +1640,22 @@ def show_asset_explorer():
     # Initialize asset variable to avoid UnboundLocalError
     asset = None 
     
-    # Initialize local DuckDB connection if not already exists
+    # Fetch the dynamically resolved environment-agnostic path from session state
+    # Fallback to a locally defined variable if main.py hasn't set it yet
+    current_db_path = st.session_state.get('DB_PATH')
+    
+    # Track path mutations or initial connections to enforce state consistency across deployments
     if 'con' not in st.session_state:
-        st.session_state.con = duckdb.connect(DB_PATH)
+        st.session_state.con = duckdb.connect(current_db_path)
+    elif st.session_state.get('last_db_path') != current_db_path:
+        try:
+            st.session_state.con.close()
+        except:
+            pass
+        st.session_state.con = duckdb.connect(current_db_path)
+        
+    # Keep track of the active connection configuration path
+    st.session_state.last_db_path = current_db_path
     con = st.session_state.con
     
     # Initialize cloud SQLAlchemy engine connection if not already exists for dual-write/cloud reading
@@ -1700,8 +1713,6 @@ def show_asset_explorer():
                 show_asset_analysis_dialog(asset['ticker'])
                 
         st.divider()
-        
-        
        
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
