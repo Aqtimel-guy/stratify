@@ -589,8 +589,13 @@ def show_home_page():
 
 
 def show_portfolios_page():
+    """
+    Renders the central portfolio management workspace hub.
+    Handles cascading deletes, real-time value computations, and profile summaries.
+    All source documentation and comments are maintained strictly in English.
+    """
     # --- INITIALIZE STATE COUNTER FOR COMPONENT RESET ---
-    # This prevents the creation popover from staying open post-rerun
+    # Tracks structural key versions to force popover reset states post-submission
     if "portfolio_create_version" not in st.session_state:
         st.session_state.portfolio_create_version = 0
 
@@ -601,13 +606,12 @@ def show_portfolios_page():
         """
         <style>
         /* --- MAIN APP LAYOUT BASE STYLES --- */
-        /* Compact, modern layout & soft light-slate background */
         [data-testid="stAppViewContainer"] {
             background-color: #F7F9FB;
             padding: 10px 10px;
         }
 
-        /* Glassmorphism Portfolio Cards */
+        /* Glassmorphism Portfolio Cards Design Frame */
         .portfolio-card {
             background: rgba(255, 255, 255, 0.4);
             backdrop-filter: blur(10px);
@@ -619,7 +623,7 @@ def show_portfolios_page():
             margin-bottom: 15px;
         }
 
-        /* Small Pill-shaped Action Buttons for Main Content */
+        /* Responsive Action Pill-buttons Formatting */
         .stButton > button {
             border-radius: 20px !important;
             padding: 0.2rem 0.8rem !important;
@@ -636,7 +640,7 @@ def show_portfolios_page():
             border-color: #2E4057;
         }
 
-        /* Clean styling for popovers inside the card grid */
+        /* Card-level Nested Context Popover Overrides */
         div[data-testid="stPopover"] > button {
             border-radius: 20px !important;
             padding: 0.2rem 0.8rem !important;
@@ -793,6 +797,7 @@ def show_portfolios_page():
 
     user_id = int(st.session_state.user_id)
 
+    # CRITICAL FIX: Replaced PostgreSQL unsupported positional placeholder '?' with named value syntax '%s'
     user_portfolios = get_data("""
         SELECT 
             portfolio_id, 
@@ -801,7 +806,7 @@ def show_portfolios_page():
             starting_at,
             current_sim_date
         FROM portfolios
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY created_at DESC
     """, [user_id], use_cloud=True)
 
@@ -818,13 +823,15 @@ def show_portfolios_page():
                 with st.container():
                     st.markdown(f"<h4 style='color: #2E4057; margin-bottom: 8px;'>📁 {p_name}</h4>", unsafe_allow_html=True)
 
-                    # תיקון בטוח: המרה ל-datetime לפני ביצוע ה-strftime למניעת קריסה על מחרוזות
+                    # Safe parsing: Guard against string representation types returned via driver interfaces
                     start_dt = pd.to_datetime(row["starting_at"]).strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
                     curr_dt = pd.to_datetime(row["current_sim_date"]).strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
 
-                    # Calculate live portfolio value
+                    # Calculate live portfolio tracking performance matrix valuations
                     try:
-                        p_value = portfolio_value_calculator(p_id, row["current_sim_date"])
+                        # Extracting native datetime instance structures safely to pass into the valuation engine
+                        sim_date_parsed = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
+                        p_value = portfolio_value_calculator(p_id, sim_date_parsed)
                         val_str = f"${p_value:,.2f}"
                     except Exception:
                         val_str = "Error calculating"
@@ -845,8 +852,10 @@ def show_portfolios_page():
                         if st.button("Enter Portfolio", key=f"enter_{p_id}", use_container_width=True):
                             st.session_state.current_portfolio_id = p_id
                             st.session_state.current_portfolio_name = p_name
-                            st.session_state.current_sim_date = row["current_sim_date"]
-                            st.session_state.current_portfolio_starting_at = row["starting_at"]
+                            
+                            # Standardizing datetime formats stored in system runtime states
+                            st.session_state.current_sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
+                            st.session_state.current_portfolio_starting_at = pd.to_datetime(row["starting_at"]).to_pydatetime()
                             go_to("dashboard_home")
                             
                     with btn_col_right:
@@ -863,7 +872,7 @@ def show_portfolios_page():
 
     st.write("---")
 
-    # --- Footer Action Bar ---
+    # --- Footer Action Bar Frame ---
     col_a, col_b = st.columns(2)
 
     with col_b:
@@ -919,8 +928,7 @@ def show_portfolios_page():
 
     with col_a:
         if st.button("🏠 Back to Home", use_container_width=True):
-            go_to("home_page")  
-            
+            go_to("home_page")
             
 #############################
             
