@@ -48,6 +48,8 @@ def fill_assets_table():
     # --- Step 3: Connect to DuckDB ---
     db_path = r'C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb'
     con = duckdb.connect(db_path)
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
 
     # Ensure the sequence for asset_id exists
     con.execute("CREATE SEQUENCE IF NOT EXISTS asset_id_seq START 1")
@@ -199,6 +201,8 @@ def fill_prices_table():
 
     db_path = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
     con = duckdb.connect(db_path)
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
     logger = logging.getLogger(__name__)
 
     # --- Step 1: Load assets ---
@@ -349,7 +353,8 @@ def fill_fundamentals_table(test_only=False, force_refresh=False):
     
     db_path = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
     con = duckdb.connect(db_path)
-
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
     # 1. Identify assets
     # If force_refresh is True, we take ALL assets. 
     # If False, only those older than 90 days.
@@ -476,6 +481,8 @@ def fill_features_table(test_only=False, force_refresh=False):
     """
     # connect to duckdb
     con = duckdb.connect(r"C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb")
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
     logger = logging.getLogger(__name__)
 
     ### --- step 1:setting the date range ---
@@ -686,6 +693,8 @@ def fill_dividends_table():
     
     logger = logging.getLogger(__name__)
     con = duckdb.connect(r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb")
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
     try:
         # --- first step: build a smart mapping of tickers to asset IDs ---
 

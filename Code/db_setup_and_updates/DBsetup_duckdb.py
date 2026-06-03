@@ -3,7 +3,8 @@ import duckdb
 
 # creating / opening connection
 con = duckdb.connect('C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb')  
-
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
 # creating tables if not exist
 
 ## Table 0 -test table

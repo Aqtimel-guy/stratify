@@ -3,7 +3,6 @@
 3. fix in fundementlas table the update mechanics
 3. adressing splits in stocks
 4. expand the is_etf collum in assets to "asset_type"
-5. add trailing_dividend_yield to features
 10. need to address transaction fee when trading assets
 11. currently NAN parameters in data are being fillna(0) in the fctor section, needs to be adresd. (at strategy)
-12. make sure divident yeild is addresed in simuilating (if i hold tesla at 2019, run forward to 2022 i should be added all of those dividents in those years)
+

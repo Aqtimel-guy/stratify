@@ -40,7 +40,8 @@ def export_and_upload_parquet():
     # 1. Establish local DuckDB connection in read-only mode to prevent locking issues
     print("Connecting to local DuckDB instance (Read-Only)...")
     con = duckdb.connect(DB_PATH, read_only=True)
-    
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
    # 2. Initialize Google Cloud Storage Client via Application Default Credentials
     print("Initializing Google Cloud Storage client via Application Default Credentials...")
     storage_client = storage.Client(project="project-bc960e7b-085a-4566-9a7")

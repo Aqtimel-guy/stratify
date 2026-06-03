@@ -22,7 +22,8 @@ def get_local_db_connection():
         
         # Open the connection
         con = duckdb.connect(db_path)
-        
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
         # Seamlessly inject GCS cloud files support into DuckDB
         try:
             con.register_filesystem(fsspec.filesystem('gcs'))
@@ -100,7 +101,7 @@ def get_data(query, params=None, use_cloud=False):
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
     Fetches comprehensive info about a specific asset as of the simulation date.
-    Directly executes strings against the DuckDB connection to bypass get_data payload issues.
+    Includes a fail-safe fallback to local storage if cloud layers hit storage catalog blocks.
     """
     base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
     
@@ -113,10 +114,21 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         prices_source = "prices"
     
     # 2. Fetch core metadata from assets catalog using exact parameterized inputs
-    # Directly running con.execute with arguments to avoid parsing breaks in generic handlers
     query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {assets_source} WHERE ticker = ?"
-    df_asset = con.execute(query_asset, [ticker.upper()]).df()
     
+    try:
+        df_asset = con.execute(query_asset, [ticker.upper()]).df()
+    except Exception as cloud_error:
+        # Fail-safe local database backup implementation if remote catalog configuration fails
+        if use_cloud:
+            st.sidebar.warning("⚠️ Cloud storage query failed. Falling back to local data engine.")
+            assets_source = "assets"
+            prices_source = "prices"
+            query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {assets_source} WHERE ticker = ?"
+            df_asset = con.execute(query_asset, [ticker.upper()]).df()
+        else:
+            raise cloud_error
+            
     if df_asset.empty:
         return None
 
@@ -165,7 +177,8 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         "shares_held": shares_held,
         "total_value_held": shares_held * current_price if current_price else 0
     }
-    
+
+
 # for getting all the data over an asset up to a sim_time
 def get_asset_full_data(ticker, sim_time, portfolio_id=None):
     # 1. מידע בסיסי ותאריך התחלה

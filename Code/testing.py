@@ -18,6 +18,8 @@ from Code.functions.UI_components import *
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 con = duckdb.connect(DB_PATH)
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
 
 
 portfolio_id = con.execute("SELECT portfolio_id FROM portfolios ORDER BY portfolio_id ASC")

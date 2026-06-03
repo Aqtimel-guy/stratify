@@ -920,6 +920,8 @@ def update_asset_factors_raw_v1():
     # OPEN CONNECTION (SAFE)
     # -------------------------
     con = duckdb.connect(DB_PATH)
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
 
     try:
         asset_ids = [
