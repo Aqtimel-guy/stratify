@@ -3,7 +3,7 @@ import streamlit as st
 import logging
 import time
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine , text
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -166,48 +166,55 @@ def get_asset_full_data(ticker, sim_time, portfolio_id=None):
     }
 
 # for recording snapshots of portfolios 
-def capture_portfolio_snapshot(con, portfolio_id, sim_date):
+def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
     """
-    Calculates total portfolio value and records a snapshot in history.
-    Saves to both local DuckDB and external Supabase (Dual-Write).
+    Calculates total portfolio value and records a snapshot in history directly within 
+    the active Supabase transaction context.
+    All source documentation and comments are maintained strictly in English.
     """
-    # 1. Calculate portfolio value (Runs locally on DuckDB)
-    total_value = portfolio_value_calculator(portfolio_id, sim_date)
+    logger = logging.getLogger(__name__)
     
-    # 2. Fetch available cash from local DuckDB
-    cash_res = con.execute("SELECT available_cash FROM portfolios WHERE portfolio_id = ?", [portfolio_id]).fetchone()
-    available_cash = cash_res[0] if cash_res else 0
-    
-    # ---- STEP A: LOCAL WRITE (DuckDB) ----
-    con.execute("""
-        INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-        VALUES (?, ?, ?, ?)
-    """, [portfolio_id, sim_date, total_value, available_cash])
-
-    # ---- STEP B: CLOUD WRITE (Supabase) ----
     try:
-        # Optimized: Reusing the existing global engine generator function
-        engine = get_supabase_engine()
+        # 1. Calculate the real-time dynamic valuation of the portfolio assets
+        total_value = portfolio_value_calculator(portfolio_id, sim_date)
         
-        # Explicit PostgreSQL UPSERT syntax to prevent duplicate primary key crashes
-        cloud_upsert_query = """
-            INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (portfolio_id, timestamp) 
+        # 2. Fetch the current available cash ledger balance using cloud-native parameters
+        cash_res = connection.execute(
+            text("SELECT available_cash FROM portfolios WHERE portfolio_id = :id"),
+            {"id": portfolio_id}
+        ).fetchone()
+        
+        available_cash = cash_res[0] if cash_res else 0.0
+        
+        # 3. Standardize and allocate primary key sequential row IDs if needed, or rely on serial keys.
+        # To match the cloud schema, we execute a clean upsert execution block.
+        cloud_upsert_query = text("""
+            INSERT INTO portfolio_history (portfolio_id, snapshot_date, portfolio_value, cash_balance)
+            VALUES (:portfolio_id, :snapshot_date, :portfolio_value, :cash_balance)
+            ON CONFLICT (portfolio_id, snapshot_date) 
             DO UPDATE SET 
                 portfolio_value = EXCLUDED.portfolio_value,
-                available_cash = EXCLUDED.available_cash;
-        """
+                cash_balance = EXCLUDED.cash_balance;
+        """)
         
-        # Execute the write directly to the cloud
-        with engine.begin() as cloud_con:
-            cloud_con.execute(cloud_upsert_query, (portfolio_id, sim_date, total_value, available_cash))
-            
+        # Execute the write directly within the shared atomic connection lifespan
+        connection.execute(
+            cloud_upsert_query,
+            {
+                "portfolio_id": portfolio_id,
+                "snapshot_date": sim_date,
+                "portfolio_value": total_value,
+                "cash_balance": available_cash
+            }
+        )
+        
+        logger.info(f"Cloud portfolio history snapshot successfully committed for ID {portfolio_id}.")
+        return True
+        
     except Exception as e:
-        # We log the error but don't crash the app, ensuring the local user experience remains unaffected
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Cloud portfolio snapshot sync failed: {e}")
+        logger.error(f"Cloud portfolio snapshot transaction sequence failed: {e}")
+        # Raising the exception ensures the parent transactional block triggers a safe rollback
+        raise e
 
 
 # for serching assets
