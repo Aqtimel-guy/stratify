@@ -239,75 +239,95 @@ def search_assets(con, search_term):
 
 
 # for calculating portfolio's Value at a given time 
-def portfolio_value_calculator(portfolio_id , timestamp , con=None):
-    
+def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     """
-    this function will calculate the value of a portfolio
+    Computes the total financial valuation of a specific portfolio (Available Cash + Market Value of Holdings)
+    at a given historical timestamp slice using cloud-native engines.
     
-    tables:
-    1. portfolios
-    2. holdings
-    3. prices
-    
+    Tables accessed:
+    1. portfolios (available_cash)
+    2. holdings (asset_id, quantity)
+    3. prices (asset_id, timestamp, close)
     """
-    
-     # connecting to DB and loggin
-    if con is None:
-        con = duckdb.connect(DB_PATH)
-        should_close = True
-    else:
-        should_close = False
-        
     logger = logging.getLogger(__name__)
-    
-    ### --- step 1: query ther relevant data from DB --- ###
-    
-    # get table of relevant prices
-    query = """
-        SELECT 
-            h.asset_id, 
-            h.quantity, 
-            p.close AS price,
-            (h.quantity * p.close) AS market_value
-        FROM holdings h
-        LEFT JOIN prices p ON h.asset_id = p.asset_id
-        WHERE h.portfolio_id = ?
-        AND p.timestamp = (
-            SELECT MAX(timestamp) 
-            FROM prices 
-            WHERE asset_id = h.asset_id 
-                AND timestamp <= ?
-        )
-    """
-    df_assets_holdings = con.execute(query, [portfolio_id, timestamp]).df()
-    
-    # get the current balance in the portfolio
-    portfolio_cash_df = con.execute("""
-                                 select available_cash
-                                 FROM portfolios
-                                 WHERE
-                                 portfolio_id = ?
-                                 """ , [portfolio_id]).fetchone()
-    portfolio_cash = portfolio_cash_df[0]
-    
-    ### --- step 2: calculate total value --- ###
-    
-    # calculating total asset value at given timestamp
-    total_market_value = df_assets_holdings['market_value'].sum()
-    
-    # calculating total value
-    total_portfolio_value = portfolio_cash + total_market_value
-    
-    # logging and closing connection
-    logger.info(f"Portfolio {portfolio_id} valuation at {timestamp}: "
-                f"Cash: {portfolio_cash:.2f}, Assets: {total_market_value:.2f}, Total: {total_portfolio_value:.2f}")
+    should_close = False
 
-    if should_close:
-        con.close()
-    
-    return round(total_portfolio_value , 2)
-    
-    
+    # Dynamic operational routing: Use passed active transaction context or spin up an isolated engine connection
+    if con is None:
+        engine = get_supabase_engine()
+        con = engine.connect()
+        should_close = True
+
+    try:
+        ### --- STEP 1: QUERY RELEVANT SNAPSHOT DATA FROM CLOUD DB --- ###
+        
+        # Pull asset inventory positioning layers matched against the closest historical market price
+        # Transformed legacy DuckDB positional syntax '?' into cloud-compatible named binding parameters
+        query = text("""
+            SELECT 
+                h.asset_id, 
+                h.quantity, 
+                p.close AS price,
+                (h.quantity * p.close) AS market_value
+            FROM holdings h
+            LEFT JOIN prices p ON h.asset_id = p.asset_id
+            WHERE h.portfolio_id = :portfolio_id
+            AND p.timestamp = (
+                SELECT MAX(timestamp) 
+                FROM prices 
+                WHERE asset_id = h.asset_id 
+                    AND timestamp <= :timestamp
+            )
+        """)
+        
+        # Execute query and parse the structural output payload matrix cleanly into a pandas DataFrame
+        result_assets = con.execute(query, {"portfolio_id": portfolio_id, "timestamp": timestamp}).fetchall()
+        
+        if result_assets:
+            df_assets_holdings = pd.DataFrame(
+                result_assets, 
+                columns=['asset_id', 'quantity', 'price', 'market_value']
+            )
+        else:
+            df_assets_holdings = pd.DataFrame(columns=['asset_id', 'quantity', 'price', 'market_value'])
+
+        # Fetch the current unallocated cash reserves available in the target core profile
+        cash_res = con.execute(
+            text("""
+                SELECT available_cash
+                FROM portfolios
+                WHERE portfolio_id = :portfolio_id
+            """), 
+            {"portfolio_id": portfolio_id}
+        ).fetchone()
+        
+        portfolio_cash = float(cash_res[0]) if cash_res else 0.0
+        
+        ### --- STEP 2: AGGREGATE TOTAL NET VALUE --- ###
+        
+        # Safely compute total historical assets layout valuations
+        total_market_value = float(df_assets_holdings['market_value'].sum()) if not df_assets_holdings.empty else 0.0
+        
+        # Final absolute consolidated valuation aggregation
+        total_portfolio_value = portfolio_cash + total_market_value
+        
+        logger.info(
+            f"Portfolio {portfolio_id} valuation tracking at {timestamp}: "
+            f"Cash: {portfolio_cash:.2f}, Assets: {total_market_value:.2f}, Total: {total_portfolio_value:.2f}"
+        )
+        
+        return round(total_portfolio_value, 2)
+
+    except Exception as calc_error:
+        logger.error(f"Failed to execute calculation sequence context for Portfolio ID {portfolio_id}: {calc_error}")
+        raise calc_error
+        
+    finally:
+        # Prevent connection leaks: safely close the interface connection if initialized within this lifecycle loop
+        if should_close:
+            con.close()
+            
+            
 # for making sure no dubble writing happens leading to a crash
 def is_action_allowed(wait_time=2):
     """בודקת אם עבר מספיק זמן מהפעולה האחרונה"""
