@@ -989,7 +989,7 @@ def show_dashboard_home():
     sim_date = p_row['current_sim_date']
     
     # Calculate global real-time metric assets value valuation
-    p_value = float(portfolio_value_calculator(portfolio_id, sim_date, con))
+    p_value = float(portfolio_value_calculator(portfolio_id=portfolio_id, timestamp=sim_date))
     
     # Commit synchronized application memory context updates
     st.session_state.current_available_cash = p_cash
