@@ -525,7 +525,6 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
 
 
 # for simulating time
-# for simulating time
 def handle_time_jump(new_date, p_id):
     """
     Advances the operational simulation clock, calculates and distributes interim dividends,
