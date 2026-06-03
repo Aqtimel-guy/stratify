@@ -16,6 +16,8 @@ def go_to(page_name):
     st.session_state.page = page_name
     st.rerun()
     
+    
+
 # for showing cash management 
 def show_cash_management_ui():
     st.subheader("💰 Cash Management")
@@ -106,28 +108,40 @@ def show_cash_management_ui():
                     else:
                         st.warning("Please wait a moment between actions.")
 
-# עדכון קטן לפונקציית display_asset_card כדי לשמור על עקביות
+
+
+# Function to visually present asset metrics
 def display_asset_card(asset):
-    """מציגה את נתוני הנכס בצורה ויזואלית יפה עם בדיקת זמינות"""
+    """
+    Renders an asset summary card within the UI block.
+    Validates availability based on timeframe price data and manages fallback alerts.
+    """
     if asset['current_price'] is None:
         first_date = asset['first_trade_date']
         date_str = first_date.strftime('%Y-%m-%d') if hasattr(first_date, 'strftime') else str(first_date)
         
-        st.warning(f"⚠️ המנייה **{asset['ticker']}** לא נסחרה בזמן זה.")
-        st.info(f"היא התחילה להיסחר בתאריך: **{date_str}**")
+        # FIXED: Converted all UI warning and info strings strictly to English
+        st.warning(f"⚠️ The stock **{asset['ticker']}** was not traded during this specific period.")
+        st.info(f"Initial public trading for this asset started on: **{date_str}**")
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         return 
 
-    c1, c2 , c3= st.columns([1, 2 , 1])
+    c1, c2, c3 = st.columns([1, 2, 1])
     with c1:
         st.metric("Price", f"${asset['current_price']:,.2f}")
     with c2:
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         st.caption(f"**Sector:** {asset['sector']} | **Industry:** {asset['industry']}")
     with c3:
+        # Placeholder or container logic for active asset tracking imagery
         st.subheader("logo of the company")
-    # כפתור אנליזה - הוספנו שימוש ב-is_action_allowed גם כאן לביטחון
-    
+        
+    # Analysis Trigger Component aligned with execution state safeguards
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("📊 Run Deep Financial Analysis", key=f"analysis_btn_{asset['ticker']}", type="primary", use_container_width=True):
+        st.session_state.selected_ticker_for_analysis = asset['ticker']
+        st.success(f"Selected {asset['ticker']} for quantitative research down-screen.")
+
 
 # for showing purchase 
 def show_buy_component(ticker, asset_price):
@@ -217,6 +231,7 @@ def show_buy_component(ticker, asset_price):
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state[confirm_key] = False
                     st.rerun()
+
 
 # For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):
@@ -492,6 +507,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
         # Subtle structural line break between rows 
         st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
 
+
 # for portfolio performance analsys 
 def render_performance_chart(df, title="Portfolio Performance History"):
     """
@@ -643,15 +659,28 @@ def render_performance_chart(df, title="Portfolio Performance History"):
 
 # for the assets serch component
 def asset_search_component(con):
-    """מנהלת את החיפוש ושומרת את הבחירה ב-State"""
+    """
+    Manages asset search functionality and caches global asset list from public cloud storage.
+    Persists the selected asset ticker in session state for downstream financial deep analysis.
+    """
     
-    # טעינה ראשונית של הרשימה ל-Cache
+    # Initial load of the asset list into persistent session state cache from GCS
     if 'all_assets_list' not in st.session_state:
-        assets_df = con.execute("SELECT ticker, name FROM assets").df()
-        st.session_state.all_assets_list = [f"{row['ticker']} | {row['name']}" for _, row in assets_df.iterrows()]
+        try:
+            # Direct public HTTP access to the Google Cloud Storage bucket containing the parquet dataset
+            # Replace the mock URL below with your exact public asset bucket endpoint link
+            gcs_public_url = "https://storage.googleapis.com/stratify-historical-data/path/to/assets.parquet"
+            
+            # DuckDB natively reads column subsets remotely from raw public cloud URLs extremely fast
+            assets_df = con.execute(f"SELECT ticker, name FROM read_parquet('{gcs_public_url}')").df()
+            st.session_state.all_assets_list = [f"{row['ticker']} | {row['name']}" for _, row in assets_df.iterrows()]
+        except Exception as e:
+            st.error(f"⚠️ Failed to pull assets directory from cloud layer: {e}")
+            st.session_state.all_assets_list = []
 
     st.subheader("Search by Ticker or Company Name")
     
+    # Render searchable configuration box populated with structured cloud metadata
     selected_option = st.selectbox(
         "",
         options=[""] + st.session_state.all_assets_list,
@@ -660,19 +689,24 @@ def asset_search_component(con):
         key="strategy_search_box"
     )
 
+    # Parse and anchor selected node metadata securely across runtime cycles
     if selected_option:
         st.session_state.selected_ticker_for_analysis = selected_option.split(" | ")[0]
 
+
 # for analysing an asset (analysis diolog pop up)
 @st.dialog("Asset Analysis Deep-Dive", width="large")
-def show_asset_analysis_dialog( asset_ticker):
-    # 1. שליפת מידע בסיסי וזיהוי ה-ID
+def show_asset_analysis_dialog(asset_ticker):
+    """
+    Renders a comprehensive quantitative analysis modal popup window for a selected asset.
+    Handles temporal slice queries across pricing, fundamentals, and strategic factor indices.
+    """
+    # 1. Extraction of basic metadata and validation of active data architecture
     if 'con' not in st.session_state:
         st.error("Connection lost")
         return
         
     con = st.session_state.con
-    
     
     asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
     if not asset_data:
@@ -685,7 +719,7 @@ def show_asset_analysis_dialog( asset_ticker):
     st.title(f"{a_name} ({asset_ticker})")
     st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d')}")
 
-    # 2. שליפת היסטוריית מחירים עד תאריך הסימולציה
+    # 2. Querying historical pricing dataset up to current simulation runtime cutoff
     price_df = con.execute("""
         SELECT timestamp, close, volume 
         FROM prices 
@@ -693,42 +727,36 @@ def show_asset_analysis_dialog( asset_ticker):
         ORDER BY timestamp ASC
     """, [a_id, sim_date]).df()
 
-    # 3. שליפת נתונים פונדמנטליים אחרונים (הכי קרובים לתאריך הסימולציה)
+    # 3. Querying most recent fundamental matrix metrics proximal to simulation date
     fund_data = con.execute("""
         SELECT pe_ratio, market_cap, revenue, eps 
         FROM fundamentals 
         WHERE asset_id = ? AND timestamp <= ?
         ORDER BY timestamp DESC LIMIT 1
     """, [a_id, sim_date]).fetchone()
-    # 4 quering strategy data for tab 4
-    factors_data = con.execute("""
-                               SELECT
-                               *
-                               FROM 
-                               asset_factors_normalized_final
-                               
-                               WHERE
-                               asset_id = ?
-                               AND timestamp <= ?
-                               AND timestamp >= ? + INTERVAL '-1 week'
-                               
-                               """ , [a_id, sim_date, sim_date]).df()
     
-    # tab creation
-    tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
+    # 4. Querying normalized strategy factor indices for comparative mapping analysis
+    factors_data = con.execute("""
+        SELECT *
+        FROM asset_factors_normalized_final
+        WHERE asset_id = ?
+          AND timestamp <= ?
+          AND timestamp >= ? + INTERVAL '-1 week'
+    """, [a_id, sim_date, sim_date]).df()
+    
+    # Structural presentation initialization via multi-tab layout controls
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
 
     with tab1:
-    # 1. בחירת טווח זמן
+        # Segmented time window scoping configuration
         time_range = st.segmented_control(
-        "Select Range",
-        options=["1W" ,"1M", "6M", "1Y", "All"],
-        default="1W",
-        key=f"range_{asset_ticker}"
-    )
+            "Select Range",
+            options=["1W", "1M", "6M", "1Y", "All"],
+            default="1W",
+            key=f"range_{asset_ticker}"
+        )
 
-    # 2. חישוב תאריך ההתחלה לפי הבחירה
-    
-    
+        # Dynamic delta lookback window calculation based on user tier choice
         end_date = st.session_state.current_sim_date
         if time_range == "1W":
             start_date = end_date - timedelta(days=7)
@@ -739,38 +767,37 @@ def show_asset_analysis_dialog( asset_ticker):
         elif time_range == "1Y":
             start_date = end_date - timedelta(days=365)
         else: # "All"
-            start_date = pd.Timestamp.min # תאריך מוקדם מאוד
+            start_date = pd.Timestamp.min
 
-        # 3. שליפת הנתונים המפלטרת (גם עד ה-sim_date וגם לפי הטווח)
+        # Query executing isolated pricing arrays constrained by custom window
         filtered_price_df = con.execute("""
             SELECT timestamp, close 
             FROM prices 
             WHERE asset_id = ? 
-            AND timestamp <= ? 
-            AND timestamp >= ?
+              AND timestamp <= ? 
+              AND timestamp >= ?
             ORDER BY timestamp ASC
         """, [a_id, end_date, start_date]).df()
 
-        # 4. הכנת הנתונים והצגת הגרף
+        # Data layout optimization and linear plotting processing
         if not filtered_price_df.empty:
-            # חישוב נתונים מספריים לטווח הנבחר
             first_price = filtered_price_df['close'].iloc[0]
             last_price = filtered_price_df['close'].iloc[-1]
             
             abs_change = last_price - first_price
             pct_change = (abs_change / first_price) * 100
             
-            # בחירת צבעים לפי הביצועים
+            # Dynamic asset styling profiles depending on absolute growth directional delta
             if abs_change >= 0:
                 chart_color = '#2ecc71'
                 fill_color = 'rgba(46, 204, 113, 0.1)'
-                delta_color = "normal" # ירוק ב-st.metric
+                delta_color = "normal" 
             else:
                 chart_color = '#e74c3c'
                 fill_color = 'rgba(231, 76, 60, 0.1)'
-                delta_color = "inverse" # אדום ב-st.metric
+                delta_color = "inverse" 
 
-            # --- הוספת שורת המדדים מעל הגרף ---
+            # Metric telemetry row injection above visualization canvas
             col_m1, col_m2, col_m3 = st.columns(3)
             
             with col_m1:
@@ -782,9 +809,9 @@ def show_asset_analysis_dialog( asset_ticker):
             with col_m3:
                 st.metric("Change (%)", f"{pct_change:+.2f}%", delta_color=delta_color)
                 
-            st.divider() # קו מפריד דק בין המספרים לגרף
+            st.divider()
 
-            # --- בניית הגרף (עם הלוגיקה הקודמת) ---
+            # Axis tracking padding configuration properties
             y_min = filtered_price_df['close'].min()
             y_max = filtered_price_df['close'].max()
             padding = (y_max - y_min) * 0.15
@@ -832,26 +859,23 @@ def show_asset_analysis_dialog( asset_ticker):
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
         
-        # 1. Fetch strategies
+        # 1. Fetch user-defined strategy preferences
         strategies_df = con.execute("""
             SELECT * FROM user_preferences_strategy 
             WHERE user_id = ? AND portfolio_id = ?
         """, [u_id, p_id]).df()
 
-
-    
-        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market" , placeholder="Select a strategy or create one in the Strategy Builder page")
+        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy or create one in the Strategy Builder page")
         if not strategies_df.empty:
             strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-        # 2. Check if asset exists
+        # 2. Safe verification of asset node identifier map
         check_asset = con.execute("SELECT asset_id FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
         
         if not check_asset:
             st.error(f"Ticker {asset_ticker} not found in 'assets' table.")
         else:
             a_id = check_asset[0]
-            # Fetch data directly by ID without JOIN to avoid errors
             stock_data = con.execute("""
                 SELECT * FROM asset_factors_normalized_final 
                 WHERE asset_id = ? 
@@ -860,11 +884,10 @@ def show_asset_analysis_dialog( asset_ticker):
 
             if stock_data.empty:
                 st.warning(f"No factors found for {asset_ticker} (ID: {a_id}) in 'asset_factors_normalized_final'.")
-                # checking if the table is empty or if the asset_id is missing
                 count_test = con.execute("SELECT COUNT(*) FROM asset_factors_normalized_final").fetchone()[0]
                 st.write(f"Total rows in factors table: {count_test}")
             else:
-                # 3. data mapping
+                # 3. Factor configuration mapping arrays
                 comparison_map = {
                     "momentum_preference": "momentum_factor_market", 
                     "value_preference": "value_factor_market",
@@ -874,16 +897,13 @@ def show_asset_analysis_dialog( asset_ticker):
                     "size_preference": "size_factor_market",
                 }
                 
-
-                
-                # --- Table Headers ---
+                # Render clean header alignment layouts
                 h1, h2, h3 = st.columns([1, 2, 1.5])
                 h1.caption("FACTOR")
                 h2.caption("ASSET PERFORMANCE (0-100)")
                 h3.caption("STRATEGY MATCH")
 
                 for pref_col, actual_col in comparison_map.items():
-                    # 1. Extract values and calculate logic
                     if strategies_df.empty:
                         target_val = 0
                     else:
@@ -891,290 +911,52 @@ def show_asset_analysis_dialog( asset_ticker):
                         
                     actual_val = float(stock_data.iloc[0].get(actual_col, 0))
                     
-                    # Calculate match percentage (100 - absolute distance)
+                    # Compute structural metrics (similarity coefficient delta matrix)
                     diff = abs(target_val - actual_val)
                     match_pct = max(0, 100 - diff)
                     gap = actual_val - target_val
 
-                    # 2. Score Color (Center Column): Higher is usually "Stronger" in factor terms
+                    # Evaluation parameters for core factor spectrum coloration thresholds
                     if actual_val >= 70:
-                        score_color = "#28a745"  # Green
+                        score_color = "#28a745"  
                     elif actual_val >= 40:
-                        score_color = "#ffc107"  # Yellow
+                        score_color = "#ffc107"  
                     else:
-                        score_color = "#dc3545"  # Red
+                        score_color = "#dc3545"  
 
-                    # 3. Match Color (Right Column): Based on proximity to Target
+                    # Strategic matrix alignment indicator calculations
                     if match_pct >= 70:
-                        match_color = "#28a745"  # Perfect/Strong match
+                        match_color = "#28a745"  
                     elif match_pct >= 50:
-                        match_color = "#1f77b4"  # Good/Blue match
+                        match_color = "#1f77b4"  
                     elif match_pct >= 30:
-                        match_color = "#ffc107"  # Moderate match
+                        match_color = "#ffc107"  
                     else:
-                        match_color = "#dc3545"  # Poor match (Red)
+                        match_color = "#dc3545"  
 
-                    # 4. Create the 3-column layout
                     c1, c2, c3 = st.columns([1, 2, 1.5])
 
-                    # --- Column 1: Factor Name with Tooltip (Corrected) ---
-
-                    # 1. Clean the label and find the matching key for FACTOR_HELP
+                    # Formatting text label mapping engines
                     factor_key = actual_col.replace('_factor_market', '').replace('_factor_sector', '').lower()
                     label = factor_key.capitalize()
 
-                    # 2. Get the help text from the dictionary
                     FACTOR_HELP = {
-
-
-
-                        "momentum":
-
-
-
-                    "**Momentum Factor**\n\n"
-
-
-
-                    "Identifies assets in a strong upward trend. Based on:\n\n"
-
-
-
-                    "  **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n"
-
-
-
-                    "  **Relative Strength:** Outperforming the S&P 500 index.\n\n"
-
-
-
-                    "  **Trend Health:** Price position relative to long-term averages.",
-
-
-
-                    
-
-
-
-                        "value":
-
-
-
-                "**Value Factor**\n\n"
-
-
-
-                "Identifies stocks trading at a discount relative to their fundamentals. Based on:\n\n"
-
-
-
-                "  **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n"
-
-
-
-                "  **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n"
-
-
-
-                "  **Dividend Yield:** Yearly dividend payments relative to the stock price.",
-
-
-
-            
-
-
-
-            
-
-
-
-                        "quality":
-
-
-
-                "**Quality Factor**\n\n"
-
-
-
-                "Focuses on companies with strong financial health and efficient operations. Based on:\n\n"
-
-
-
-                "  **Profitability:** Net income relative to revenue (Profit Margins).\n\n"
-
-
-
-                "  **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n"
-
-
-
-                "  **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
-                        "growth":
-
-
-
-                "**Growth Factor**\n\n"
-
-
-
-                "Identifies companies expanding their business rapidly over the past year. Based on:\n\n"
-
-
-
-                "  **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n"
-
-
-
-                "  **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n"
-
-
-
-                "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
-                        "defensive":
-
-
-
-                "**Defensive Factor**\n\n"
-
-
-
-                "Prioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n"
-
-
-
-                "  **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n"
-
-
-
-                "  **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n"
-
-
-
-                "  **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
-                        "size":
-
-
-
-                "**Size Factor**\n\n"
-
-
-
-                "Captures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n"
-
-
-
-                "  **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n"
-
-
-
-                "  **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n"
-
-
-
-                "  **Growth Potential:** Targets agile firms with more room for exponential expansion.",
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    "liquidity":
-
-
-
-                "**Liquidity Factor**\n\n"
-
-
-
-                "Measures how easily you can enter or exit a position without affecting the stock price.\n\n"
-
-
-
-                "  **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n"
-
-
-
-                "  **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n"
-
-
-
-                "  **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
-
-
-
+                        "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend. Based on:\n\n **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n **Relative Strength:** Outperforming the S&P 500 index.\n\n **Trend Health:** Price position relative to long-term averages.",
+                        "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to their fundamentals. Based on:\n\n **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n **Dividend Yield:** Yearly dividend payments relative to the stock price.",
+                        "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health and efficient operations. Based on:\n\n **Profitability:** Net income relative to revenue (Profit Margins).\n\n **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
+                        "growth": "**Growth Factor**\n\nIdentifies companies expanding their business rapidly over the past year. Based on:\n\n **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
+                        "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
+                        "size": "**Size Factor**\n\nCaptures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n **Growth Potential:** Targets agile firms with more room for exponential expansion.",
+                        "liquidity": "**Liquidity Factor**\n\nMeasures how easily you can enter or exit a position without affecting the stock price.\n\n **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
                     }
-
                     
                     help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
 
-                    # 3. Render the label with a help icon in Column 1
                     with c1:
-                        # Adding a small vertical space to align with the middle/right columns
                         st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
-                        
-                        # st.markdown supports the 'help' parameter for tooltips
                         st.markdown(f"**{label}**", help=help_text)
 
-                    # --- Column 2: Actual Asset Score (Visual) ---
-                    # Color reflects the score itself (High=Green, Low=Red)
+                    # Dynamic HTML rendering frame for factor bars
                     bar_html = f"""
                     <div style="margin-top: 5px; padding-right: 15px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
@@ -1188,71 +970,54 @@ def show_asset_analysis_dialog( asset_ticker):
                     """
                     c2.markdown(bar_html, unsafe_allow_html=True)
 
-                    # --- Column 3: User-Friendly Strategy Fit ---
-                    if strategies_df.empty:
-                        c3.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
-                    
-                    else:
-
-
-                        # 1. Logic for human-readable labels
-                        if match_pct >= 85:
-                            fit_label = "Perfect Match"
-                            icon = "🌟"
-                        elif match_pct >= 70:
-                            fit_label = "Good Fit"
-                            icon = "✅"
-                        elif match_pct >= 50:
-                            fit_label = "Slight Deviation"
-                            icon = "⚖️"
+                    with c3:
+                        if strategies_df.empty:
+                            st.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
                         else:
-                            # Check direction of deviation for the label
-                            if gap > 0:
-                                fit_label = "Too High"
+                            if match_pct >= 85:
+                                fit_label = "Perfect Match"
+                                icon = "🌟"
+                            elif match_pct >= 70:
+                                fit_label = "Good Fit"
+                                icon = "✅"
+                            elif match_pct >= 50:
+                                fit_label = "Slight Deviation"
+                                icon = "⚖️"
                             else:
-                                fit_label = "Too Low"
-                            icon = "⚠️"
+                                if gap > 0:
+                                    fit_label = "Too High"
+                                else:
+                                    fit_label = "Too Low"
+                                icon = "⚠️"
 
-                        # 2. Render the human-friendly column
-                        c3.markdown(f"""
-                            <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
-                                <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
-                                    {icon} {fit_label}
+                            st.markdown(f"""
+                                <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
+                                    <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
+                                        {icon} {fit_label}
+                                    </div>
+                                    <div style='font-size: 0.75rem; color: #888;'>
+                                        {match_pct:.0f}% similarity
+                                    </div>
+                                    <div style='margin-top: 4px;'>
+                                        <span style='font-size: 0.65rem; background-color: #f1f3f5; padding: 2px 6px; border-radius: 10px; color: #444;'>
+                                            Target: {target_val:.0f}
+                                        </span>
+                                    </div>
                                 </div>
-                                <div style='font-size: 0.75rem; color: #888;'>
-                                    {match_pct:.0f}% similarity
-                                </div>
-                                <div style='margin-top: 4px;'>
-                                    <span style='font-size: 0.65rem; background-color: #f1f3f5; padding: 2px 6px; border-radius: 10px; color: #444;'>
-                                        Target: {target_val:.0f}
-                                    </span>
-                                </div>
-                            </div>
-                        """, unsafe_allow_html=True)
+                            """, unsafe_allow_html=True)
 
                     st.divider()     
     
-    
-    
-                           
     with tab4:
-            # ----------------------------------------------------
-            # Factor visualization section (non-intrusive addition)
-            # ----------------------------------------------------
-            try:
-                st.divider()
-                
-                st.subheader("📊 Factor Positioning")
+        # Integrated visualization segment mapping structural node placement matrix
+        try:
+            st.divider()
+            st.subheader("📊 Factor Positioning")
+            render_stock_factor_maps(con, asset_ticker)
+            st.divider()
+        except Exception as e:
+            st.warning(f"Factor visualization unavailable: {e}")
 
-                # Render 3 factor maps for selected asset
-                render_stock_factor_maps(con, asset_ticker)
-                
-                st.divider()
-            
-            except Exception as e:
-                # Fail-safe: UI should never break due to visualization layer
-                st.warning(f"Factor visualization unavailable: {e}")
-          
 
 # Strategy creation and editing component
 def strategy_creating_component(con, portfolio_id):

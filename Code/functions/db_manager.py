@@ -4,21 +4,53 @@ import logging
 import time
 import pandas as pd
 from sqlalchemy import create_engine , text
+import duckdb
+import fsspec
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
+# for LOCAL & STORAGE CONNECTION (DuckDB + Google Cloud Storage) 
+def get_local_db_connection():
+    """
+    Initializes and returns a unified DuckDB connection inside session state,
+    automatically registered with the GCS file system for remote Parquet reading.
+    """
+    if 'duckdb_con' not in st.session_state:
+        # Check if you have DB_PATH or a default string file name
+        db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
+        
+        # Open the connection
+        con = duckdb.connect(db_path)
+        
+        # Seamlessly inject GCS cloud files support into DuckDB
+        try:
+            con.register_filesystem(fsspec.filesystem('gcs'))
+        except Exception as e:
+            pass
+            
+        st.session_state.duckdb_con = con
+        
+    return st.session_state.duckdb_con
 
-# for easy querying 
-# Ensure you have your SQLAlchemy engine ready (either globally or imported from your db_manager)
+# for CLOUD CONNECTION 
 def get_supabase_engine():
-    db_password = st.secrets["database"]["password"]
-    db_user = "postgres.nbmxcagcaftevvsplsxj"
-    db_host = "aws-1-eu-central-1.pooler.supabase.com"
-    db_port = 6543
-    db_name = "postgres"
-    connection_string = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    return create_engine(connection_string)
+    """
+    Returns a persistent SQLAlchemy engine for cloud database operations.
+    All infrastructure logging configurations remain strictly in English.
+    """
+    if 'supabase_engine' not in st.session_state:
+        db_password = st.secrets["database"]["password"]
+        db_user = "postgres.nbmxcagcaftevvsplsxj"
+        db_host = "aws-1-eu-central-1.pooler.supabase.com"
+        db_port = 6543
+        db_name = "postgres"
+        connection_string = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        
+        # Adding pool_pre_ping to automatically repair dropped cloud connections
+        st.session_state.supabase_engine = create_engine(connection_string, pool_pre_ping=True)
+        
+    return st.session_state.supabase_engine
 
 # for getting assets details 
 def get_data(query, params=None, use_cloud=False):
