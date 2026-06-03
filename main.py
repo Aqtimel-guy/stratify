@@ -57,7 +57,6 @@ def main():
             con.execute(f"CREATE OR REPLACE VIEW prices AS SELECT * FROM read_parquet('{base_url}/prices.parquet');")
             con.execute(f"CREATE OR REPLACE VIEW fundamentals AS SELECT * FROM read_parquet('{base_url}/fundamentals.parquet');")
             con.execute(f"CREATE OR REPLACE VIEW asset_factors_normalized_final AS SELECT * FROM read_parquet('{base_url}/asset_factors_normalized_final.parquet');")
-            con.execute(f"CREATE OR REPLACE VIEW holdings_cloud AS SELECT * FROM read_parquet('{base_url}/holdings.parquet');")
         except Exception as schema_err:
             st.sidebar.error(f"⚠️ Cloud catalog registration failed: {schema_err}")
 
