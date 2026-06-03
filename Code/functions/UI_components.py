@@ -129,18 +129,19 @@ def display_asset_card(asset):
     # כפתור אנליזה - הוספנו שימוש ב-is_action_allowed גם כאן לביטחון
     
 
-# for showing purchese 
+# for showing purchase 
 def show_buy_component(ticker, asset_price):
     """
-    קומפוננטת רכישה משופרת עם ניהול State חכם ואישור בתוך ה-Popover.
+    Enhanced purchase component with smart state management and 
+    in-popover transaction confirmation.
     """
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date')
     
-    # 1. שימוש במזומן מה-State (חוסך פנייה מיותרת ל-DB עד רגע הקנייה)
+    # 1. Fetch available cash from state to prevent redundant DB calls before submission
     current_cash = st.session_state.get('current_available_cash', 0.0)
 
-    # מפתח ייחודי למצב האישור של הנכס הספציפי
+    # Unique state key to handle dynamic confirmation flow for this specific asset
     confirm_key = f"confirm_buy_{ticker}"
     if confirm_key not in st.session_state:
         st.session_state[confirm_key] = False
@@ -149,14 +150,14 @@ def show_buy_component(ticker, asset_price):
         st.subheader(f"Purchase {ticker}")
         st.write(f"Cash Available: **${current_cash:,.2f}**")
         
-        # 2. חישוב מגבלות
+        # 2. Constraint validation
         max_shares = int(current_cash // asset_price) if asset_price > 0 else 0
         
         if max_shares <= 0:
             st.warning("Insufficient funds to buy this asset.")
             return
 
-        # 3. בחירת שיטת קנייה (שימוש ב-form כדי למנוע ריענון על כל הקלדה)
+        # 3. Choose order sizing method
         buy_method = st.radio("Buy by:", ["Quantity", "Total price ($)"], horizontal=True, key=f"method_{ticker}")
 
         if buy_method == "Quantity":
@@ -169,25 +170,38 @@ def show_buy_component(ticker, asset_price):
 
         st.info(f"Total Order: **{qty}** shares for **${total_cost:,.2f}**")
 
-        # 4. מנגנון אישור דו-שלבי חכם (ללא rerun מיותר)
+        # 4. Smart two-step verification mechanism without redundant reruns
         if not st.session_state[confirm_key]:
             if st.button("Review Order", use_container_width=True):
                 st.session_state[confirm_key] = True
-                st.rerun() # כאן rerun נחוץ כדי להציג את כפתור ה-Confirm במקום ה-Review
+                st.rerun() # Rerun is required here to switch to confirmation buttons layout
         else:
             st.warning("Confirm Transaction?")
             col_a, col_b = st.columns(2)
             
             with col_a:
                 if st.button("✅ Confirm", type="primary", use_container_width=True):
-                    # בדיקת מחסום זמן (2 שניות)
+                    # Rate-limiting action boundary check
                     if is_action_allowed(wait_time=2):
+                        # Open the local database context mirror
                         with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_asset_trade(con, portfolio_id, ticker, sim_date, qty, side='buy')
+                            # Check if global cloud state or dual-write configuration is activated
+                            use_cloud_sync = st.session_state.get('use_cloud', False)
+                            
+                            # execute_asset_trade must handle dual-write to Supabase and DuckDB
+                            success, msg = execute_asset_trade(
+                                con, 
+                                portfolio_id, 
+                                ticker, 
+                                sim_date, 
+                                qty, 
+                                side='buy',
+                                use_cloud=use_cloud_sync
+                            )
                             
                             if success:
                                 st.session_state[confirm_key] = False
-                                # עדכון ה-State המקומי כדי שהדף הבא יראה את המזומן המעודכן מיד
+                                # Optimistic UI state update for immediate reflection on dashboard
                                 st.session_state.current_available_cash -= total_cost
                                 st.session_state.page = "dashboard_home"
                                 st.toast(msg)
@@ -203,7 +217,6 @@ def show_buy_component(ticker, asset_price):
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state[confirm_key] = False
                     st.rerun()
-
 
 # For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):

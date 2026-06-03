@@ -1640,10 +1640,15 @@ def show_asset_explorer():
     # Initialize asset variable to avoid UnboundLocalError
     asset = None 
     
-    # Initialize database connection if not already exists
+    # Initialize local DuckDB connection if not already exists
     if 'con' not in st.session_state:
         st.session_state.con = duckdb.connect(DB_PATH)
     con = st.session_state.con
+    
+    # Initialize cloud SQLAlchemy engine connection if not already exists for dual-write/cloud reading
+    if 'supabase_engine' not in st.session_state:
+        # st.session_state.supabase_engine = create_engine(CLOUD_DB_URL)
+        pass # Replace with your actual global engine initialization
     
     # 1. Asset search component
     asset_search_component(con)
@@ -1656,6 +1661,7 @@ def show_asset_explorer():
         # This parameter determines if we pull from the cloud storage bucket or local tables
         use_cloud_storage = st.session_state.get('use_cloud', False)
         
+        # get_asset_snapshot must handle SQLAlchemy text(:param) for cloud and con.execute(?) for local
         asset = get_asset_snapshot(
             con, 
             selected_ticker, 
@@ -1672,6 +1678,7 @@ def show_asset_explorer():
             
             with col_actions:
                 if asset['current_price']:
+                    # show_buy_component will execute the dual-write logic (Cloud + Local Mirror)
                     show_buy_component(
                         selected_ticker, 
                         asset['current_price']
@@ -1693,7 +1700,8 @@ def show_asset_explorer():
                 show_asset_analysis_dialog(asset['ticker'])
                 
         st.divider()
-
+        
+        
        
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
@@ -1754,8 +1762,6 @@ def show_portfolio_performance_analysis():
         
         
 
-    
-    
 def show_strategy_builder():
 
     dashboard_sidebar()
