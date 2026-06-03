@@ -169,14 +169,14 @@ def get_asset_full_data(ticker, sim_time, portfolio_id=None):
 def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
     """
     Calculates total portfolio value and records a snapshot in history directly within 
-    the active Supabase transaction context.
+    the active Supabase transaction context, matching exact cloud schema column names.
     All source documentation and comments are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
     
     try:
         # 1. Calculate the real-time dynamic valuation of the portfolio assets
-        total_value = portfolio_value_calculator(portfolio_id, sim_date)
+        total_value = portfolio_value_calculator(portfolio_id, sim_date, con=connection)
         
         # 2. Fetch the current available cash ledger balance using cloud-native parameters
         cash_res = connection.execute(
@@ -184,17 +184,16 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
             {"id": portfolio_id}
         ).fetchone()
         
-        available_cash = cash_res[0] if cash_res else 0.0
+        available_cash = float(cash_res[0]) if cash_res else 0.0
         
-        # 3. Standardize and allocate primary key sequential row IDs if needed, or rely on serial keys.
-        # To match the cloud schema, we execute a clean upsert execution block.
+        # 3. Match the exact cloud production schema columns: 'timestamp' and 'available_cash'
         cloud_upsert_query = text("""
-            INSERT INTO portfolio_history (portfolio_id, snapshot_date, portfolio_value, cash_balance)
-            VALUES (:portfolio_id, :snapshot_date, :portfolio_value, :cash_balance)
-            ON CONFLICT (portfolio_id, snapshot_date) 
+            INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
+            VALUES (:portfolio_id, :timestamp, :portfolio_value, :available_cash)
+            ON CONFLICT (portfolio_id, timestamp) 
             DO UPDATE SET 
                 portfolio_value = EXCLUDED.portfolio_value,
-                cash_balance = EXCLUDED.cash_balance;
+                available_cash = EXCLUDED.available_cash;
         """)
         
         # Execute the write directly within the shared atomic connection lifespan
@@ -202,9 +201,9 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
             cloud_upsert_query,
             {
                 "portfolio_id": portfolio_id,
-                "snapshot_date": sim_date,
+                "timestamp": sim_date,
                 "portfolio_value": total_value,
-                "cash_balance": available_cash
+                "available_cash": available_cash
             }
         )
         
@@ -215,7 +214,6 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
         logger.error(f"Cloud portfolio snapshot transaction sequence failed: {e}")
         # Raising the exception ensures the parent transactional block triggers a safe rollback
         raise e
-
 
 # for serching assets
 def search_assets(con, search_term):
