@@ -26,8 +26,10 @@ def get_data(query, params=None, use_cloud=False):
     Unified data fetching function.
     If use_cloud=True, queries the external Supabase database with safe parameter casting.
     If use_cloud=False (default), queries the local DuckDB database using active session state if available.
+    All source documentation and comments are maintained strictly in English.
     """
     import pandas as pd
+    from sqlalchemy import text  # Added for safe execution context compilation
 
     # ---- OPTION A: Querying the Cloud Database (Supabase) ----
     if use_cloud:
@@ -43,7 +45,8 @@ def get_data(query, params=None, use_cloud=False):
             elif not isinstance(params, (tuple, dict)):
                 params = (params,)
         
-        return pd.read_sql(cloud_query, con=engine, params=params)
+        # MINIMAL FIX: Wrap the cloud_query with text() so Pandas handles the parameters correctly without breaking legacy inputs
+        return pd.read_sql(text(cloud_query), con=engine, params=params)
 
     # ---- OPTION B: Querying the Local Database (DuckDB) ----
     # 1. Check if an active connection exists in Streamlit session state
