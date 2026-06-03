@@ -204,7 +204,7 @@ def show_buy_component(ticker, asset_price):
                     st.session_state[confirm_key] = False
                     st.rerun()
 
-# For showing holding positions
+
 # For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):
     st.subheader("🏢 Current Holdings (FIFO)")
@@ -225,7 +225,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
         }
 
         /* Force the entire Streamlit column row block to adopt a subtle background color 
-           whenever an alternating row marker class is active inside it.
+            whenever an alternating row marker class is active inside it.
         */
         div[data-testid="stHorizontalBlock"]:has(.zebra-marker-even) {
             background-color: #F8FAFC !important;
@@ -297,24 +297,28 @@ def render_holdings_table(con, portfolio_id, sim_date):
         unsafe_allow_html=True
     )
 
-    # 1. Fetch historical transactions for FIFO calculation
+    # 1. FIXED: Convert query to Named Binds and wrap with text() to resolve the execution ArgumentError
     tx_query = """
     SELECT asset_id, quantity, price_per_share, side, timestamp
     FROM assets_transactions
-    WHERE portfolio_id = ? AND timestamp <= ?
+    WHERE portfolio_id = :portfolio_id AND timestamp <= :sim_date
     ORDER BY timestamp, transaction_id
     """
-    all_tx = con.execute(tx_query, [portfolio_id, sim_date]).df()
+    
+    # We execute using the dictionary parameter layout required by SQLAlchemy 2.0
+    tx_result = con.execute(text(tx_query), {"portfolio_id": portfolio_id, "sim_date": sim_date})
+    all_tx = pd.DataFrame(tx_result.fetchall(), columns=tx_result.keys()) if hasattr(tx_result, 'keys') else pd.DataFrame()
 
-    # 2. Fetch current holdings
+    # 2. FIXED: Convert holdings query to Named Binds and wrap with text()
     holdings_query = """
     SELECT a.asset_id, a.ticker, a.name, a.industry, h.quantity
     FROM holdings h
     JOIN assets a ON h.asset_id = a.asset_id
-    WHERE h.portfolio_id = ? AND h.quantity > 0
+    WHERE h.portfolio_id = :portfolio_id AND h.quantity > 0
     ORDER BY h.quantity DESC
     """
-    holdings_df = con.execute(holdings_query, [portfolio_id]).df()
+    hold_result = con.execute(text(holdings_query), {"portfolio_id": portfolio_id})
+    holdings_df = pd.DataFrame(hold_result.fetchall(), columns=hold_result.keys()) if hasattr(hold_result, 'keys') else pd.DataFrame()
 
     if holdings_df.empty:
         st.info("Your portfolio is currently empty.")
@@ -340,15 +344,18 @@ def render_holdings_table(con, portfolio_id, sim_date):
         zebra_marker = "zebra-marker-even" if idx % 2 == 0 else ""
         
         # A) Calculate FIFO metrics
-        asset_tx = all_tx[all_tx['asset_id'] == asset_id]
-        avg_buy_price = calculate_fifo_avg_price(asset_tx)
+        if not all_tx.empty:
+            asset_tx = all_tx[all_tx['asset_id'] == asset_id]
+            avg_buy_price = calculate_fifo_avg_price(asset_tx)
+        else:
+            avg_buy_price = 0.0
         
-        # B) Fetch most recent asset closing price
-        current_price_res = con.execute("""
+        # B) FIXED: Convert prices query to Named Binds and wrap with text()
+        current_price_res = con.execute(text("""
             SELECT close FROM prices 
-            WHERE asset_id = ? AND timestamp <= ? 
+            WHERE asset_id = :asset_id AND timestamp <= :sim_date 
             ORDER BY timestamp DESC LIMIT 1
-        """, [asset_id, sim_date]).fetchone()
+        """), {"asset_id": asset_id, "sim_date": sim_date}).fetchone()
         
         current_price = current_price_res[0] if current_price_res else 0.0
 
