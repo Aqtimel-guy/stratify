@@ -438,6 +438,7 @@ print(
     con.execute("""
             SELECT sector , COUNT(*) as num_assets
             FROM assets
+            GROUP BY sector
             """).df()
       )
 

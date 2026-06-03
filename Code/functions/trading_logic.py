@@ -81,9 +81,12 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
             # Routed to use our updated safe clean-up snapshot module function
             capture_portfolio_snapshot(con, portfolio_id, timestamp)
             
-            # Commit changes if this function lifecycle scope owns the root execution transaction block
+            # CRITICAL FIX: Explicitly commit connection mutations if operating 
+            # within a pre-existing transaction block to ensure data persists in Supabase.
             if tx:
                 tx.commit()
+            else:
+                con.commit()
                 
             logger.info(f"Successfully executed {transaction_type} of ${amount} for portfolio {portfolio_id}")
             return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
@@ -92,12 +95,16 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
             # Safely rollback mutations if this process instance owns the context block
             if tx:
                 tx.rollback()
+            else:
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
             raise inner_error
 
     except Exception as e:
         logger.error(f"Cash transaction workflow pipeline failed: {e}")
         return False, str(e)
-
 
 # for executing a trade
 def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy'):

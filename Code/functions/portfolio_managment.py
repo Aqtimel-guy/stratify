@@ -150,7 +150,6 @@ def delete_portfolio(portfolio_id):
 def move_time_forward(portfolio_id, amount_of_time="1d"):
     """
     Advances the simulation timeline baseline and records state history logs before modifying records.
-    All comments and documentation are strictly in English.
     """
     logger = logging.getLogger(__name__)
     engine = get_supabase_engine()  # Fetching the central cloud engine
