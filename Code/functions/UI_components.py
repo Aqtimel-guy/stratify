@@ -669,7 +669,7 @@ def asset_search_component(con):
         try:
             # Direct public HTTP access to the Google Cloud Storage bucket containing the parquet dataset
             # Replace the mock URL below with your exact public asset bucket endpoint link
-            gcs_public_url = "https://storage.googleapis.com/stratify-historical-data/path/to/assets.parquet"
+            gcs_public_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/assets.parquet"
             
             # DuckDB natively reads column subsets remotely from raw public cloud URLs extremely fast
             assets_df = con.execute(f"SELECT ticker, name FROM read_parquet('{gcs_public_url}')").df()
