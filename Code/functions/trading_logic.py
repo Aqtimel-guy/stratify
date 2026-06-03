@@ -542,125 +542,115 @@ def handle_time_jump(new_date, p_id):
         return False
 
     engine = get_supabase_engine()
-    con = engine.connect()
     
     try:
-        # Fetch current chronological simulation state anchor point
-        res = con.execute(
-            text("SELECT current_sim_date FROM portfolios WHERE portfolio_id = :p_id"),
-            {"p_id": p_id}
-        ).fetchone()
-        
-        if not res:
-            con.close()
-            return False
+        # Open context managed connection layout
+        with engine.connect() as con:
+            # Fetch current chronological simulation state anchor point
+            res = con.execute(
+                text("SELECT current_sim_date FROM portfolios WHERE portfolio_id = :p_id"),
+                {"p_id": p_id}
+            ).fetchone()
             
-        start_date = res[0]
-        
-        # Bypass execution block if no forward progression is requested
-        if start_date >= new_date:
-            con.close()
-            return True
-
-        # Initialize explicit safe SQL transaction lifecycle context management block
-        tx = con.begin()
-        
-        try:
-            # --- CALCULATE AND UPDATE DIVIDENDS DURING TIME JUMP ---
-            # Aggregate total dividends earned for current holdings within the time jump window
-            dividend_calc_query = text("""
-                SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0) as total_div
-                FROM holdings h
-                JOIN dividends d ON h.asset_id = d.asset_id
-                WHERE h.portfolio_id = :p_id
-                  AND h.quantity > 0
-                  AND d.timestamp > CAST(:start_date AS DATE)
-                  AND d.timestamp <= CAST(:new_date AS DATE)
-            """)
+            if not res:
+                return False
+                
+            start_date = res[0]
             
-            total_dividends = float(
-                con.execute(
-                    dividend_calc_query, 
-                    {"p_id": p_id, "start_date": start_date, "new_date": new_date}
-                ).fetchone()[0]
-            )
+            # Bypass execution block if no forward progression is requested
+            if start_date >= new_date:
+                return True
 
-            # If dividend earnings are captured, inject capital liquidity back into the ledger profile
-            if total_dividends > 0:
+            # Initialize explicit safe SQL transaction lifecycle context management block
+            with con.begin() as tx:
+                # --- CALCULATE AND UPDATE DIVIDENDS DURING TIME JUMP ---
+                # Aggregate total dividends earned for current holdings within the time jump window
+                dividend_calc_query = text("""
+                    SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0) as total_div
+                    FROM holdings h
+                    JOIN dividends d ON h.asset_id = d.asset_id
+                    WHERE h.portfolio_id = :p_id
+                      AND h.quantity > 0
+                      AND d.timestamp > CAST(:start_date AS DATE)
+                      AND d.timestamp <= CAST(:new_date AS DATE)
+                """)
+                
+                total_dividends = float(
+                    con.execute(
+                        dividend_calc_query, 
+                        {"p_id": p_id, "start_date": start_date, "new_date": new_date}
+                    ).fetchone()[0]
+                )
+
+                # If dividend earnings are captured, inject capital liquidity back into the ledger profile
+                if total_dividends > 0:
+                    con.execute(
+                        text("""
+                            UPDATE portfolios 
+                            SET available_cash = available_cash + :total_dividends 
+                            WHERE portfolio_id = :p_id
+                        """),
+                        {"total_dividends": total_dividends, "p_id": p_id}
+                    )
+
+                # --- HISTORICAL LEDGER SLICE TIME-SERIES BACKFILL ---
+                # Pre-clean target time horizon slices to secure idempotent transaction commits
                 con.execute(
                     text("""
-                        UPDATE portfolios 
-                        SET available_cash = available_cash + :total_dividends 
-                        WHERE portfolio_id = :p_id
+                        DELETE FROM portfolio_history 
+                        WHERE portfolio_id = :portfolio_id 
+                          AND timestamp > CAST(:start_date AS TIMESTAMP)
+                          AND timestamp <= CAST(:new_date AS TIMESTAMP)
                     """),
-                    {"total_dividends": total_dividends, "p_id": p_id}
+                    {"portfolio_id": p_id, "start_date": start_date, "new_date": new_date}
                 )
 
-            # --- HISTORICAL LEDGER SLICE TIME-SERIES BACKFILL ---
-            # Pre-clean target time horizon slices to secure idempotent transaction commits
-            con.execute(
-                text("""
-                    DELETE FROM portfolio_history 
-                    WHERE portfolio_id = :portfolio_id 
-                      AND timestamp > CAST(:start_date AS TIMESTAMP)
-                      AND timestamp <= CAST(:new_date AS TIMESTAMP)
-                """),
-                {"portfolio_id": p_id, "start_date": start_date, "new_date": new_date}
-            )
-
-            # Standardized cloud-optimized daily time-series backfill calculation matrix layout
-            backfill_query = text("""
-                INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-                WITH date_series AS (
-                    SELECT CAST(day_raw AS TIMESTAMP) as day_ts
-                    FROM generate_series(
-                        CAST(:start_date AS TIMESTAMP) + INTERVAL '1 day', 
-                        CAST(:new_date AS TIMESTAMP), 
-                        INTERVAL '1 day'
-                    ) AS day_raw
-                ),
-                daily_valuation AS (
+                # Standardized cloud-optimized daily time-series backfill calculation matrix layout
+                backfill_query = text("""
+                    INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
+                    WITH date_series AS (
+                        SELECT CAST(day_raw AS TIMESTAMP) as day_ts
+                        FROM generate_series(
+                            CAST(:start_date AS TIMESTAMP) + INTERVAL '1 day', 
+                            CAST(:new_date AS TIMESTAMP), 
+                            INTERVAL '1 day'
+                        ) AS day_raw
+                    ),
+                    daily_valuation AS (
+                        SELECT 
+                            ds.day_ts,
+                            COALESCE(SUM(h.quantity * (
+                                SELECT p.close FROM prices p 
+                                WHERE p.asset_id = h.asset_id 
+                                  AND p.timestamp <= ds.day_ts 
+                                ORDER BY p.timestamp DESC LIMIT 1
+                            )), 0) as assets_value
+                        FROM date_series ds
+                        CROSS JOIN holdings h
+                        WHERE h.portfolio_id = :p_id
+                        GROUP BY ds.day_ts
+                    )
                     SELECT 
-                        ds.day_ts,
-                        COALESCE(SUM(h.quantity * (
-                            SELECT p.close FROM prices p 
-                            WHERE p.asset_id = h.asset_id 
-                              AND p.timestamp <= ds.day_ts 
-                            ORDER BY p.timestamp DESC LIMIT 1
-                        )), 0) as assets_value
-                    FROM date_series ds
-                    CROSS JOIN holdings h
-                    WHERE h.portfolio_id = :p_id
-                    GROUP BY ds.day_ts
+                        :p_id, 
+                        dv.day_ts, 
+                        dv.assets_value + p.available_cash, 
+                        p.available_cash
+                    FROM daily_valuation dv
+                    JOIN portfolios p ON p.portfolio_id = :p_id
+                """)
+                
+                con.execute(
+                    backfill_query, 
+                    {"start_date": start_date, "new_date": new_date, "p_id": p_id}
                 )
-                SELECT 
-                    :p_id, 
-                    dv.day_ts, 
-                    dv.assets_value + p.available_cash, 
-                    p.available_cash
-                FROM daily_valuation dv
-                JOIN portfolios p ON p.portfolio_id = :p_id
-            """)
-            
-            con.execute(
-                backfill_query, 
-                {"start_date": start_date, "new_date": new_date, "p_id": p_id}
-            )
 
-            # Update master simulation timeline timestamp index inside the profiles table
-            con.execute(
-                text("UPDATE portfolios SET current_sim_date = :new_date WHERE portfolio_id = :p_id"),
-                {"new_date": new_date, "p_id": p_id}
-            )
-            
-            tx.commit()
-
-        except Exception as inner_error:
-            tx.rollback()
-            raise inner_error
-
-        finally:
-            con.close()
+                # Update master simulation timeline timestamp index inside the profiles table
+                con.execute(
+                    text("UPDATE portfolios SET current_sim_date = :new_date WHERE portfolio_id = :p_id"),
+                    {"new_date": new_date, "p_id": p_id}
+                )
+                
+                # Context manager auto-commits upon block exit if no exceptions are thrown
 
         # Update core Streamlit reactive application state variables layout framework
         st.session_state.current_sim_date = new_date
@@ -674,7 +664,6 @@ def handle_time_jump(new_date, p_id):
         logger.error(f"Global time jump processing pipeline sequence crashed: {e}")
         st.error(f"Time Jump Failed: {e}")
         return False
-    
-    
+   
     
 # for getting recomendations to buy/sell
