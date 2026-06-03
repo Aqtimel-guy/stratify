@@ -4,6 +4,8 @@ from .users_managment import *
 from .portfolio_managment import *
 from .UI_components import *
 from .trading_logic import *
+from sqlalchemy import text
+from Code.functions.db_manager import get_supabase_engine
 
 
 def go_to(page_name):
@@ -933,6 +935,12 @@ def show_portfolios_page():
 #############################
             
 def show_dashboard_home():
+    """
+    Renders the main simulation strategy control center dashboard home view.
+    Handles cloud-native portfolio statistics, interim asset metrics caching,
+    fluid capital adjustments, and data ledger layout metrics.
+    All source documentation and comments are maintained strictly in English.
+    """
     # ==========================================
     # STEP 1: INITIAL VALIDATION & AUTH CHECK
     # ==========================================
@@ -948,12 +956,6 @@ def show_dashboard_home():
     user_id = int(raw_u_id)
     portfolio_id = int(raw_p_id)
 
-    # Maintain global system database state context safely
-    if 'con' not in st.session_state:
-        st.session_state.con = duckdb.connect(DB_PATH)
-    
-    con = st.session_state.con
-
     # Initialize a clean component reset key versioning tracker for forms
     if "cash_op_version" not in st.session_state:
         st.session_state.cash_op_version = 0
@@ -961,20 +963,12 @@ def show_dashboard_home():
     # ==========================================
     # STEP 2: DATA EXTRACTION & CALCULATIONS
     # ==========================================
-    # First, try to fetch the data from the cloud database
+    # Extract structural configuration state metadata from the cloud engine
     portfolio_data = get_data("""
         SELECT portfolio_name, available_cash, created_at, starting_at, current_sim_date 
         FROM portfolios 
-        WHERE portfolio_id = ? AND user_id = ?
-    """, [portfolio_id, user_id], use_cloud=True)
-
-    # Fallback: If not found in cloud, try fetching from the local DuckDB instance
-    if portfolio_data.empty:
-        portfolio_data = get_data("""
-            SELECT portfolio_name, available_cash, created_at, starting_at, current_sim_date 
-            FROM portfolios 
-            WHERE portfolio_id = ? AND user_id = ?
-        """, [portfolio_id, user_id], use_cloud=False)
+        WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+    """, {"portfolio_id": portfolio_id, "user_id": user_id}, use_cloud=True)
 
     if portfolio_data.empty:
         st.error("⚠️ Portfolio not found or access denied.")
@@ -982,13 +976,13 @@ def show_dashboard_home():
             go_to("portfolios")
         return
 
-    # Extract raw record variables
+    # Extract raw record variables from the verified operational data container row
     p_row = portfolio_data.iloc[0]
     p_name = p_row['portfolio_name']
     p_cash = float(p_row['available_cash'])
     sim_date = p_row['current_sim_date']
     
-    # Calculate global real-time metric assets value valuation
+    # Calculate global real-time metric assets value valuation using the isolated cloud interface
     p_value = float(portfolio_value_calculator(portfolio_id=portfolio_id, timestamp=sim_date))
     
     # Commit synchronized application memory context updates
@@ -997,16 +991,21 @@ def show_dashboard_home():
     st.session_state.current_sim_date = sim_date
     st.session_state.current_sim_date_display = sim_date.strftime('%d/%m/%Y')
 
-    # Extract net historical deposit transaction flows
-    cash_stats = con.execute("""
-        SELECT 
-            COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END), 0) - 
-            COALESCE(SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END), 0) as net_invested
-        FROM cash_transactions 
-        WHERE portfolio_id = ?
-    """, [portfolio_id]).fetchone()
+    # Spin up an isolated transaction connection context frame block for metrics calculation
+    cloud_engine = get_supabase_engine()
+    with cloud_engine.connect() as cloud_con:
+        cash_stats_res = cloud_con.execute(
+            text("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END), 0) - 
+                    COALESCE(SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END), 0) as net_invested
+                FROM cash_transactions 
+                WHERE portfolio_id = :portfolio_id
+            """), 
+            {"portfolio_id": portfolio_id}
+        ).fetchone()
 
-    net_invested = float(cash_stats[0]) if cash_stats and cash_stats[0] is not None else 0.0
+    net_invested = float(cash_stats_res[0]) if cash_stats_res and cash_stats_res[0] is not None else 0.0
     total_profit_cash = p_value - net_invested
     profit_pct = (total_profit_cash / net_invested * 100) if net_invested > 0 else 0.0
 
@@ -1016,187 +1015,172 @@ def show_dashboard_home():
     dashboard_sidebar() # Render navigation structure panel
 
     st.markdown(
-    """
-    <style>
+        """
+        <style>
+        /* =========================================
+           COMPACT METRIC CARDS
+        ========================================= */
+        div[data-testid="stMetric"] {
+            background: #FFFFFF !important;
+            border: 1px solid #E2E8F0 !important;
+            border-radius: 10px !important;
+            padding: 8px 14px !important;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02) !important;
+        }
 
-    /* =========================================
-       COMPACT METRIC CARDS
-    ========================================= */
+        div[data-testid="stMetric"] label [data-testid="stMetricLabel"] {
+            font-size: 0.8rem !important;
+            color: #64748B !important;
+            font-weight: 500 !important;
+        }
 
-    div[data-testid="stMetric"] {
-        background: #FFFFFF !important;
-        border: 1px solid #E2E8F0 !important;
-        border-radius: 10px !important;
-        padding: 8px 14px !important;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02) !important;
-    }
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            font-size: 1.4rem !important;
+            font-weight: 700 !important;
+            letter-spacing: -0.5px !important;
+            line-height: 1.2 !important;
+        }
 
-    div[data-testid="stMetric"] label [data-testid="stMetricLabel"] {
-        font-size: 0.8rem !important;
-        color: #64748B !important;
-        font-weight: 500 !important;
-    }
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+            font-size: 0.75rem !important;
+        }
 
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        font-size: 1.4rem !important;
-        font-weight: 700 !important;
-        letter-spacing: -0.5px !important;
-        line-height: 1.2 !important;
-    }
+        /* =========================================
+           HEADER / TIMELINE FIX
+        ========================================= */
+        .timeline-wrapper {
+            width: 200%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
 
-    div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
-        font-size: 0.75rem !important;
-    }
+        .timeline-card {
+            background: #E0F2FE;
+            border: 1px solid #BAE6FD;
+            border-radius: 10px;
+            padding: 120px 160px;
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-width: 170px;
+            max-width: 320px;
+            box-sizing: border-box;
+        }
 
+        .timeline-title {
+            font-size: 11px;
+            color: #0369A1;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            text-align: center;
+            line-height: 1;
+        }
 
-    /* =========================================
-       HEADER / TIMELINE FIX
-    ========================================= */
+        .timeline-date {
+            font-size: 15px;
+            color: #0C4A6E;
+            font-weight: 700;
+            margin-top: 6px;
+            text-align: center;
+            direction: ltr;
+            line-height: 1.2;
+        }
 
-    .timeline-wrapper {
-        width: 200%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-    }
+        /* =========================================
+           BUTTONS & POPOVERS
+        ========================================= */
+        div[data-testid="stForm"] button[kind="primaryFormSubmit"] {
+            transition: all 0.2s ease-in-out !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            padding: 0.35rem 0.75rem !important;
+            font-size: 13px !important;
+        }
 
-    .timeline-card {
-        background: #E0F2FE;
-        border: 1px solid #BAE6FD;
-        border-radius: 10px;
+        div[data-testid="stPopover"] 
+        div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button {
+            background-color: #22C55E !important;
+            color: white !important;
+            border-color: #22C55E !important;
+        }
 
-        padding: 120px 160px;
+        div[data-testid="stPopover"] 
+        div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button:hover {
+            background-color: #16A34A !important;
+            border-color: #16A34A !important;
+        }
 
-        display: inline-flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        div[data-testid="stPopover"] 
+        div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button {
+            background-color: #EF4444 !important;
+            color: white !important;
+            border-color: #EF4444 !important;
+        }
 
-        min-width: 170px;
-        max-width: 320px;
+        div[data-testid="stPopover"] 
+        div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button:hover {
+            background-color: #DC2626 !important;
+            border-color: #DC2626 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 
-        box-sizing: border-box;
-    }
-
-    .timeline-title {
-        font-size: 11px;
-        color: #0369A1;
-        font-weight: 700;
-
-        text-transform: uppercase;
-        letter-spacing: 0.6px;
-
-        text-align: center;
-        line-height: 1;
-    }
-
-    .timeline-date {
-        font-size: 15px;
-        color: #0C4A6E;
-        font-weight: 700;
-
-        margin-top: 6px;
-
-        text-align: center;
-        direction: ltr;
-        line-height: 1.2;
-    }
-
-
-    /* =========================================
-       BUTTONS & POPOVERS
-    ========================================= */
-
-    div[data-testid="stForm"] button[kind="primaryFormSubmit"] {
-        transition: all 0.2s ease-in-out !important;
-        border-radius: 8px !important;
-        font-weight: 600 !important;
-        padding: 0.35rem 0.75rem !important;
-        font-size: 13px !important;
-    }
-
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button {
-        background-color: #22C55E !important;
-        color: white !important;
-        border-color: #22C55E !important;
-    }
-
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button:hover {
-        background-color: #16A34A !important;
-        border-color: #16A34A !important;
-    }
-
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button {
-        background-color: #EF4444 !important;
-        color: white !important;
-        border-color: #EF4444 !important;
-    }
-
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button:hover {
-        background-color: #DC2626 !important;
-        border-color: #DC2626 !important;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-    # Dynamic Dashboard Header Layout
+    # Dynamic Dashboard Header Layout Render Sequence
     header_col1, header_col2 , header_col3 = st.columns([2, 3 , 1.6])
     with header_col1:
         st.markdown(f"<h1 style='margin:0; padding:0; color:#1E293B;'>📊 {p_name}</h1>", unsafe_allow_html=True)
     with header_col2:
-       st.markdown(
-        f"""
-        <div style="display: flex; justify-content: center; align-items: center; width: 80%;">
-            <div style='
-                background: #E0F2FE; 
-                border: 1px solid #BAE6FD; 
-                border-radius: 8px; 
-                padding: 12px 8px; 
-                text-align: center;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                width: 480px; /* Locked precise gadget width */
-            '>
-                <span style='
-                    font-size: 18px; 
-                    color: #0369A1; 
-                    font-weight: bold; 
-                    display: block; 
-                    text-transform: uppercase; 
-                    letter-spacing: 0.5px;
+        st.markdown(
+            f"""
+            <div style="display: flex; justify-content: center; align-items: center; width: 80%;">
+                <div style='
+                    background: #E0F2FE; 
+                    border: 1px solid #BAE6FD; 
+                    border-radius: 8px; 
+                    padding: 12px 8px; 
                     text-align: center;
-                    width: 100%;
-                '>Engine Timeline</span>
-                <span style='
-                    font-size: 16px; 
-                    color: #0C4A6E; 
-                    font-weight: bold; 
-                    display: block; 
-                    margin-top: 2px;
-                    text-align: center;
-                    direction: ltr;
-                    width: 100%;
-                '>⏳ {st.session_state.current_sim_date_display}</span>
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    width: 480px;
+                '>
+                    <span style='
+                        font-size: 18px; 
+                        color: #0369A1; 
+                        font-weight: bold; 
+                        display: block; 
+                        text-transform: uppercase; 
+                        letter-spacing: 0.5px;
+                        text-align: center;
+                        width: 100%;
+                    '>Engine Timeline</span>
+                    <span style='
+                        font-size: 16px; 
+                        color: #0C4A6E; 
+                        font-weight: bold; 
+                        display: block; 
+                        margin-top: 2px;
+                        text-align: center;
+                        direction: ltr;
+                        width: 100%;
+                    '>⏳ {st.session_state.current_sim_date_display}</span>
+                </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+            """,
+            unsafe_allow_html=True
+        )
     with header_col3:
-            st.write("to be filled later with a task progress to teach the users")
+        st.write("to be filled later with a task progress to teach the users")
 
     st.write("") # Layout spacer
     
-    # Financial KPI Metrics Block Row
+    # Financial KPI Metrics Block Row Setup
     m_col1, m_col2, m_col3 = st.columns(3)
     
     cash_ratio = (p_cash / p_value * 100) if p_value > 0 else 0
@@ -1230,146 +1214,129 @@ def show_dashboard_home():
     with col1:
         st.markdown("<p style='font-size:12px; font-weight:bold; color:#64748B; text-transform:uppercase; margin-bottom:10px;'>⚡ Portfolio Capital Control</p>", unsafe_allow_html=True)
     
-    # Initialize a global anti-spam timestamp tracker
+    # Initialize a global anti-spam timestamp tracker inside state storage
     if "last_transaction_time" not in st.session_state:
         st.session_state.last_transaction_time = 0.0
 
     v_key = st.session_state.cash_op_version
     with col2:
-            # Single master popover entry point to clear main dashboard space
-            with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", use_container_width=False):
-                st.markdown("### 🛠️ Strategy Capital Operations")
-                st.caption("Execute safe fluid balance adjustments for this active strategy context frame.")
+        # Single master popover entry point to clear main dashboard space
+        with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", use_container_width=False):
+            st.markdown("### 🛠️ Strategy Capital Operations")
+            st.caption("Execute safe fluid balance adjustments for this active strategy context frame.")
+            
+            # Dynamic transaction operation split selector
+            tx_mode = st.segmented_control(
+                "Select Operation Type",
+                options=["Deposit", "Withdraw"],
+                default="Deposit",
+                key=f"tx_mode_selector_v{v_key}",
+                label_visibility="collapsed"
+            )
+
+            # Pre-calculating UI states, colors, and boundary limits based on selected mode
+            if tx_mode == "Deposit":
+                mode_emoji = "📥"
+                mode_title = "Deposit Funds"
+                mode_color = "#10B981"
+                submit_label = "Confirm Inbound Deposit"
+                default_val = 1000.0
+                min_val = 1.0
+                max_val = None
+                step_val = 100.0
+                is_disabled = False
+                tx_type = "deposit"
+                memo_default = "Manual Cash Deposit"
+            else:
+                mode_emoji = "📤"
+                mode_title = "Withdraw Funds"
+                mode_color = "#EF4444"
+                submit_label = "Confirm Outbound Withdrawal"
+                has_cash = p_cash >= 1
+                default_val = float(min(1000, int(p_cash))) if has_cash else 1.0
+                min_val = 1.0
+                max_val = float(p_cash) if has_cash else 1.0
+                step_val = 100.0
+                is_disabled = not has_cash
+                tx_type = "withdrawal"
+                memo_default = "Manual Cash Withdrawal"
+
+            # High-visibility visual context header using the calculated mode color
+            st.markdown(
+                f"""
+                <div style='padding: 10px; border-left: 4px solid {mode_color}; background: rgba(255,255,255,0.02); border-radius: 4px; margin-bottom: 15px;'>
+                    <h4 style='margin: 0; color: {mode_color};'>{mode_emoji} {mode_title}</h4>
+                    <p style='margin: 4px 0 0 0; font-size: 12px; color: #94A3B8;'>Executing asset allocation changes inside this portfolio frame context.</p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+
+            # Unified transactional submission block form entry
+            with st.form(f"unified_capital_form_v{v_key}", clear_on_submit=True):
+                amount = st.number_input(
+                    "Amount ($)", 
+                    min_value=min_val, 
+                    max_value=max_val,
+                    value=default_val, 
+                    step=step_val,
+                    disabled=is_disabled,
+                    key=f"dynamic_amount_input_v{v_key}"
+                )
                 
-                # ------------------------------------------
-                # DYNAMIC TRANSACTION MODE SELECTOR
-                # ------------------------------------------
-                # ALL CODE FROM HERE DOWN MUST BE INDENTED UNDER THE POPOVER
-                tx_mode = st.segmented_control(
-                    "Select Operation Type",
-                    options=["Deposit", "Withdraw"],
-                    default="Deposit",
-                    key=f"tx_mode_selector_v{v_key}",
-                    label_visibility="collapsed"
+                note = st.text_input(
+                    "Memo/Reference", 
+                    value=memo_default, 
+                    key=f"dynamic_note_input_v{v_key}"
                 )
-
-                # Pre-calculating UI states, colors, and boundary limits based on selected mode
-                if tx_mode == "Deposit":
-                    mode_emoji = "📥"
-                    mode_title = "Deposit Funds"
-                    mode_color = "#10B981" # Emerald Green
-                    submit_label = "Confirm Inbound Deposit"
+                
+                if st.form_submit_button(submit_label, use_container_width=True, disabled=is_disabled):
+                    current_click_time = time.time()
+                    time_delta = current_click_time - st.session_state.last_transaction_time
                     
-                    # Kept as floats to prevent StreamlitMixedNumericTypesError
-                    default_val = 1000.0
-                    min_val = 1.0
-                    max_val = None
-                    step_val = 100.0
-                    is_disabled = False
-                    tx_type = "deposit"
-                    memo_default = "Manual Cash Deposit"
-                else:
-                    mode_emoji = "📤"
-                    mode_title = "Withdraw Funds"
-                    mode_color = "#EF4444" # Crimson Red
-                    submit_label = "Confirm Outbound Withdrawal"
-                    has_cash = p_cash >= 1
-                    
-                    # Kept as floats to prevent StreamlitMixedNumericTypesError
-                    default_val = float(min(1000, int(p_cash))) if has_cash else 1.0
-                    min_val = 1.0
-                    max_val = float(p_cash) if has_cash else 1.0
-                    step_val = 100.0
-                    is_disabled = not has_cash
-                    tx_type = "withdrawal"
-                    memo_default = "Manual Cash Withdrawal"
-
-                # High-visibility visual context header using the calculated mode color
-                st.markdown(
-                    f"""
-                    <div style='padding: 10px; border-left: 4px solid {mode_color}; background: rgba(255,255,255,0.02); border-radius: 4px; margin-bottom: 15px;'>
-                        <h4 style='margin: 0; color: {mode_color};'>{mode_emoji} {mode_title}</h4>
-                        <p style='margin: 4px 0 0 0; font-size: 12px; color: #94A3B8;'>Executing asset allocation changes inside this portfolio frame context.</p>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-
-                # ------------------------------------------
-                # UNIFIED DYNAMIC TRANSACTION FORM
-                # ------------------------------------------
-                with st.form(f"unified_capital_form_v{v_key}", clear_on_submit=True):
-                    
-                    # Context-aware number input enforcing live financial boundaries
-                    amount = st.number_input(
-                        "Amount ($)", 
-                        min_value=min_val, 
-                        max_value=max_val,
-                        value=default_val, 
-                        step=step_val,
-                        disabled=is_disabled,
-                        key=f"dynamic_amount_input_v{v_key}"
-                    )
-                    
-                    note = st.text_input(
-                        "Memo/Reference", 
-                        value=memo_default, 
-                        key=f"dynamic_note_input_v{v_key}"
-                    )
-                    
-                    # Submission handling with strict runtime validations
-                    if st.form_submit_button(submit_label, use_container_width=True, disabled=is_disabled):
-                        current_click_time = time.time()
-                        time_delta = current_click_time - st.session_state.last_transaction_time
+                    # Safety Layer 1: Anti-spam double click cooldown engine mitigation
+                    if time_delta < 5.0:
+                        remaining_time = 5.0 - time_delta
+                        countdown_text = st.empty()
+                        progress_bar = st.progress(0.0)
                         
-                        # Safety Layer 1: Anti-spam double click mitigation UI cooldown
-                        if time_delta < 5.0:
-                            remaining_time = 5.0 - time_delta
-                            countdown_text = st.empty()
-                            progress_bar = st.progress(0.0)
-                            
-                            while remaining_time > 0:
-                                countdown_text.warning(f"⏳ Action blocked to prevent duplicate submission. Cooling down: {remaining_time:.1f}s")
-                                progress_percent = min(max(remaining_time / 5.0, 0.0), 1.0)
-                                progress_bar.progress(progress_percent)
-                                time.sleep(0.1)
-                                remaining_time -= 0.1
-                            
-                            countdown_text.empty()
-                            progress_bar.empty()
+                        while remaining_time > 0:
+                            countdown_text.warning(f"⏳ Action blocked to prevent duplicate submission. Cooling down: {remaining_time:.1f}s")
+                            progress_percent = min(max(remaining_time / 5.0, 0.0), 1.0)
+                            progress_bar.progress(progress_percent)
+                            time.sleep(0.1)
+                            remaining_time -= 0.1
                         
-                        # Safety Layer 2: Hard cash boundary enforcement for withdrawals
-                        elif tx_type == "withdrawal" and amount > p_cash:
-                            st.error(f"🛑 Insufficient funds! You requested ${amount:,.2f} but only have ${p_cash:,.2f} available.")
+                        countdown_text.empty()
+                        progress_bar.empty()
+                    
+                    # Safety Layer 2: Hard cash balance boundary enforcement
+                    elif tx_type == "withdrawal" and amount > p_cash:
+                        st.error(f"🛑 Insufficient funds! You requested ${amount:,.2f} but only have ${p_cash:,.2f} available.")
+                    
+                    # Safety Layer 3: Execute ledger entry directly inside cloud engine context
+                    else:
+                        st.session_state.last_transaction_time = current_click_time
+                        with cloud_engine.connect() as tx_con:
+                            # Direct transaction proxy deployment sequence logic
+                            success, message = execute_cash_transaction(tx_con, portfolio_id, amount, tx_type, sim_date, note)
                         
-                        # Safety Layer 3: Secure database write and execution block
+                        if success:
+                            st.session_state.cash_op_version += 1
+                            st.toast(f"{mode_emoji} Processed ${amount:,.2f} successfully!")
+                            st.rerun()
                         else:
-                            st.session_state.last_transaction_time = current_click_time
-                            success, message = execute_cash_transaction(con, portfolio_id, amount, tx_type, sim_date, note)
-                            
-                            if success:
-                                st.session_state.cash_op_version += 1
-                                st.toast(f"{mode_emoji} Processed ${amount:,.2f} successfully!")
-                                st.rerun()
-                            else:
-                                st.error(message)
+                            st.error(message)
                             
     with col3:
-        
-
-        with st.popover("📜 Portfolio Cash History", use_container_width=True , width="stretch"):
-
-            df = get_portfolio_cash_history(con, portfolio_id, sim_date)
+        with st.popover("📜 Portfolio Cash History", use_container_width=True):
+            with cloud_engine.connect() as hist_con:
+                df = get_portfolio_cash_history(hist_con, portfolio_id, sim_date)
 
             if df.empty:
                 st.info("No cash history available.")
-
             else:
-                # =========================
-                # FILTER SECTION
-                # =========================
                 types = ["All"] + sorted(df["type"].dropna().unique().tolist())
-
                 selected_type = st.selectbox(
                     "Filter by type",
                     types,
@@ -1378,17 +1345,11 @@ def show_dashboard_home():
                 )
 
                 filtered_df = df.copy()
-
                 if selected_type != "All":
                     filtered_df = filtered_df[filtered_df["type"] == selected_type]
 
-                # =========================
-                # FORMAT FOR DISPLAY
-                # =========================
                 display_df = filtered_df.copy()
-
                 display_df["timestamp"] = pd.to_datetime(display_df["timestamp"]).dt.strftime("%Y-%m-%d")
-
                 display_df = display_df.sort_values("timestamp", ascending=False)
 
                 display_df = display_df.rename(columns={
@@ -1399,33 +1360,15 @@ def show_dashboard_home():
                 })
                 display_df["Amount"] = pd.to_numeric(display_df["Amount"], errors="coerce").fillna(0).round(2)
 
-
-                # =========================
-                # SIMPLE VISUAL ENHANCEMENT (SAFE FOR STREAMLIT)
-                # =========================
                 def highlight_type(row):
-
-                    tx_type = str(row["Type"]).lower()
-                    amount = float(row["Amount"])
-
-                    # Dividends → green
-                    if tx_type == "dividend":
-                        return [
-                            "background-color: rgba(34,197,94,0.12); color:#166534; font-weight:600;"
-                        ] * len(row)
-
-                    # Money entering account → blue
-                    elif amount > 0:
-                        return [
-                            "background-color: rgba(59,130,246,0.10); color:#1D4ED8;"
-                        ] * len(row)
-
-                    # Money leaving account → red
-                    elif amount < 0:
-                        return [
-                            "background-color: rgba(239,68,68,0.10); color:#991B1B;"
-                        ] * len(row)
-
+                    tx_type_str = str(row["Type"]).lower()
+                    amount_val = float(row["Amount"])
+                    if tx_type_str == "dividend":
+                        return ["background-color: rgba(34,197,94,0.12); color:#166534; font-weight:600;"] * len(row)
+                    elif amount_val > 0:
+                        return ["background-color: rgba(59,130,246,0.10); color:#1D4ED8;"] * len(row)
+                    elif amount_val < 0:
+                        return ["background-color: rgba(239,68,68,0.10); color:#991B1B;"] * len(row)
                     return [""] * len(row)
 
                 styled_df = (
@@ -1433,9 +1376,7 @@ def show_dashboard_home():
                     .apply(highlight_type, axis=1)
                     .format({"Amount": "{:,.2f}"})
                 )
-                # =========================
-                # RENDER
-                # =========================
+                
                 st.dataframe(
                     styled_df,
                     use_container_width=True,
@@ -1447,11 +1388,11 @@ def show_dashboard_home():
     # ==========================================
     # STEP 5: SECURITIES HOLDINGS LEDGER MATRIX
     # ==========================================
-    
     st.markdown("<p style='font-size:12px; font-weight:bold; color:#64748B; text-transform:uppercase; margin-bottom:5px;'>📊 Strategy Asset Allocation Ledger</p>", unsafe_allow_html=True)
     
-    render_holdings_table(con, portfolio_id, sim_date)
-    
+    with cloud_engine.connect() as holdings_con:
+        render_holdings_table(holdings_con, portfolio_id, sim_date)
+
 ###########################    
     
 def dashboard_sidebar():

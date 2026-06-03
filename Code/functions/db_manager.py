@@ -244,14 +244,19 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     """
     Computes the total financial valuation of a specific portfolio (Available Cash + Market Value of Holdings)
     at a given historical timestamp slice using cloud-native engines.
-    
-    Tables accessed:
-    1. portfolios (available_cash)
-    2. holdings (asset_id, quantity)
-    3. prices (asset_id, timestamp, close)
+    All source documentation and comments are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
     should_close = False
+
+    # --- DEFENSIVE REALIGNMENT ---
+    # If the positional arguments are mixed up in legacy UI calls, safely swap them
+    if hasattr(timestamp, 'execute'):
+        con, timestamp = timestamp, con
+
+    # If the legacy DuckDB connection leaks in, bypass it and force cloud engine connectivity
+    if con is not None and ('duckdb' in str(type(con)).lower() or not hasattr(con, 'begin')):
+        con = None 
 
     # Dynamic operational routing: Use passed active transaction context or spin up an isolated engine connection
     if con is None:
@@ -262,8 +267,6 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     try:
         ### --- STEP 1: QUERY RELEVANT SNAPSHOT DATA FROM CLOUD DB --- ###
         
-        # Pull asset inventory positioning layers matched against the closest historical market price
-        # Transformed legacy DuckDB positional syntax '?' into cloud-compatible named binding parameters
         query = text("""
             SELECT 
                 h.asset_id, 
@@ -281,7 +284,6 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
             )
         """)
         
-        # Execute query and parse the structural output payload matrix cleanly into a pandas DataFrame
         result_assets = con.execute(query, {"portfolio_id": portfolio_id, "timestamp": timestamp}).fetchall()
         
         if result_assets:
@@ -306,10 +308,7 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
         
         ### --- STEP 2: AGGREGATE TOTAL NET VALUE --- ###
         
-        # Safely compute total historical assets layout valuations
         total_market_value = float(df_assets_holdings['market_value'].sum()) if not df_assets_holdings.empty else 0.0
-        
-        # Final absolute consolidated valuation aggregation
         total_portfolio_value = portfolio_cash + total_market_value
         
         logger.info(
@@ -324,10 +323,9 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
         raise calc_error
         
     finally:
-        # Prevent connection leaks: safely close the interface connection if initialized within this lifecycle loop
         if should_close:
             con.close()
-            
+     
             
 # for making sure no dubble writing happens leading to a crash
 def is_action_allowed(wait_time=2):
