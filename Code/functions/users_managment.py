@@ -36,33 +36,33 @@ def loggin_func(email, entered_password):
     If successful, returns (user_id, first_name).
     If authentication fails, returns (None, None).
     """
-    # 1. Fetch user data using %s format for PostgreSQL and LOWER() for case insensitivity
+    # 1. FIXED: Changed %s to :email to support SQLAlchemy text() format combined with LOWER()
     query = """
         SELECT user_id, first_name, email, password_hash 
         FROM users
-        WHERE LOWER(email) = LOWER(%s)
+        WHERE LOWER(email) = LOWER(:email)
         LIMIT 1
     """
-    # Pass params as a tuple (email,) instead of a list [email]
-    df_login = get_data(query, (email,), use_cloud=True)
     
-    # 2. Validate if the email exists in the system
+    # 2. FIXED: Passed params as a dictionary mapping 'email' to the variable
+    df_login = get_data(query, {"email": email}, use_cloud=True)
+    
+    # 3. Validate if the email exists in the system
     if df_login.empty:
         st.warning("Unknown Email")
         return None, None
     
-    # 3. Extract the stored cryptographic hash
+    # 4. Extract the stored cryptographic hash
     stored_hash = df_login.iloc[0]['password_hash']
     
-    # 4. Verify the password match using bcrypt
+    # 5. Verify the password match using bcrypt
     if not bcrypt.checkpw(entered_password.encode('utf-8'), stored_hash.encode('utf-8')):
         st.warning("Wrong password")
         return None, None
     
-    # 5. Credentials are valid; return session identifiers
+    # 6. Credentials are valid; return session identifiers
     return int(df_login.iloc[0]['user_id']), df_login.iloc[0]['first_name']
-    
-    
+
     
 # for registration  
 def registration_func(email, first_name, middle_name, last_name, date_of_birth, raw_password, raw_password_confirm):
@@ -70,6 +70,7 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
     Validates user credentials and signs up a new user.
     Coordinates a Dual-Write process to save user details to both 
     the external Supabase cloud database and the local DuckDB instance.
+    All source documentation and comments are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
     
@@ -118,9 +119,9 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
 
     # ---- STEP 2: Database Cross-Checking (Cloud First) ----
     
-    # Verify if email already exists globally in the cloud database
-    email_check_query = "SELECT 1 FROM users WHERE email = ? LIMIT 1"
-    df_email = get_data(email_check_query, [email], use_cloud=True)
+    # FIXED: Convert to named parameter syntax to comply with internal get_data text() wrapping
+    email_check_query = "SELECT 1 FROM users WHERE email = :email LIMIT 1"
+    df_email = get_data(email_check_query, {"email": email}, use_cloud=True)
     
     if not df_email.empty:
         logger.warning(f"Registration failed: Email '{email}' is already registered.")
@@ -151,7 +152,7 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
         param_dict = {
             "email": email,
             "first_name": first_name,
-            "middle_name": middle_name,
+            "middle_name": middle_name if middle_name else None,
             "last_name": last_name,
             "date_of_birth": dob_str,
             "password_hash": hashed_password
@@ -184,3 +185,4 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
 
     logger.info(f"New user with ID {new_user_id} has been registered successfully across systems.")
     return True
+
