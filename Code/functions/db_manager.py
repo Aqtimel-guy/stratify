@@ -97,65 +97,68 @@ def get_data(query, params=None, use_cloud=False):
         return con.execute(query).df()
 
 # for getting assets details 
-# for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
     Fetches comprehensive info about a specific asset as of the simulation date.
-    Includes a fail-safe fallback to local storage if cloud layers hit storage catalog blocks.
+    Uses Pandas as a network buffer layer to bypass DuckDB network catalog restrictions.
     """
     base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
+    ticker_upper = ticker.upper()
     
-    # 1. Resolve storage sources dynamically (Cloud direct HTTPS URL vs Local table structure)
+    # 1. Resolve and extract assets data profile safely
     if use_cloud:
-        assets_source = f"read_parquet('{base_cloud_url}/assets.parquet')"
-        prices_source = f"read_parquet('{base_cloud_url}/prices.parquet')"
+        try:
+            # Using Pandas read_parquet directly as it has a more stable native HTTP client layer
+            df_all_assets = pd.read_parquet(f"{base_cloud_url}/assets.parquet")
+            df_asset = df_all_assets[df_all_assets['ticker'] == ticker_upper].copy()
+        except Exception as cloud_err:
+            st.sidebar.warning(f"⚠️ Cloud assets sync failed: {cloud_err}. Defaulting to local engine.")
+            query_asset = "SELECT asset_id, ticker, name, sector, industry FROM assets WHERE ticker = ?"
+            df_asset = con.execute(query_asset, [ticker_upper]).df()
+            use_cloud = False # Force local fallback execution for subsequent queries
     else:
-        assets_source = "assets"
-        prices_source = "prices"
-    
-    # 2. Fetch core metadata from assets catalog using exact parameterized inputs
-    query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {assets_source} WHERE ticker = ?"
-    
-    try:
-        df_asset = con.execute(query_asset, [ticker.upper()]).df()
-    except Exception as cloud_error:
-        # Fail-safe local database backup implementation if remote catalog configuration fails
-        if use_cloud:
-            st.sidebar.warning("⚠️ Cloud storage query failed. Falling back to local data engine.")
-            assets_source = "assets"
-            prices_source = "prices"
-            query_asset = f"SELECT asset_id, ticker, name, sector, industry FROM {assets_source} WHERE ticker = ?"
-            df_asset = con.execute(query_asset, [ticker.upper()]).df()
-        else:
-            raise cloud_error
-            
+        query_asset = "SELECT asset_id, ticker, name, sector, industry FROM assets WHERE ticker = ?"
+        df_asset = con.execute(query_asset, [ticker_upper]).df()
+        
     if df_asset.empty:
         return None
 
-    # Extract foundational properties from row index
-    asset_id = df_asset.iloc[0]['asset_id']
+    # Extract foundational schema attributes from vector index
+    asset_id = int(df_asset.iloc[0]['asset_id'])
     ticker_name = df_asset.iloc[0]['ticker']
     name = df_asset.iloc[0]['name']
     sector = df_asset.iloc[0]['sector']
     industry = df_asset.iloc[0]['industry']
 
-    # 3. Fetch the latest available price up to current simulation runtime cutoff date
-    query_price = f"""
-        SELECT close, timestamp 
-        FROM {prices_source} 
-        WHERE asset_id = ? AND timestamp <= ? 
-        ORDER BY timestamp DESC 
-        LIMIT 1
-    """
-    df_price = con.execute(query_price, [int(asset_id), sim_date]).df()
-    current_price = df_price.iloc[0]['close'] if not df_price.empty else None
+    # 2. Extract price history calculations based on structural storage flags
+    if use_cloud:
+        try:
+            df_all_prices = pd.read_parquet(f"{base_cloud_url}/prices.parquet")
+            
+            # Filter rows utilizing native pandas vectors before final calculation arrays
+            df_filtered_prices = df_all_prices[
+                (df_all_prices['asset_id'] == asset_id) & 
+                (df_all_prices['timestamp'] <= sim_date)
+            ].sort_values(by='timestamp', ascending=True)
+            
+            current_price = df_filtered_prices.iloc[-1]['close'] if not df_filtered_prices.empty else None
+            first_trade_date = df_all_prices[df_all_prices['asset_id'] == asset_id]['timestamp'].min() if not df_all_prices.empty else None
+            
+        except Exception as price_cloud_err:
+            st.sidebar.error(f"⚠️ Cloud pricing matrix mismatch: {price_cloud_err}")
+            use_cloud = False # Secondary safeguard fallback execution trigger
+            
+    # Standard local calculation engine architecture deployment fallback
+    if not use_cloud:
+        query_price = "SELECT close FROM prices WHERE asset_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1"
+        df_price = con.execute(query_price, [asset_id, sim_date]).df()
+        current_price = df_price.iloc[0]['close'] if not df_price.empty else None
 
-    # 4. Fetch the absolute earliest active trade date mapped to this identifier
-    query_first_date = f"SELECT MIN(timestamp) as min_ts FROM {prices_source} WHERE asset_id = ?"
-    df_first_date = con.execute(query_first_date, [int(asset_id)]).df()
-    first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
+        query_first_date = "SELECT MIN(timestamp) as min_ts FROM prices WHERE asset_id = ?"
+        df_first_date = con.execute(query_first_date, [asset_id]).df()
+        first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
 
-    # 5. Check active portfolio data tracking layers for current quantity holdings
+    # 3. Process active holding data layers via application session criteria
     portfolio_id = st.session_state.get('current_portfolio_id')
     shares_held = 0
     if portfolio_id:
@@ -163,7 +166,7 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         holdings_source = "holdings_cloud" if use_cloud_portfolio else "holdings"
         
         query_holdings = f"SELECT quantity FROM {holdings_source} WHERE portfolio_id = ? AND asset_id = ?"
-        df_holdings = con.execute(query_holdings, [int(portfolio_id), int(asset_id)]).df()
+        df_holdings = con.execute(query_holdings, [int(portfolio_id), asset_id]).df()
         shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
 
     return {
@@ -177,7 +180,6 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         "shares_held": shares_held,
         "total_value_held": shares_held * current_price if current_price else 0
     }
-
 
 # for getting all the data over an asset up to a sim_time
 def get_asset_full_data(ticker, sim_time, portfolio_id=None):
