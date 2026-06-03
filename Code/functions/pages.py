@@ -310,7 +310,7 @@ def show_home_page():
                  SELECT first_name 
                  FROM users
                  WHERE user_id = ?
-                 """, [int(st.session_state.user_id)])
+                 """, [int(st.session_state.user_id)], use_cloud=True)
             
             if not user_data.empty:
                 st.session_state.first_name = user_data.iloc[0, 0]
