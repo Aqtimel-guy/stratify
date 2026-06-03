@@ -707,56 +707,98 @@ def show_asset_analysis_dialog(asset_ticker):
         return
         
     con = st.session_state.con
+    use_cloud = st.session_state.get('use_cloud', False)
+    base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
+    asset_ticker_upper = asset_ticker.upper()
     
-    asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
-    if not asset_data:
-        st.error("Asset not found")
-        return
-    
-    a_id, a_name, a_sector = asset_data
+    # Resolve core asset details based on infrastructure state
+    if use_cloud:
+        try:
+            df_all_assets = pd.read_parquet(f"{base_cloud_url}/assets.parquet")
+            df_selected_asset = df_all_assets[df_all_assets['ticker'] == asset_ticker_upper]
+            if df_selected_asset.empty:
+                st.error("Asset not found in cloud layer")
+                return
+            a_id = int(df_selected_asset.iloc[0]['asset_id'])
+            a_name = df_selected_asset.iloc[0]['name']
+            a_sector = df_selected_asset.iloc[0]['sector']
+        except Exception as cloud_err:
+            st.error(f"Cloud metadata sync failed: {cloud_err}")
+            return
+    else:
+        asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker_upper]).fetchone()
+        if not asset_data:
+            st.error("Asset not found locally")
+            return
+        a_id, a_name, a_sector = asset_data
+        
     sim_date = st.session_state.current_sim_date
 
-    st.title(f"{a_name} ({asset_ticker})")
+    st.title(f"{a_name} ({asset_ticker_upper})")
     st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d')}")
 
-    # 2. Querying historical pricing dataset up to current simulation runtime cutoff
-    price_df = con.execute("""
-        SELECT timestamp, close, volume 
-        FROM prices 
-        WHERE asset_id = ? AND timestamp <= ?
-        ORDER BY timestamp ASC
-    """, [a_id, sim_date]).df()
+    # 2. Fetch datasets dynamically from Cloud (Pandas) or Local (DuckDB)
+    if use_cloud:
+        try:
+            # Pricing dataset acquisition
+            df_all_prices = pd.read_parquet(f"{base_cloud_url}/prices.parquet")
+            price_df = df_all_prices[
+                (df_all_prices['asset_id'] == a_id) & 
+                (df_all_prices['timestamp'] <= sim_date)
+            ].sort_values(by='timestamp', ascending=True)
+            
+            # Fundamentals dataset acquisition
+            df_all_fund = pd.read_parquet(f"{base_cloud_url}/fundamentals.parquet")
+            df_filtered_fund = df_all_fund[
+                (df_all_fund['asset_id'] == a_id) & 
+                (df_all_fund['timestamp'] <= sim_date)
+            ].sort_values(by='timestamp', ascending=False)
+            fund_data = df_filtered_fund.iloc[0][['pe_ratio', 'market_cap', 'revenue', 'eps']].tolist() if not df_filtered_fund.empty else None
+            
+            # Strategic factor indices acquisition
+            df_all_factors = pd.read_parquet(f"{base_cloud_url}/asset_factors_normalized_final.parquet")
+            factors_data = df_all_factors[
+                (df_all_factors['asset_id'] == a_id) & 
+                (df_all_factors['timestamp'] <= sim_date) & 
+                (df_all_factors['timestamp'] >= sim_date - pd.Timedelta(weeks=1))
+            ]
+        except Exception as data_cloud_err:
+            st.error(f"Failed to fetch sub-tables from cloud layer: {data_cloud_err}")
+            return
+    else:
+        price_df = con.execute("""
+            SELECT timestamp, close, volume 
+            FROM prices 
+            WHERE asset_id = ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+        """, [a_id, sim_date]).df()
 
-    # 3. Querying most recent fundamental matrix metrics proximal to simulation date
-    fund_data = con.execute("""
-        SELECT pe_ratio, market_cap, revenue, eps 
-        FROM fundamentals 
-        WHERE asset_id = ? AND timestamp <= ?
-        ORDER BY timestamp DESC LIMIT 1
-    """, [a_id, sim_date]).fetchone()
+        fund_data = con.execute("""
+            SELECT pe_ratio, market_cap, revenue, eps 
+            FROM fundamentals 
+            WHERE asset_id = ? AND timestamp <= ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, [a_id, sim_date]).fetchone()
+        
+        factors_data = con.execute("""
+            SELECT *
+            FROM asset_factors_normalized_final
+            WHERE asset_id = ?
+              AND timestamp <= ?
+              AND timestamp >= ? + INTERVAL '-1 week'
+        """, [a_id, sim_date, sim_date]).df()
     
-    # 4. Querying normalized strategy factor indices for comparative mapping analysis
-    factors_data = con.execute("""
-        SELECT *
-        FROM asset_factors_normalized_final
-        WHERE asset_id = ?
-          AND timestamp <= ?
-          AND timestamp >= ? + INTERVAL '-1 week'
-    """, [a_id, sim_date, sim_date]).df()
-    
-    # Structural presentation initialization via multi-tab layout controls
+    # Presentation initialization via tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
 
     with tab1:
-        # Segmented time window scoping configuration
         time_range = st.segmented_control(
             "Select Range",
             options=["1W", "1M", "6M", "1Y", "All"],
             default="1W",
-            key=f"range_{asset_ticker}"
+            key=f"range_{asset_ticker_upper}"
         )
 
-        # Dynamic delta lookback window calculation based on user tier choice
         end_date = st.session_state.current_sim_date
         if time_range == "1W":
             start_date = end_date - timedelta(days=7)
@@ -769,25 +811,25 @@ def show_asset_analysis_dialog(asset_ticker):
         else: # "All"
             start_date = pd.Timestamp.min
 
-        # Query executing isolated pricing arrays constrained by custom window
-        filtered_price_df = con.execute("""
-            SELECT timestamp, close 
-            FROM prices 
-            WHERE asset_id = ? 
-              AND timestamp <= ? 
-              AND timestamp >= ?
-            ORDER BY timestamp ASC
-        """, [a_id, end_date, start_date]).df()
+        # Slice price dataset using vectorized pandas filtering for cloud or standard SQL for local
+        if use_cloud:
+            filtered_price_df = price_df[(price_df['timestamp'] <= end_date) & (price_df['timestamp'] >= start_date)].sort_values(by='timestamp', ascending=True)
+        else:
+            filtered_price_df = con.execute("""
+                SELECT timestamp, close 
+                FROM prices 
+                WHERE asset_id = ? 
+                  AND timestamp <= ? 
+                  AND timestamp >= ?
+                ORDER BY timestamp ASC
+            """, [a_id, end_date, start_date]).df()
 
-        # Data layout optimization and linear plotting processing
         if not filtered_price_df.empty:
             first_price = filtered_price_df['close'].iloc[0]
             last_price = filtered_price_df['close'].iloc[-1]
-            
             abs_change = last_price - first_price
             pct_change = (abs_change / first_price) * 100
             
-            # Dynamic asset styling profiles depending on absolute growth directional delta
             if abs_change >= 0:
                 chart_color = '#2ecc71'
                 fill_color = 'rgba(46, 204, 113, 0.1)'
@@ -797,21 +839,16 @@ def show_asset_analysis_dialog(asset_ticker):
                 fill_color = 'rgba(231, 76, 60, 0.1)'
                 delta_color = "inverse" 
 
-            # Metric telemetry row injection above visualization canvas
             col_m1, col_m2, col_m3 = st.columns(3)
-            
             with col_m1:
                 st.metric("Price", f"${last_price:,.2f}")
-            
             with col_m2:
                 st.metric("Change ($)", f"{abs_change:+,.2f}$", delta_color=delta_color)
-                
             with col_m3:
                 st.metric("Change (%)", f"{pct_change:+.2f}%", delta_color=delta_color)
                 
             st.divider()
 
-            # Axis tracking padding configuration properties
             y_min = filtered_price_df['close'].min()
             y_max = filtered_price_df['close'].max()
             padding = (y_max - y_min) * 0.15
@@ -859,161 +896,132 @@ def show_asset_analysis_dialog(asset_ticker):
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
         
-        # 1. Fetch user-defined strategy preferences
+        # User defined metrics (Kept on local engine stack)
         strategies_df = con.execute("""
             SELECT * FROM user_preferences_strategy 
             WHERE user_id = ? AND portfolio_id = ?
         """, [u_id, p_id]).df()
 
-        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy or create one in the Strategy Builder page")
-        if not strategies_df.empty:
+        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy")
+        if not strategies_df.empty and selected_name:
             strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-        # 2. Safe verification of asset node identifier map
-        check_asset = con.execute("SELECT asset_id FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
-        
-        if not check_asset:
-            st.error(f"Ticker {asset_ticker} not found in 'assets' table.")
+        # Extract context matrix records
+        if use_cloud:
+            stock_data = factors_data.sort_values(by='timestamp', ascending=False).head(1)
         else:
-            a_id = check_asset[0]
             stock_data = con.execute("""
                 SELECT * FROM asset_factors_normalized_final 
                 WHERE asset_id = ? 
                 ORDER BY timestamp DESC LIMIT 1
             """, [a_id]).df()
 
-            if stock_data.empty:
-                st.warning(f"No factors found for {asset_ticker} (ID: {a_id}) in 'asset_factors_normalized_final'.")
-                count_test = con.execute("SELECT COUNT(*) FROM asset_factors_normalized_final").fetchone()[0]
-                st.write(f"Total rows in factors table: {count_test}")
-            else:
-                # 3. Factor configuration mapping arrays
-                comparison_map = {
-                    "momentum_preference": "momentum_factor_market", 
-                    "value_preference": "value_factor_market",
-                    "quality_preference": "quality_factor_market",
-                    "growth_preference": "growth_factor_market",
-                    "defensive_preference": "defensive_factor_market",
-                    "size_preference": "size_factor_market",
+        if stock_data.empty:
+            st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
+        else:
+            comparison_map = {
+                "momentum_preference": "momentum_factor_market", 
+                "value_preference": "value_factor_market",
+                "quality_preference": "quality_factor_market",
+                "growth_preference": "growth_factor_market",
+                "defensive_preference": "defensive_factor_market",
+                "size_preference": "size_factor_market",
+            }
+            
+            h1, h2, h3 = st.columns([1, 2, 1.5])
+            h1.caption("FACTOR")
+            h2.caption("ASSET PERFORMANCE (0-100)")
+            h3.caption("STRATEGY MATCH")
+
+            for pref_col, actual_col in comparison_map.items():
+                if strategies_df.empty:
+                    target_val = 0
+                else:
+                    target_val = float(strat_row.get(pref_col, 50))
+                    
+                actual_val = float(stock_data.iloc[0].get(actual_col, 0))
+                
+                diff = abs(target_val - actual_val)
+                match_pct = max(0, 100 - diff)
+                gap = actual_val - target_val
+
+                if actual_val >= 70:
+                    score_color = "#28a745"  
+                elif actual_val >= 40:
+                    score_color = "#ffc107"  
+                else:
+                    score_color = "#dc3545"  
+
+                if match_pct >= 70:
+                    match_color = "#28a745"  
+                elif match_pct >= 50:
+                    match_color = "#1f77b4"  
+                elif match_pct >= 30:
+                    match_color = "#ffc107"  
+                else:
+                    match_color = "#dc3545"  
+
+                c1, c2, c3 = st.columns([1, 2, 1.5])
+                factor_key = actual_col.replace('_factor_market', '').lower()
+                label = factor_key.capitalize()
+
+                FACTOR_HELP = {
+                    "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend.",
+                    "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to fundamentals.",
+                    "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health.",
+                    "growth": "**Growth Factor**\n\nIdentifies companies expanding business rapidly.",
+                    "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction.",
+                    "size": "**Size Factor**\n\nCaptures the Small-Cap Effect profile metrics."
                 }
                 
-                # Render clean header alignment layouts
-                h1, h2, h3 = st.columns([1, 2, 1.5])
-                h1.caption("FACTOR")
-                h2.caption("ASSET PERFORMANCE (0-100)")
-                h3.caption("STRATEGY MATCH")
+                help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
 
-                for pref_col, actual_col in comparison_map.items():
-                    if strategies_df.empty:
-                        target_val = 0
-                    else:
-                        target_val = float(strat_row.get(pref_col, 50))
-                        
-                    actual_val = float(stock_data.iloc[0].get(actual_col, 0))
-                    
-                    # Compute structural metrics (similarity coefficient delta matrix)
-                    diff = abs(target_val - actual_val)
-                    match_pct = max(0, 100 - diff)
-                    gap = actual_val - target_val
+                with c1:
+                    st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
+                    st.markdown(f"**{label}**", help=help_text)
 
-                    # Evaluation parameters for core factor spectrum coloration thresholds
-                    if actual_val >= 70:
-                        score_color = "#28a745"  
-                    elif actual_val >= 40:
-                        score_color = "#ffc107"  
-                    else:
-                        score_color = "#dc3545"  
-
-                    # Strategic matrix alignment indicator calculations
-                    if match_pct >= 70:
-                        match_color = "#28a745"  
-                    elif match_pct >= 50:
-                        match_color = "#1f77b4"  
-                    elif match_pct >= 30:
-                        match_color = "#ffc107"  
-                    else:
-                        match_color = "#dc3545"  
-
-                    c1, c2, c3 = st.columns([1, 2, 1.5])
-
-                    # Formatting text label mapping engines
-                    factor_key = actual_col.replace('_factor_market', '').replace('_factor_sector', '').lower()
-                    label = factor_key.capitalize()
-
-                    FACTOR_HELP = {
-                        "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend. Based on:\n\n **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n **Relative Strength:** Outperforming the S&P 500 index.\n\n **Trend Health:** Price position relative to long-term averages.",
-                        "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to their fundamentals. Based on:\n\n **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n **Dividend Yield:** Yearly dividend payments relative to the stock price.",
-                        "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health and efficient operations. Based on:\n\n **Profitability:** Net income relative to revenue (Profit Margins).\n\n **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
-                        "growth": "**Growth Factor**\n\nIdentifies companies expanding their business rapidly over the past year. Based on:\n\n **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
-                        "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
-                        "size": "**Size Factor**\n\nCaptures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n **Growth Potential:** Targets agile firms with more room for exponential expansion.",
-                        "liquidity": "**Liquidity Factor**\n\nMeasures how easily you can enter or exit a position without affecting the stock price.\n\n **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
-                    }
-                    
-                    help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
-
-                    with c1:
-                        st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
-                        st.markdown(f"**{label}**", help=help_text)
-
-                    # Dynamic HTML rendering frame for factor bars
-                    bar_html = f"""
-                    <div style="margin-top: 5px; padding-right: 15px;">
-                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-                            <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
-                            <span style="font-size: 0.7rem; color: gray;"></span>
-                        </div>
-                        <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
-                            <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
-                        </div>
+                bar_html = f"""
+                <div style="margin-top: 5px; padding-right: 15px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+                        <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
                     </div>
-                    """
-                    c2.markdown(bar_html, unsafe_allow_html=True)
+                    <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
+                        <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
+                    </div>
+                </div>
+                """
+                c2.markdown(bar_html, unsafe_allow_html=True)
 
-                    with c3:
-                        if strategies_df.empty:
-                            st.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
+                with c3:
+                    if strategies_df.empty:
+                        st.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
+                    else:
+                        if match_pct >= 85:
+                            fit_label = "Perfect Match"; icon = "🌟"
+                        elif match_pct >= 70:
+                            fit_label = "Good Fit"; icon = "✅"
+                        elif match_pct >= 50:
+                            fit_label = "Slight Deviation"; icon = "⚖️"
                         else:
-                            if match_pct >= 85:
-                                fit_label = "Perfect Match"
-                                icon = "🌟"
-                            elif match_pct >= 70:
-                                fit_label = "Good Fit"
-                                icon = "✅"
-                            elif match_pct >= 50:
-                                fit_label = "Slight Deviation"
-                                icon = "⚖️"
-                            else:
-                                if gap > 0:
-                                    fit_label = "Too High"
-                                else:
-                                    fit_label = "Too Low"
-                                icon = "⚠️"
+                            fit_label = "Too High" if gap > 0 else "Too Low"; icon = "⚠️"
 
-                            st.markdown(f"""
-                                <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
-                                    <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
-                                        {icon} {fit_label}
-                                    </div>
-                                    <div style='font-size: 0.75rem; color: #888;'>
-                                        {match_pct:.0f}% similarity
-                                    </div>
-                                    <div style='margin-top: 4px;'>
-                                        <span style='font-size: 0.65rem; background-color: #f1f3f5; padding: 2px 6px; border-radius: 10px; color: #444;'>
-                                            Target: {target_val:.0f}
-                                        </span>
-                                    </div>
+                        st.markdown(f"""
+                            <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
+                                <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
+                                    {icon} {fit_label}
                                 </div>
-                            """, unsafe_allow_html=True)
-
-                    st.divider()     
+                                <div style='font-size: 0.75rem; color: #888;'>
+                                    {match_pct:.0f}% similarity
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                st.divider()     
     
     with tab4:
-        # Integrated visualization segment mapping structural node placement matrix
         try:
             st.divider()
             st.subheader("📊 Factor Positioning")
-            render_stock_factor_maps(con, asset_ticker)
+            render_stock_factor_maps(con, asset_ticker_upper)
             st.divider()
         except Exception as e:
             st.warning(f"Factor visualization unavailable: {e}")
