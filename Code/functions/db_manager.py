@@ -421,15 +421,37 @@ def is_action_allowed(wait_time=2):
     return True   
 
 # for setting initial states 
-# also helps keeping track of sessio_state variables
-
+# also helps keeping track of session_state variables
 def init_session_state():
-    """מגדירה את כל ערכי ברירת המחדל של האפליקציה"""
+    """
+    Initializes system-wide default session state variables for navigation, 
+    user authentication context, portfolio state tracking, and establishes
+    the core persistent connection driver for the local database catalog architecture.
+    """
+    # -------------------------------------------------------------------------
+    # CORE DATABASE CONTEXT ESTABLISHMENT
+    # -------------------------------------------------------------------------
+    # Ensure a single unified connection context exists across script executions
+    if 'con' not in st.session_state:
+        # Resolve path dynamically from session state registry (defaults to local)
+        resolved_db_path = st.session_state.get('DB_PATH', 'stratify.duckdb')
+        
+        try:
+            # Connect directly to the physical storage file containing local configurations
+            # read_only=False allows mutation of user preference matrices safely
+            st.session_state.con = duckdb.connect(database=resolved_db_path, read_only=False)
+        except Exception as conn_error:
+            st.error(f"Critical System Failure: Unable to bind data pipeline driver. Info: {conn_error}")
+            st.session_state.con = None
+
+    # -------------------------------------------------------------------------
+    # APP INITIALIZATION STATE VARIABLES
+    # -------------------------------------------------------------------------
     if 'initialized' not in st.session_state:
         # --- navigation ---
-        st.session_state.page = "login_page"    # defult page
+        st.session_state.page = "login_page"    # default target landing zone
         
-        # --- user ---
+        # --- user authentication context ---
         st.session_state.logged_in = False
         st.session_state.reg_success = False
         st.session_state.user_id = None
@@ -437,7 +459,7 @@ def init_session_state():
         st.session_state.prefilled_email = ""
         st.session_state.my_portfolios = []
 
-        # ---portfolio ---
+        # --- active backtest portfolio matrix ---
         st.session_state.my_portfolios_df = None
         st.session_state.current_portfolio_id = None
         st.session_state.current_portfolio_name = None
@@ -446,7 +468,7 @@ def init_session_state():
         st.session_state.current_available_cash = None
         st.session_state.current_sim_date_display = None
 
-        ### initializing
+        # --- execution lifecycle & system logging metrics ---
         st.session_state.last_action_time = 0
         st.session_state.initialized = True
 
