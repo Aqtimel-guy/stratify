@@ -700,6 +700,7 @@ def show_asset_analysis_dialog(asset_ticker):
     """
     Renders a comprehensive quantitative analysis modal popup window for a selected asset.
     Handles temporal slice queries across pricing, fundamentals, and strategic factor indices.
+    Safely resolves catalog contexts to prevent database isolation drops inside cloud threads.
     """
     # 1. Extraction of basic metadata and validation of active data architecture
     if 'con' not in st.session_state:
@@ -707,6 +708,12 @@ def show_asset_analysis_dialog(asset_ticker):
         return
         
     con = st.session_state.con
+    
+    # SAFETIES: If running inside an isolated dialog thread, ensure the catalog is bound to the file
+    if con is None:
+        db_path = st.session_state.get('DB_PATH', 'stratify.duckdb')
+        con = duckdb.connect(database=db_path, read_only=False)
+        
     asset_ticker_upper = asset_ticker.upper()
     
     # Context query executed smoothly via standard database driver routing
@@ -719,7 +726,7 @@ def show_asset_analysis_dialog(asset_ticker):
     sim_date = st.session_state.current_sim_date
 
     st.title(f"{a_name} ({asset_ticker_upper})")
-    st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d')}")
+    st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)}")
 
     # 2. Fetch tracking datasets via modern virtual relation routing architectures
     price_df = con.execute("""
@@ -849,101 +856,106 @@ def show_asset_analysis_dialog(asset_ticker):
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
         
-        strategies_df = con.execute("""
-            SELECT * FROM user_preferences_strategy 
-            WHERE user_id = ? AND portfolio_id = ?
-        """, [u_id, p_id]).df()
+        # Safe fallback schema cross-check for user preference storage matrices
+        try:
+            strategies_df = con.execute("""
+                SELECT * FROM user_preferences_strategy 
+                WHERE user_id = ? AND portfolio_id = ?
+            """, [u_id, p_id]).df()
+        except duckdb.CatalogException:
+            # If explicit thread context lost connection binding, reconnect directly
+            fallback_db = duckdb.connect(database=st.session_state.get('DB_PATH', 'stratify.duckdb'), read_only=False)
+            strategies_df = fallback_db.execute("""
+                SELECT * FROM user_preferences_strategy 
+                WHERE user_id = ? AND portfolio_id = ?
+            """, [u_id, p_id]).df()
 
-        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy")
-        if not strategies_df.empty and selected_name:
-            strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
-
-        stock_data = con.execute("""
-            SELECT * FROM asset_factors_normalized_final 
-            WHERE asset_id = ? 
-            ORDER BY timestamp DESC LIMIT 1
-        """, [a_id]).df()
-
-        if stock_data.empty:
-            st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
+        if strategies_df.empty:
+            st.info("No customized asset target strategies formulated for this portfolio yet.")
         else:
-            comparison_map = {
-                "momentum_preference": "momentum_factor_market", 
-                "value_preference": "value_factor_market",
-                "quality_preference": "quality_factor_market",
-                "growth_preference": "growth_factor_market",
-                "defensive_preference": "defensive_factor_market",
-                "size_preference": "size_factor_market",
-            }
-            
-            h1, h2, h3 = st.columns([1, 2, 1.5])
-            h1.caption("FACTOR")
-            h2.caption("ASSET PERFORMANCE (0-100)")
-            h3.caption("STRATEGY MATCH")
+            selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy")
+            if selected_name:
+                strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-            for pref_col, actual_col in comparison_map.items():
-                if strategies_df.empty:
-                    target_val = 0
-                else:
-                    target_val = float(strat_row.get(pref_col, 50))
-                    
-                actual_val = float(stock_data.iloc[0].get(actual_col, 0))
-                
-                diff = abs(target_val - actual_val)
-                match_pct = max(0, 100 - diff)
-                gap = actual_val - target_val
+            stock_data = con.execute("""
+                SELECT * FROM asset_factors_normalized_final 
+                WHERE asset_id = ? 
+                ORDER BY timestamp DESC LIMIT 1
+            """, [a_id]).df()
 
-                if actual_val >= 70:
-                    score_color = "#28a745"  
-                elif actual_val >= 40:
-                    score_color = "#ffc107"  
-                else:
-                    score_color = "#dc3545"  
-
-                if match_pct >= 70:
-                    match_color = "#28a745"  
-                elif match_pct >= 50:
-                    match_color = "#1f77b4"  
-                elif match_pct >= 30:
-                    match_color = "#ffc107"  
-                else:
-                    match_color = "#dc3545"  
-
-                c1, c2, c3 = st.columns([1, 2, 1.5])
-                factor_key = actual_col.replace('_factor_market', '').lower()
-                label = factor_key.capitalize()
-
-                FACTOR_HELP = {
-                    "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend.",
-                    "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to fundamentals.",
-                    "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health.",
-                    "growth": "**Growth Factor**\n\nIdentifies companies expanding business rapidly.",
-                    "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction.",
-                    "size": "**Size Factor**\n\nCaptures the Small-Cap Effect profile metrics."
+            if stock_data.empty:
+                st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
+            else:
+                comparison_map = {
+                    "momentum_preference": "momentum_factor_market", 
+                    "value_preference": "value_factor_market",
+                    "quality_preference": "quality_factor_market",
+                    "growth_preference": "growth_factor_market",
+                    "defensive_preference": "defensive_factor_market",
+                    "size_preference": "size_factor_market",
                 }
                 
-                help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
+                h1, h2, h3 = st.columns([1, 2, 1.5])
+                h1.caption("FACTOR")
+                h2.caption("ASSET PERFORMANCE (0-100)")
+                h3.caption("STRATEGY MATCH")
 
-                with c1:
-                    st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
-                    st.markdown(f"**{label}**", help=help_text)
+                for pref_col, actual_col in comparison_map.items():
+                    target_val = float(strat_row.get(pref_col, 50))
+                    actual_val = float(stock_data.iloc[0].get(actual_col, 0))
+                    
+                    diff = abs(target_val - actual_val)
+                    match_pct = max(0, 100 - diff)
+                    gap = actual_val - target_val
 
-                bar_html = f"""
-                <div style="margin-top: 5px; padding-right: 15px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-                        <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
-                    </div>
-                    <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
-                        <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
-                    </div>
-                </div>
-                """
-                c2.markdown(bar_html, unsafe_allow_html=True)
-
-                with c3:
-                    if strategies_df.empty:
-                        st.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
+                    if actual_val >= 70:
+                        score_color = "#28a745"  
+                    elif actual_val >= 40:
+                        score_color = "#ffc107"  
                     else:
+                        score_color = "#dc3545"  
+
+                    if match_pct >= 70:
+                        match_color = "#28a745"  
+                    elif match_pct >= 50:
+                        match_color = "#1f77b4"  
+                    elif match_pct >= 30:
+                        match_color = "#ffc107"  
+                    else:
+                        match_color = "#dc3545"  
+
+                    c1, c2, c3 = st.columns([1, 2, 1.5])
+                    factor_key = actual_col.replace('_factor_market', '').lower()
+                    label = factor_key.capitalize()
+
+                    FACTOR_HELP = {
+                        "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend.",
+                        "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to fundamentals.",
+                        "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health.",
+                        "growth": "**Growth Factor**\n\nIdentifies companies expanding business rapidly.",
+                        "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction.",
+                        "size": "**Size Factor**\n\nCaptures the Small-Cap Effect profile metrics."
+                    }
+                    
+                    help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
+
+                    with c1:
+                        st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
+                        st.markdown(f"**{label}**", help=help_text)
+
+                    bar_html = f"""
+                    <div style="margin-top: 5px; padding-right: 15px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+                            <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
+                        </div>
+                        <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
+                            <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
+                        </div>
+                    </div>
+                    """
+                    c2.markdown(bar_html, unsafe_allow_html=True)
+
+                    with c3:
                         if match_pct >= 85:
                             fit_label = "Perfect Match"; icon = "🌟"
                         elif match_pct >= 70:
@@ -963,8 +975,8 @@ def show_asset_analysis_dialog(asset_ticker):
                                 </div>
                             </div>
                         """, unsafe_allow_html=True)
-                st.divider()     
-    
+                    st.divider()     
+        
     with tab4:
         try:
             st.divider()
@@ -973,7 +985,6 @@ def show_asset_analysis_dialog(asset_ticker):
             st.divider()
         except Exception as e:
             st.warning(f"Factor visualization unavailable: {e}")
-
 
 # Strategy creation and editing component
 def strategy_creating_component(con, portfolio_id):
