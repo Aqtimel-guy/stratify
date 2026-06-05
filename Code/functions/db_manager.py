@@ -68,15 +68,13 @@ def get_data(query, params=None, use_cloud=False):
     # ---- OPTION A: Cloud Database Execution (Supabase) ----
     if use_cloud:
         engine = get_supabase_engine()
-        
-        # PostgreSQL syntax utilizes %s for positional parameters instead of ?
-        cloud_query = query.replace('?', '%s')
-        
-        if params is not None:
-            if isinstance(params, list):
-                params = tuple(params)
-            elif not isinstance(params, (tuple, dict)):
-                params = (params,)
+
+        # NO replace of ? -> %s
+        return pd.read_sql(
+            text(query),
+            con=engine,
+            params=params
+        )
         
         # Explicitly wrap query in text() to ensure SQLAlchemy compatibility
         with engine.connect() as connection:
