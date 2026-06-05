@@ -320,7 +320,7 @@ def show_password_recovery_page():
     
     
             
-           
+######################################           
 
 def show_home_page():
     # 1. Check and fetch user data (only if not already present in session state)
@@ -609,18 +609,13 @@ def show_home_page():
 
 
 def show_portfolios_page():
-    """
-    Clean UI layer.
-    No business logic. Only rendering.
-    """
 
     if "portfolio_create_version" not in st.session_state:
         st.session_state.portfolio_create_version = 0
 
-    # --- styles (unchanged) ---
-    st.markdown("""<style> ... your css ... </style>""", unsafe_allow_html=True)
+    st.markdown("""<style> ... css unchanged ... </style>""", unsafe_allow_html=True)
 
-    # --- sidebar (unchanged) ---
+    # SIDEBAR
     first_name = st.session_state.get("first_name", "Investor")
 
     st.sidebar.markdown(f"""
@@ -634,76 +629,111 @@ def show_portfolios_page():
         st.session_state.clear()
         st.rerun()
 
-    # --- title ---
+    # TITLE
     st.markdown("<h2 style='text-align:center;'>💼 My Portfolios</h2>", unsafe_allow_html=True)
     st.write("---")
 
     user_id = st.session_state.user_id
 
-    # 🔥 ALL LOGIC MOVED OUT
+    # ONLY SERVICE CALL (no logic here anymore)
     portfolios_df = get_portfolio_card_data(user_id)
 
-    if portfolios_df.empty:
+    # =========================
+    # SAFE EMPTY STATE
+    # =========================
+    if portfolios_df is None or portfolios_df.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
-        return
 
+        # IMPORTANT: still render create button
+        st.write("---")
+        col_a, col_b = st.columns(2)
+
+        with col_b:
+            with st.popover("➕ Create New Portfolio"):
+                with st.form("create_portfolio_form"):
+                    name = st.text_input("Name")
+                    date = st.date_input("Start date")
+
+                    if st.form_submit_button("Create"):
+                        if name:
+                            success, msg = create_portfolio(user_id, name, date)
+                            if success:
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
+        with col_a:
+            if st.button("🏠 Back"):
+                go_to("home_page")
+
+        return   # ⬅️ only safe return, AFTER UI
+
+    # =========================
+    # NORMAL GRID
+    # =========================
     cols = st.columns(2)
 
     for i, row in portfolios_df.iterrows():
+
         with cols[i % 2]:
 
             st.markdown(f"### 📁 {row['portfolio_name']}")
 
-            col1, col2, col3 = st.columns(3)
+            c1, c2, c3 = st.columns(3)
 
-            with col1:
+            with c1:
                 st.metric("Start", row["start_date"])
 
-            with col2:
-                st.metric("Sim Date", row["sim_date"])
+            with c2:
+                st.metric("Sim", row["sim_date"])
 
-            with col3:
+            with c3:
                 val = row["value"]
                 st.metric("Value", f"${val:,.2f}" if val else "N/A")
 
-            c1, c2 = st.columns([2, 1])
+            a, b = st.columns([2, 1])
 
-            with c1:
-                if st.button("Enter Portfolio", key=f"enter_{row['portfolio_id']}"):
+            with a:
+                if st.button("Enter", key=f"enter_{row['portfolio_id']}"):
                     st.session_state.current_portfolio_id = row["portfolio_id"]
                     st.session_state.current_portfolio_name = row["portfolio_name"]
                     go_to("dashboard_home")
 
-            with c2:
+            with b:
                 with st.popover("🗑️ Delete", key=f"del_{row['portfolio_id']}"):
                     if st.button("Confirm", key=f"confirm_{row['portfolio_id']}"):
-                        success, message = delete_portfolio(row["portfolio_id"])
+                        success, msg = delete_portfolio(row["portfolio_id"])
                         if success:
                             st.rerun()
                         else:
-                            st.error(message)
+                            st.error(msg)
 
+    # =========================
+    # FOOTER (ALWAYS RENDERED)
+    # =========================
     st.write("---")
 
     col_a, col_b = st.columns(2)
 
     with col_b:
         with st.popover("➕ Create New Portfolio"):
-            with st.form("create_portfolio_form"):
+            with st.form("create_portfolio_form_footer"):
                 name = st.text_input("Name")
                 date = st.date_input("Start date")
 
                 if st.form_submit_button("Create"):
                     if name:
-                        create_portfolio(user_id, name, date)
-                        st.rerun()
+                        success, msg = create_portfolio(user_id, name, date)
+                        if success:
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
     with col_a:
         if st.button("🏠 Back"):
             go_to("home_page")
+  
             
-######################################
-
 def show_dashboard_home():
     """
     Renders the main simulation strategy control center dashboard home view.
