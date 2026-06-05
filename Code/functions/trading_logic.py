@@ -392,7 +392,7 @@ def get_portfolio_cash_history(portfolio_id, sim_date):
             d.timestamp,
             d.dividend_amount,
             a.ticker
-        FROM dividends d
+        FROM 'https://storage.googleapis.com/stratify-historical-data/data_snapshots/dividends.parquet' d
         JOIN assets a
             ON d.asset_id = a.asset_id
         WHERE d.timestamp <= $sim_date
@@ -536,8 +536,9 @@ def get_portfolio_cash_history(portfolio_id, sim_date):
 # for simulating time
 def handle_time_jump(new_date, p_id):
     """
-    Advances the operational simulation clock, calculates and distributes interim dividends,
-    and bulk backfills daily historical performance metrics directly within the cloud database.
+    Advances the operational simulation clock, calculates and distributes interim dividends 
+    via local DuckDB analytical layer reading from cloud Parquet snapshots, and bulk backfills 
+    daily historical performance metrics directly within the cloud database.
     All source documentation and comments are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
@@ -553,12 +554,12 @@ def handle_time_jump(new_date, p_id):
     engine = get_supabase_engine()
     
     try:
-        # CRITICAL FIX: Use engine.begin() directly to manage both connection 
-        # lifespan and transaction atomicity in a single non-overlapping scope.
+        # =====================================================================
+        # STEP 1: FETCH STATE FRAME FROM CLOUD (SUPABASE)
+        # =====================================================================
         with engine.begin() as con:
-            # Fetch current chronological simulation state anchor point
             res = con.execute(
-                text("SELECT current_sim_date FROM portfolios WHERE portfolio_id = :p_id"),
+                text("SELECT current_sim_date, available_cash FROM portfolios WHERE portfolio_id = :p_id"),
                 {"p_id": p_id}
             ).fetchone()
             
@@ -566,31 +567,103 @@ def handle_time_jump(new_date, p_id):
                 return False
                 
             start_date = res[0]
+            current_cash = float(res[1])
             
-            # Bypass execution block if no forward progression is requested
+            # Bypass execution if no forward progression is requested
             if start_date >= new_date:
                 return True
 
-            # --- CALCULATE AND UPDATE DIVIDENDS DURING TIME JUMP ---
-            # Aggregate total dividends earned for current holdings within the time jump window
-            dividend_calc_query = text("""
-                SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0) as total_div
-                FROM holdings h
-                JOIN dividends d ON h.asset_id = d.asset_id
-                WHERE h.portfolio_id = :p_id
-                  AND h.quantity > 0
-                  AND d.timestamp > CAST(:start_date AS DATE)
-                  AND d.timestamp <= CAST(:new_date AS DATE)
-            """)
+            # Extract holding matrix metadata to feed local analytical query scopes
+            holdings_res = con.execute(
+                text("SELECT asset_id, quantity FROM holdings WHERE portfolio_id = :p_id AND quantity > 0"),
+                {"p_id": p_id}
+            ).fetchall()
             
-            total_dividends = float(
-                con.execute(
-                    dividend_calc_query, 
-                    {"p_id": p_id, "start_date": start_date, "new_date": new_date}
-                ).fetchone()[0]
-            )
+            df_holdings = pd.DataFrame(holdings_res, columns=["asset_id", "quantity"])
 
-            # If dividend earnings are captured, inject capital liquidity back into the ledger profile
+        # =====================================================================
+        # STEP 2: HEAVY LIFTING INSIDE LOCAL LAYER (DUCKDB + PARQUET URL)
+        # =====================================================================
+        total_dividends = 0.0
+        df_history_backfill = pd.DataFrame(columns=["portfolio_id", "timestamp", "portfolio_value", "available_cash"])
+
+        if not df_holdings.empty:
+            asset_ids = df_holdings["asset_id"].tolist()
+            
+            # Direct optimization routing pointing straight to the Google Cloud Storage Parquet file
+            div_parquet_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/dividends.parquet"
+            
+            # Vectorized dividend query mapping matching historical holding states
+            div_calc_query = f"""
+                SELECT d.asset_id, SUM(d.dividend_amount) as total_rate
+                FROM '{div_parquet_url}' d
+                WHERE d.asset_id IN $asset_list
+                  AND d.timestamp > $start_date
+                  AND d.timestamp <= $new_date
+                GROUP BY d.asset_id
+            """
+            
+            # Ensure DuckDB reads from network endpoints seamlessly
+            duckdb.execute("INSTALL httpfs; LOAD httpfs;")
+            
+            df_div_rates = duckdb.execute(div_calc_query, {
+                "asset_list": asset_ids,
+                "start_date": start_date,
+                "new_date": new_date
+            }).df()
+
+            if not df_div_rates.empty:
+                df_div_merge = pd.merge(df_holdings, df_div_rates, on="asset_id", how="inner")
+                total_dividends = float((df_div_merge["quantity"] * df_div_merge["total_rate"]).sum())
+
+            # Generate dynamic daily time-series performance tracking matrices inside local core
+            backfill_matrix_query = """
+                WITH date_series AS (
+                    SELECT CAST(day_raw AS TIMESTAMP) as day_ts
+                    FROM generate_series(
+                        CAST($start_date AS TIMESTAMP) + INTERVAL '1 day', 
+                        CAST($new_date AS TIMESTAMP), 
+                        INTERVAL '1 day'
+                    ) AS day_raw
+                ),
+                daily_prices AS (
+                    SELECT 
+                        ds.day_ts,
+                        h.asset_id,
+                        h.quantity,
+                        p.close,
+                        ROW_NUMBER() OVER (PARTITION BY ds.day_ts, h.asset_id ORDER BY p.timestamp DESC) as rn
+                    FROM date_series ds
+                    CROSS JOIN df_holdings h
+                    JOIN prices p ON p.asset_id = h.asset_id AND p.timestamp <= ds.day_ts
+                ),
+                daily_valuation AS (
+                    SELECT day_ts, SUM(quantity * close) as assets_value
+                    FROM daily_prices
+                    WHERE rn = 1
+                    GROUP BY day_ts
+                )
+                SELECT 
+                    $p_id as portfolio_id,
+                    day_ts as timestamp,
+                    assets_value + $final_cash as portfolio_value,
+                    $final_cash as available_cash
+                FROM daily_valuation
+            """
+            
+            final_cash_projection = current_cash + total_dividends
+            df_history_backfill = duckdb.execute(backfill_matrix_query, {
+                "start_date": start_date,
+                "new_date": new_date,
+                "p_id": p_id,
+                "final_cash": final_cash_projection
+            }).df()
+
+        # =====================================================================
+        # STEP 3: RE-ENGAGE CLOUD LAYER FOR FINAL WRITE ACTIONS (SUPABASE)
+        # =====================================================================
+        with engine.begin() as con:
+            # Inject calculated global dividend yields into core profile state
             if total_dividends > 0:
                 con.execute(
                     text("""
@@ -601,8 +674,7 @@ def handle_time_jump(new_date, p_id):
                     {"total_dividends": total_dividends, "p_id": p_id}
                 )
 
-            # --- HISTORICAL LEDGER SLICE TIME-SERIES BACKFILL ---
-            # Pre-clean target time horizon slices to secure idempotent transaction commits
+            # Clear overlapping historical record slices to ensure operational idempotency
             con.execute(
                 text("""
                     DELETE FROM portfolio_history 
@@ -613,52 +685,22 @@ def handle_time_jump(new_date, p_id):
                 {"portfolio_id": p_id, "start_date": start_date, "new_date": new_date}
             )
 
-            # Standardized cloud-optimized daily time-series backfill calculation matrix layout
-            backfill_query = text("""
-                INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-                WITH date_series AS (
-                    SELECT CAST(day_raw AS TIMESTAMP) as day_ts
-                    FROM generate_series(
-                        CAST(:start_date AS TIMESTAMP) + INTERVAL '1 day', 
-                        CAST(:new_date AS TIMESTAMP), 
-                        INTERVAL '1 day'
-                    ) AS day_raw
-                ),
-                daily_valuation AS (
-                    SELECT 
-                        ds.day_ts,
-                        COALESCE(SUM(h.quantity * (
-                            SELECT p.close FROM prices p 
-                            WHERE p.asset_id = h.asset_id 
-                              AND p.timestamp <= ds.day_ts 
-                            ORDER BY p.timestamp DESC LIMIT 1
-                        )), 0) as assets_value
-                    FROM date_series ds
-                    CROSS JOIN holdings h
-                    WHERE h.portfolio_id = :p_id
-                    GROUP BY ds.day_ts
+            # Bulk safe write operations using highly optimized pandas backend to_sql framework
+            if not df_history_backfill.empty:
+                df_history_backfill["timestamp"] = pd.to_datetime(df_history_backfill["timestamp"])
+                df_history_backfill.to_sql(
+                    name="portfolio_history",
+                    con=con,
+                    if_exists="append",
+                    index=False,
+                    method="multi"
                 )
-                SELECT 
-                    :p_id, 
-                    dv.day_ts, 
-                    dv.assets_value + p.available_cash, 
-                    p.available_cash
-                FROM daily_valuation dv
-                JOIN portfolios p ON p.portfolio_id = :p_id
-            """)
-            
-            con.execute(
-                backfill_query, 
-                {"start_date": start_date, "new_date": new_date, "p_id": p_id}
-            )
 
-            # Update master simulation timeline timestamp index inside the profiles table
+            # Finalize core milestone timeline metrics anchoring step
             con.execute(
                 text("UPDATE portfolios SET current_sim_date = :new_date WHERE portfolio_id = :p_id"),
                 {"new_date": new_date, "p_id": p_id}
             )
-            
-            # The engine context manager will automatically commit here upon successful exit
 
         # Update core Streamlit reactive application state variables layout framework
         st.session_state.current_sim_date = new_date
@@ -669,10 +711,12 @@ def handle_time_jump(new_date, p_id):
         return True
 
     except Exception as e:
-        logger.error(f"Global time jump processing pipeline sequence crashed: {e}")
+        logger.error(f"Global time jump processing pipeline sequence crashed safely: {e}")
         st.error(f"Time Jump Failed: {e}")
         return False
-    
+
+
+
 # for getting recomendations to buy/sell
 
 
