@@ -501,25 +501,21 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             
             gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
             
-            # Use JOIN against temporary table to avoid ParserException with IN/ANY lists
+            # Simplified query: Filter Parquet directly using JOIN
+            # We defer the 'as-of' logic (latest timestamp) to Pandas to ensure stability
             prices_query = f"""
-                WITH ranked_prices AS (
-                    SELECT 
-                        p.asset_id, 
-                        p.close,
-                        ROW_NUMBER() OVER (PARTITION BY p.asset_id ORDER BY p.timestamp DESC) as rn
-                    FROM read_parquet('{gcs_prices_url}') p
-                    INNER JOIN target_assets ta ON p.asset_id = ta.asset_id
-                    WHERE p.timestamp <= :target_time
-                )
-                SELECT asset_id, close AS price
-                FROM ranked_prices
-                WHERE rn = 1
+                SELECT p.asset_id, p.timestamp, p.close
+                FROM read_parquet('{gcs_prices_url}') p
+                INNER JOIN target_assets ta ON p.asset_id = ta.asset_id
+                WHERE p.timestamp <= :target_time
             """
             
             df_prices = duckdb_con.execute(prices_query, {"target_time": timestamp}).df()
             
             if not df_prices.empty:
+                # Keep only the latest price per asset (as-of logic)
+                df_prices = df_prices.sort_values(by='timestamp').groupby('asset_id').tail(1)
+                
                 # Merge holdings data with fetched localized historical prices
                 df_valuation = pd.merge(df_holdings, df_prices, on="asset_id", how="inner")
                 df_valuation["market_value"] = df_valuation["quantity"] * df_valuation["price"]
@@ -549,7 +545,7 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
 
     finally:
         if should_close_cloud:
-            cloud_con.close()       
+            cloud_con.close()
 
 # for getting portfolio card data (precomputed for performance)    
 def get_portfolio_card_data(user_id):
