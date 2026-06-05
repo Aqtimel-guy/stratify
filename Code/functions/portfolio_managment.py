@@ -11,141 +11,213 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 # for creating a portfolio 
 def create_portfolio(user_id, portfolio_name, starting_at):
     """
-    Creates a portfolio in the Supabase database after running dynamic validations.
-    
+    Creates a portfolio safely in Supabase.
     """
+
     logger = logging.getLogger(__name__)
-    engine = get_supabase_engine()  # Fetching the central cloud engine
+    engine = get_supabase_engine()
     today = datetime.date.today()
     today_datetime = datetime.datetime.combine(today, datetime.time.min)
-    
+
+    # ----------------------------
+    # 0. FAST VALIDATIONS (no DB)
+    # ----------------------------
+    if not portfolio_name or not portfolio_name.strip():
+        return False, "Portfolio name is required."
+
+    if starting_at > today:
+        return False, "Starting date cannot be in the future."
+
     try:
-        # engine.begin() opens a connection and starts a safe SQL transaction block
         with engine.begin() as connection:
-            
-            # Validation 1: Verify user existence in cloud database
+
+            # ----------------------------
+            # 1. USER EXISTS
+            # ----------------------------
             user_exists = connection.execute(
                 text("SELECT 1 FROM users WHERE user_id = :user_id"),
                 {"user_id": user_id}
             ).fetchone()
-            
+
             if not user_exists:
-                logger.warning(f"Validation Failed: User ID {user_id} does not exist.")
                 return False, "User not found."
-            
-            # Validation 2: Enforce a limit of max 10 portfolios per user scope
+
+            # ----------------------------
+            # 2. PORTFOLIO LIMIT
+            # ----------------------------
             portfolio_count = connection.execute(
-                text("SELECT COUNT(*) FROM portfolios WHERE user_id = :user_id"),
+                text("""
+                    SELECT COUNT(*)
+                    FROM portfolios
+                    WHERE user_id = :user_id
+                """),
                 {"user_id": user_id}
             ).fetchone()[0]
-            
-            if portfolio_count > 9:
-                logger.warning(f"Validation Failed: User {user_id} reached portfolio limit (10).")
-                return False, "You have reached the maximum limit of 10 portfolios."
-            
-            # Validation 3: Ensure simulation target timeline is not set in the future
-            if starting_at > today:
-                logger.warning(f"Validation Failed: Starting date {starting_at} is in the future.")
-                return False, "Starting date cannot be in the future."
 
-            # Validation 4: Maintain unique portfolio naming convention per user scope
+            if portfolio_count >= 10:
+                return False, "You have reached the maximum limit of 10 portfolios."
+
+            # ----------------------------
+            # 3. UNIQUE NAME
+            # ----------------------------
             name_exists = connection.execute(
-                text("SELECT 1 FROM portfolios WHERE user_id = :user_id AND portfolio_name = :name"),
+                text("""
+                    SELECT 1
+                    FROM portfolios
+                    WHERE user_id = :user_id
+                      AND portfolio_name = :name
+                """),
                 {"user_id": user_id, "name": portfolio_name}
             ).fetchone()
-            
+
             if name_exists:
                 return False, f"You already have a portfolio named '{portfolio_name}'."
-            
-            # Execution Phase: Primary key allocation & data insertion
-            max_id = connection.execute(text("SELECT COALESCE(MAX(portfolio_id), 0) FROM portfolios")).fetchone()[0]
-            portfolio_id = max_id + 1
-                
-            connection.execute(
+
+            # ----------------------------
+            # 4. INSERT (NO MANUAL ID)
+            # ----------------------------
+            result = connection.execute(
                 text("""
-                    INSERT INTO portfolios (portfolio_id, user_id, portfolio_name, created_at, starting_at, available_cash, portfolio_value, current_sim_date)
-                    VALUES (:portfolio_id, :user_id, :portfolio_name, :created_at, :starting_at, :available_cash, :portfolio_value, :current_sim_date)
+                    INSERT INTO portfolios (
+                        user_id,
+                        portfolio_name,
+                        created_at,
+                        starting_at,
+                        available_cash,
+                        portfolio_value,
+                        current_sim_date
+                    )
+                    VALUES (
+                        :user_id,
+                        :portfolio_name,
+                        :created_at,
+                        :starting_at,
+                        0.0,
+                        0.0,
+                        :starting_at
+                    )
+                    RETURNING portfolio_id
                 """),
                 {
-                    "portfolio_id": portfolio_id,
                     "user_id": user_id,
                     "portfolio_name": portfolio_name,
                     "created_at": today_datetime,
-                    "starting_at": starting_at,
-                    "available_cash": 0.0,
-                    "portfolio_value": 0.0,
-                    "current_sim_date": starting_at
+                    "starting_at": starting_at
                 }
             )
-            
-            logger.info(f"Portfolio '{portfolio_name}' created successfully for user {user_id}.")
-            
-            # Triggering initial state history snapshot log
-            # Note: We pass the active connection context to keep everything inside the same safe atomic transaction
-            capture_portfolio_snapshot(connection, portfolio_id, starting_at)
-            
-            return True, "Portfolio created successfully!"
+
+            portfolio_id = result.fetchone()[0]
+
+        # ----------------------------
+        # 5. SNAPSHOT OUTSIDE TRANSACTION
+        # ----------------------------
+        try:
+            # use fresh connection if needed
+            with engine.begin() as conn2:
+                capture_portfolio_snapshot(conn2, portfolio_id, starting_at)
+
+        except Exception as snap_err:
+            logger.error(f"Snapshot failed (non-blocking): {snap_err}")
+
+        logger.info(f"Portfolio created: {portfolio_id}")
+        return True, "Portfolio created successfully!"
 
     except Exception as e:
-        logger.error(f"Database error during portfolio creation: {e}")
-        return False, "An internal error occurred. Please try again."
-
-
+        logger.error(f"Portfolio creation failed: {e}")
+        return False, "Internal error occurred."
+    
+    
 # for deleting a portfolio 
 def delete_portfolio(portfolio_id):
     """
-    Deletes a portfolio and cascades across child relational layers to preserve foreign key integration.
-    Maintains clean runtime environment state frames.
+    Deletes a portfolio and all dependent relational data safely
+    using a single atomic transaction.
     """
+
     logger = logging.getLogger(__name__)
-    engine = get_supabase_engine()  # Fetching the central cloud engine
-    
+    engine = get_supabase_engine()
+
+    payload = {"portfolio_id": portfolio_id}
+
     try:
-        # engine.begin() ensures that ALL deletes succeed together, or ALL rollback together
         with engine.begin() as connection:
-            
-            # 1. Verify target record existence before starting deletion process
-            portfolio_exists = connection.execute(
-                text("SELECT portfolio_name FROM portfolios WHERE portfolio_id = :portfolio_id"),
-                {"portfolio_id": portfolio_id}
+
+            # -------------------------------
+            # 1. Verify existence
+            # -------------------------------
+            result = connection.execute(
+                text("""
+                    SELECT portfolio_name
+                    FROM portfolios
+                    WHERE portfolio_id = :portfolio_id
+                """),
+                payload
             ).fetchone()
-            
-            if not portfolio_exists:
-                logger.warning(f"Delete Failed: Portfolio ID {portfolio_id} does not exist.")
+
+            if not result:
+                logger.warning(f"Portfolio {portfolio_id} not found")
                 return False, "Portfolio not found."
-            
-            p_name = portfolio_exists[0]
 
-            # 2. Purge cascading records sequentially to clear foreign key dependencies safely
-            # We pack the payload inside a single dictionary for reuse across queries
-            payload = {"id": portfolio_id}
-            
-            connection.execute(text("DELETE FROM portfolio_history WHERE portfolio_id = :id"), payload)
-            connection.execute(text("DELETE FROM portfolio_performance WHERE portfolio_id = :id"), payload)
-            connection.execute(text("DELETE FROM user_preferences_strategy WHERE portfolio_id = :id"), payload)
-            connection.execute(text("DELETE FROM holdings WHERE portfolio_id = :id"), payload)
-            connection.execute(text("DELETE FROM cash_transactions WHERE portfolio_id = :id"), payload)
-            connection.execute(text("DELETE FROM assets_transactions WHERE portfolio_id = :id"), payload)
-            
-            # 3. Cleanse the parent core record now that all dependencies are dropped
-            connection.execute(text("DELETE FROM portfolios WHERE portfolio_id = :id"), payload)
-            
-            logger.info(f"Portfolio '{p_name}' (ID: {portfolio_id}) and all linked sub-records dropped successfully.")
-            
-        # 4. Clean up active Streamlit UI session state context fields (Outside the SQL transaction context)
-        if st.session_state.get('current_portfolio_id') == portfolio_id:
-            st.session_state.current_portfolio_id = None
-            st.session_state.current_portfolio_name = None
-            
-            if 'current_available_cash' in st.session_state:
-                st.session_state.current_available_cash = 0.0
+            portfolio_name = result[0]
 
-        return True, f"Portfolio '{p_name}' deleted successfully!"
-    
+            # -------------------------------
+            # 2. Cascade delete (safe order)
+            # -------------------------------
+            tables = [
+                "portfolio_history",
+                "portfolio_performance",
+                "user_preferences_strategy",
+                "holdings",
+                "cash_transactions",
+                "assets_transactions",
+            ]
+
+            for table in tables:
+                connection.execute(
+                    text(f"DELETE FROM {table} WHERE portfolio_id = :portfolio_id"),
+                    payload
+                )
+
+            # -------------------------------
+            # 3. Delete parent
+            # -------------------------------
+            connection.execute(
+                text("""
+                    DELETE FROM portfolios
+                    WHERE portfolio_id = :portfolio_id
+                """),
+                payload
+            )
+
+            logger.info(f"Deleted portfolio {portfolio_id} ({portfolio_name})")
+
+        # -------------------------------
+        # 4. UI cleanup (safe + complete)
+        # -------------------------------
+        if st.session_state.get("current_portfolio_id") == portfolio_id:
+
+            keys_to_clear = [
+                "current_portfolio_id",
+                "current_portfolio_name",
+                "current_sim_date",
+                "current_portfolio_starting_at",
+                "current_available_cash",
+                "current_sim_date_display",
+            ]
+
+            for k in keys_to_clear:
+                if k in st.session_state:
+                    st.session_state[k] = None
+
+        return True, f"Portfolio '{portfolio_name}' deleted successfully!"
+
     except Exception as e:
-        logger.error(f"Database error during portfolio deletion: {e}")
+        logger.error(f"Delete failed for portfolio {portfolio_id}: {e}")
         return False, f"Error deleting portfolio: {str(e)}"
-
+    
+    
+######################################################3
+    
 # for going forward in time of the simulation
 def move_time_forward(portfolio_id, amount_of_time="1d"):
     """

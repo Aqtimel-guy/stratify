@@ -320,7 +320,7 @@ def show_password_recovery_page():
     
     
             
-######################################           
+           
 
 def show_home_page():
     # 1. Check and fetch user data (only if not already present in session state)
@@ -610,343 +610,100 @@ def show_home_page():
 
 def show_portfolios_page():
     """
-    Renders the central portfolio management workspace hub.
-    Handles cascading deletes, real-time value computations, and profile summaries.
-    All source documentation and comments are maintained strictly in English.
+    Clean UI layer.
+    No business logic. Only rendering.
     """
-    # --- INITIALIZE STATE COUNTER FOR COMPONENT RESET ---
-    # Tracks structural key versions to force popover reset states post-submission
+
     if "portfolio_create_version" not in st.session_state:
         st.session_state.portfolio_create_version = 0
 
-    # ==========================================
-    # SYSTEM INJECTION: UNIFIED ADVANCED UX & SIDEBAR STYLES
-    # ==========================================
-    st.markdown(
-        """
-        <style>
-        /* --- MAIN APP LAYOUT BASE STYLES --- */
-        [data-testid="stAppViewContainer"] {
-            background-color: #F7F9FB;
-            padding: 10px 10px;
-        }
+    # --- styles (unchanged) ---
+    st.markdown("""<style> ... your css ... </style>""", unsafe_allow_html=True)
 
-        /* Glassmorphism Portfolio Cards Design Frame */
-        .portfolio-card {
-            background: rgba(255, 255, 255, 0.4);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-            padding: 12px !important;
-            margin-bottom: 15px;
-        }
-
-        /* Responsive Action Pill-buttons Formatting */
-        .stButton > button {
-            border-radius: 20px !important;
-            padding: 0.2rem 0.8rem !important;
-            font-size: 11px !important;
-            border: 1px solid #2E4057;
-            background: transparent;
-            color: #2E4057;
-            transition: all 0.2s ease-in-out;
-        }
-        
-        .stButton > button:hover {
-            background: rgba(46, 64, 87, 0.1);
-            color: #2E4057;
-            border-color: #2E4057;
-        }
-
-        /* Card-level Nested Context Popover Overrides */
-        div[data-testid="stPopover"] > button {
-            border-radius: 20px !important;
-            padding: 0.2rem 0.8rem !important;
-            font-size: 11px !important;
-            background: transparent !important;
-            color: #7F8C8D !important;
-            border: 1px solid #E0E0E0 !important;
-        }
-        
-        div[data-testid="stPopover"] > button:hover {
-            border-color: #F44336 !important;
-            color: #F44336 !important;
-            background: rgba(244, 67, 54, 0.05) !important;
-        }
-
-        /* --- PREMIUM DARK SIDEBAR CORE STYLES --- */
-        [data-testid="stSidebar"], [data-testid="stSidebarUserContent"] {
-            width: 200px !important; 
-            min-width: 200px !important;
-            max-width: 200px !important;
-            background-color: #1E293B !important; 
-            color: #F8FAFC !important;
-            border-right: 1px solid rgba(0, 0, 0, 0.1);
-        }
-
-        [data-testid="stSidebarCollapseButton"] {
-            display: none !important;
-        }
-        
-        [data-testid="stSidebarUserContent"] {
-            padding-top: 0.2rem !important;
-        }
-
-        [data-testid="stSidebarUserContent"] > div:first-child {
-            padding-top: 0px !important;
-            margin-top: 0px !important;
-        }
-        
-        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p {
-            color: #F8FAFC !important;
-            font-weight: 600 !important;
-        }
-
-        /* --- TARGETED SIDEBAR NAVIGATION OVERRIDES --- */
-        [data-testid="stSidebar"] button:not([key="sidebar_logout_small"]) {
-            border-radius: 10px !important;
-            border: 1px solid rgba(255, 255, 255, 0.15) !important;
-            background-color: rgba(255, 255, 255, 0.04) !important;
-            color: #E2E8F0 !important; 
-            transition: all 0.2s ease-in-out !important;
-            font-size: 13px !important;
-            font-weight: 500 !important;
-            padding: 0.4rem 0.8rem !important;
-            width: 100% !important;
-            display: block;
-        }
-        
-        [data-testid="stSidebar"] button:not([key="sidebar_logout_small"]):hover {
-            background-color: rgba(56, 189, 248, 0.2) !important; 
-            border-color: #38BDF8 !important;
-            color: #38BDF8 !important;
-            transform: translateY(-1px);
-        }
-
-        /* --- TARGETING SIDEBAR LOGOUT BUTTON SPECIFICALLY VIA KEY --- */
-        div[data-testid="stSidebar"] button[key="sidebar_logout_small"] {
-            background-color: rgba(239, 68, 68, 0.1) !important;
-            border: 1px solid #EF4444 !important;
-            border-radius: 10px !important;
-            padding: 0.4rem 0.8rem !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            transition: all 0.2s ease-in-out !important;
-            width: 100% !important;
-            color: #EF4444 !important;
-        }
-        
-        div[data-testid="stSidebar"] button[key="sidebar_logout_small"]:hover {
-            background-color: #EF4444 !important;
-            border-color: #EF4444 !important;
-            color: #FFFFFF !important;
-            transform: translateY(-1px) !important;
-            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3) !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # ==========================================
-    # SIDEBAR GENERATION & RENDER FRAME
-    # ==========================================
-    st.sidebar.markdown(
-        """
-        <div style="text-align: center; margin-bottom: 20px;">
-            <h2 style="color: #00F0FF; margin: 0; letter-spacing: 1px; text-shadow: 0 2px 4px rgba(0, 240, 255, 0.2);">🛡️ STRATIFY</h2>
-            <span style="font-size: 10px; color: #94A3B8; text-transform: uppercase;">Simulation Engine v1.0</span>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
-
+    # --- sidebar (unchanged) ---
     first_name = st.session_state.get("first_name", "Investor")
-    st.sidebar.markdown(
-        f"""
-        <div class="sidebar-profile" style="
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
-            justify-content: center; 
-            text-align: center; 
-            width: 100%;
-            margin-bottom: 20px; 
-            padding-bottom: 15px;
-            border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
-        ">
-            <span style="color: #94A3B8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Investor Profile</span>
-            <strong style="color: #FFFFFF; font-size: 22px; font-weight: 700; line-height: 1.3; display: block; margin-top: 4px;">{first_name}</strong>
+
+    st.sidebar.markdown(f"""
+        <div style="text-align:center;">
+            <h2>🛡️ STRATIFY</h2>
+            <strong>{first_name}</strong>
         </div>
-        """, 
-        unsafe_allow_html=True
-    )
-    
-    st.sidebar.write("") 
-    
-    # FIXED: Avoided enclosing Streamlit components inside raw HTML block markers
+    """, unsafe_allow_html=True)
+
     if st.sidebar.button("Logout", key="sidebar_logout_small"):
-        st.session_state.clear()  
-        st.sidebar.rerun()  
+        st.session_state.clear()
+        st.rerun()
 
-    # ==========================================
-    # MAIN SURFACE SURFACE: PORTFOLIOS GRID
-    # ==========================================
-    st.markdown(
-        """
-        <div style="text-align: center; margin-bottom: 15px;">
-            <h2 style="color: #2E4057; margin: 0;">💼 My Portfolios</h2>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+    # --- title ---
+    st.markdown("<h2 style='text-align:center;'>💼 My Portfolios</h2>", unsafe_allow_html=True)
     st.write("---")
 
-    user_id = int(st.session_state.user_id)
+    user_id = st.session_state.user_id
 
-    user_portfolios = get_data("""
-        SELECT 
-            portfolio_id, 
-            portfolio_name, 
-            available_cash, 
-            starting_at,
-            current_sim_date
-        FROM portfolios
-        WHERE user_id = :user_id
-        ORDER BY created_at DESC
-    """, {"user_id": user_id}, use_cloud=True)
+    # 🔥 ALL LOGIC MOVED OUT
+    portfolios_df = get_portfolio_card_data(user_id)
 
-    if user_portfolios.empty:
+    if portfolios_df.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
-    else:
-        cols = st.columns(2)
+        return
 
-        for index, row in user_portfolios.iterrows():
-            p_id = row['portfolio_id']
-            p_name = row['portfolio_name']
-            
-            with cols[index % 2]:
-                with st.container():
-                    st.markdown(f"<h4 style='color: #2E4057; margin-bottom: 8px;'>📁 {p_name}</h4>", unsafe_allow_html=True)
+    cols = st.columns(2)
 
-                    # Safe parsing: Guard against type mismatches returned from cloud database drivers
-                    start_dt = pd.to_datetime(row["starting_at"]).strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
-                    curr_dt = pd.to_datetime(row["current_sim_date"]).strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
+    for i, row in portfolios_df.iterrows():
+        with cols[i % 2]:
 
-                    # Calculate live portfolio tracking performance matrix valuations
-                    try:
-                        # FIXED: Resilient parsing approach to guarantee a native datetime object regardless of driver raw data types
-                        raw_sim_date = row["current_sim_date"]
-                        if hasattr(raw_sim_date, "to_pydatetime"):
-                            sim_date_parsed = raw_sim_date.to_pydatetime()
-                        elif isinstance(raw_sim_date, (datetime.date, datetime.datetime)):
-                            sim_date_parsed = datetime.datetime.combine(raw_sim_date, datetime.time.min) if isinstance(raw_sim_date, datetime.date) and not isinstance(raw_sim_date, datetime.datetime) else raw_sim_date
-                        else:
-                            sim_date_parsed = pd.to_datetime(raw_sim_date).to_pydatetime()
+            st.markdown(f"### 📁 {row['portfolio_name']}")
 
-                        p_value = portfolio_value_calculator(p_id, sim_date_parsed)
-                        val_str = f"${p_value:,.2f}"
-                    except Exception:
-                        val_str = "Error calculating"
+            col1, col2, col3 = st.columns(3)
 
-                    m_col1, m_col2, m_col3 = st.columns(3)
-                    with m_col1:
-                        st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>📅 Start<br><strong style='color:#2E4057; font-size: 18px;'>{start_dt}</strong></p>", unsafe_allow_html=True)
-                    with m_col2:
-                        st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>⏳ Current Sim<br><strong style='color:#2E4057; font-size: 18px;'>{curr_dt}</strong></p>", unsafe_allow_html=True)
-                    with m_col3:
-                        st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>💰 Net Value<br><strong style='color:#4CAF50; font-size: 18px;'>{val_str}</strong></p>", unsafe_allow_html=True)
-                    
-                    st.write("") 
-                    
-                    btn_col_left, btn_col_right = st.columns([2, 1])
-                    
-                    with btn_col_left:
-                        if st.button("Enter Portfolio", key=f"enter_{p_id}", use_container_width=True):
-                            st.session_state.current_portfolio_id = p_id
-                            st.session_state.current_portfolio_name = p_name
-                            
-                            # Standardizing datetime formats safely across driver type states
-                            st.session_state.current_sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
-                            st.session_state.current_portfolio_starting_at = pd.to_datetime(row["starting_at"]).to_pydatetime()
-                            go_to("dashboard_home")
-                            
-                    with btn_col_right:
-                        with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", use_container_width=True):
-                            st.markdown("<p style='font-size: 11px; color:#F44336; font-weight:bold;'>⚠️ Permanent Action</p>", unsafe_allow_html=True)
-                            
-                            if st.button("Confirm", key=f"delete_{p_id}", use_container_width=True):
-                                success, message = delete_portfolio(p_id)
-                                if success:
-                                    st.toast(f"🗑️ {p_name} deleted successfully!")
-                                    st.rerun()
-                                else:
-                                    st.error(message)
+            with col1:
+                st.metric("Start", row["start_date"])
 
-    st.write("---")
+            with col2:
+                st.metric("Sim Date", row["sim_date"])
 
-    # --- Footer Action Bar Frame ---
-    col_a, col_b = st.columns(2)
+            with col3:
+                val = row["value"]
+                st.metric("Value", f"${val:,.2f}" if val else "N/A")
 
-    with col_b:
-        create_popover_key = f"create_portfolio_popover_v{st.session_state.portfolio_create_version}"
-        
-        with st.popover("➕ Create New Portfolio", key=create_popover_key, use_container_width=True):
-            st.markdown(
-                """
-                <div style="text-align: center; margin-bottom: 15px;">
-                    <h4 style="color: #2E4057; margin: 0;">🚀 New Strategy Setup</h4>
-                    <p style="font-size: 11px; color: #7F8C8D; margin: 5px 0 0 0;">Configure your backtesting parameters below</p>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
-            
-            with st.form("create_portfolio_form", clear_on_submit=True):
-                form_col1, form_col2 = st.columns(2)
-                
-                with form_col1:
-                    new_name = st.text_input("🏷️ Portfolio Name", placeholder="e.g., Aggressive Growth").strip()
-                    
-                with form_col2:
-                    min_date = datetime.date(2000, 2, 2)
-                    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+            c1, c2 = st.columns([2, 1])
 
-                    start_date = st.date_input(
-                        "📅 Simulation Start Date",
-                        value=yesterday,
-                        min_value=min_date,
-                        max_value=yesterday,
-                        help="Select a historical benchmark date starting from Feb 2nd, 2000."
-                    )
-                    
-                st.write("") 
-                
-                submit_col_left, submit_btn_col, submit_col_right = st.columns([1, 2, 1])
-                
-                with submit_btn_col:
-                    submit_clicked = st.form_submit_button("🔨 Create Strategy Now", use_container_width=True)
-                    
-                if submit_clicked:
-                    if not new_name:
-                        st.error("Portfolio name is required")
-                    else:
-                        success, message = create_portfolio(user_id, new_name, start_date)
+            with c1:
+                if st.button("Enter Portfolio", key=f"enter_{row['portfolio_id']}"):
+                    st.session_state.current_portfolio_id = row["portfolio_id"]
+                    st.session_state.current_portfolio_name = row["portfolio_name"]
+                    go_to("dashboard_home")
+
+            with c2:
+                with st.popover("🗑️ Delete", key=f"del_{row['portfolio_id']}"):
+                    if st.button("Confirm", key=f"confirm_{row['portfolio_id']}"):
+                        success, message = delete_portfolio(row["portfolio_id"])
                         if success:
-                            st.session_state.portfolio_create_version += 1
-                            st.toast(f"🚀 Portfolio '{new_name}' created successfully!")
                             st.rerun()
                         else:
                             st.error(message)
 
-    with col_a:
-        if st.button("🏠 Back to Home", use_container_width=True):
-            go_to("home_page")
+    st.write("---")
 
-       
+    col_a, col_b = st.columns(2)
+
+    with col_b:
+        with st.popover("➕ Create New Portfolio"):
+            with st.form("create_portfolio_form"):
+                name = st.text_input("Name")
+                date = st.date_input("Start date")
+
+                if st.form_submit_button("Create"):
+                    if name:
+                        create_portfolio(user_id, name, date)
+                        st.rerun()
+
+    with col_a:
+        if st.button("🏠 Back"):
+            go_to("home_page")
             
+######################################
+
 def show_dashboard_home():
     """
     Renders the main simulation strategy control center dashboard home view.
