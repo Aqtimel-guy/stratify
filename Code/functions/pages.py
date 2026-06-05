@@ -942,6 +942,9 @@ def show_portfolios_page():
                     if not new_name:
                         st.error("Portfolio name is required")
                     else:
+                        st.write(create_portfolio)
+                        st.write(create_portfolio.__module__)
+                        st.write(create_portfolio.__code__.co_varnames)
                         success, message = create_portfolio(
                             cloud_con=st.session_state.cloud_con,
                             duckdb_con=st.session_state.duckdb_con,
