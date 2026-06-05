@@ -147,7 +147,8 @@ def display_asset_card(asset):
 def show_buy_component(ticker, asset_price):
     """
     Enhanced purchase component with smart state management and 
-    in-popover transaction confirmation.
+    in-popover transaction confirmation connected directly to cloud engine.
+    All source documentation and comments are maintained strictly in English.
     """
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date')
@@ -188,7 +189,7 @@ def show_buy_component(ticker, asset_price):
         if not st.session_state[confirm_key]:
             if st.button("Review Order", use_container_width=True):
                 st.session_state[confirm_key] = True
-                st.rerun() # Rerun is required here to switch to confirmation buttons layout
+                st.rerun()  # Rerun is required here to switch to confirmation buttons layout
         else:
             st.warning("Confirm Transaction?")
             col_a, col_b = st.columns(2)
@@ -197,33 +198,30 @@ def show_buy_component(ticker, asset_price):
                 if st.button("✅ Confirm", type="primary", use_container_width=True):
                     # Rate-limiting action boundary check
                     if is_action_allowed(wait_time=2):
-                        # Open the local database context mirror
-                        with duckdb.connect(DB_PATH) as con:
-                            # Check if global cloud state or dual-write configuration is activated
-                            use_cloud_sync = st.session_state.get('use_cloud', False)
-                            
-                            # execute_asset_trade must handle dual-write to Supabase and DuckDB
+                        
+                        # --- CRITICAL FIX: Instantiate clear cloud transaction flow context ---
+                        cloud_engine = get_supabase_engine()
+                        
+                        with cloud_engine.begin() as con:
+                            # execute_asset_trade fetches its own market data locally and writes to Supabase
                             success, msg = execute_asset_trade(
-                                con, 
-                                portfolio_id, 
-                                ticker, 
-                                sim_date, 
-                                qty, 
-                                side='buy',
-                                use_cloud=use_cloud_sync
+                                con=con, 
+                                portfolio_id=portfolio_id, 
+                                ticker=ticker, 
+                                timestamp=sim_date, 
+                                quantity=qty, 
+                                side='buy'
                             )
                             
-                            if success:
-                                st.session_state[confirm_key] = False
-                                # Optimistic UI state update for immediate reflection on dashboard
-                                st.session_state.current_available_cash -= total_cost
-                                st.session_state.page = "dashboard_home"
-                                st.toast(msg)
-                                con.close()
-                                
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                        if success:
+                            st.session_state[confirm_key] = False
+                            # Optimistic UI state update for immediate reflection on dashboard
+                            st.session_state.current_available_cash -= total_cost
+                            st.session_state.page = "dashboard_home"
+                            st.toast(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Slow down...")
 
@@ -231,7 +229,6 @@ def show_buy_component(ticker, asset_price):
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state[confirm_key] = False
                     st.rerun()
-
 
 # For showing holding positions
 def render_holdings_table(con, portfolio_id, sim_date):
