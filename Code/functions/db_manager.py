@@ -58,13 +58,18 @@ def get_supabase_engine():
         
     return st.session_state.supabase_engine
 
+# for data fetching
 def get_data(query, params=None, use_cloud=False):
     """
     Unified data fetching interface.
     Routes queries to Supabase (PostgreSQL) if use_cloud is True, 
     otherwise routes to the local DuckDB instance.
-    Automatically handles syntax translation for positional parameters.
+    Optimized for SQLAlchemy 2.0+ and Python 3.14 parameter binding compatibility.
     """
+    import pandas as pd
+    from sqlalchemy import text
+    import streamlit as st
+    import duckdb
 
     # ---- OPTION A: Cloud Database Execution (Supabase) ----
     if use_cloud:
@@ -73,24 +78,40 @@ def get_data(query, params=None, use_cloud=False):
         cloud_query = query
         cloud_params = {}
         
-        # PostgreSQL with SQLAlchemy text() expects named parameters (:param) instead of '?'
         if params is not None:
-            if not isinstance(params, (list, tuple)):
-                params = [params]
-            
-            if '?' in query:
-                for i, param in enumerate(params):
-                    placeholder = f"param_{i}"
-                    # Replace exactly one '?' at a time with the new named placeholder
-                    cloud_query = cloud_query.replace('?', f":{placeholder}", 1)
-                    cloud_params[placeholder] = param
+            if isinstance(params, dict):
+                cloud_params = params
+                # Handle legacy '?' placeholders if passed alongside a dictionary mapping
+                if '?' in cloud_query:
+                    for key in params.keys():
+                        cloud_query = cloud_query.replace('?', f":{key}", 1)
             else:
-                # Fallback if params are already passed as a dictionary mapping
-                cloud_params = params if isinstance(params, dict) else {}
+                if not isinstance(params, (list, tuple)):
+                    params = [params]
+                
+                # Convert positional markers '?' to named placeholders (:param_0, :param_1...)
+                if '?' in cloud_query:
+                    for i, param in enumerate(params):
+                        placeholder = f"param_{i}"
+                        cloud_query = cloud_query.replace('?', f":{placeholder}", 1)
+                        cloud_params[placeholder] = param
 
-        # Executing cleanly within a connection context manager to prevent connection leaks
-        with engine.connect() as connection:
-            return pd.read_sql(text(cloud_query), con=connection, params=cloud_params)
+        try:
+            # OPTIMIZED: Execute via connection directly to resolve Pandas/SQLAlchemy 2.0 parameter conflicts
+            with engine.connect() as connection:
+                result_proxy = connection.execute(text(cloud_query), cloud_params)
+                
+                # Fetch rows and safely construct DataFrame with correct database column mappings
+                extracted_rows = result_proxy.fetchall()
+                if extracted_rows:
+                    return pd.DataFrame(extracted_rows, columns=result_proxy.keys())
+                else:
+                    # Return empty DataFrame with appropriate column structural headers if no rows match
+                    return pd.DataFrame(columns=result_proxy.keys())
+                    
+        except Exception as db_err:
+            print(f"[CLOUD ENGINE CRITICAL ERROR]: {str(db_err)}")
+            raise db_err
 
     # ---- OPTION B: Local Database Execution (DuckDB) ----
     con = st.session_state.get('duckdb_con')
@@ -100,13 +121,11 @@ def get_data(query, params=None, use_cloud=False):
             return con.execute(query, params).df()
         return con.execute(query).df()
     
-    # Emergency fallback layer if the standard session connection is missing
     db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
     with duckdb.connect(db_path) as emergency_con:
         if params:
             return emergency_con.execute(query, params).df()
         return emergency_con.execute(query).df()
-    
 # for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
