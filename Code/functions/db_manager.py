@@ -580,9 +580,10 @@ def get_portfolio_card_data(user_id):
 
         try:
             sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
+            duckdb_con = duckdb.connect(database=":memory:")
 
             value = portfolio_value_calculator(
-                duckdb_con=duckdb.connect(":memory:"),  # Creates a clean, temporary in-memory connection
+                duckdb_con=duckdb_con,
                 portfolio_id=p_id,
                 timestamp=sim_date
             )
