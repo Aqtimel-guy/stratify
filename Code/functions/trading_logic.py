@@ -121,6 +121,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
         ).fetchone()
         
         if not asset_res:
+            logger.warning(f"Trade failed: Ticker '{ticker}' not found in Supabase 'assets' table.")
             return False, f"Asset {ticker} not found"
         asset_id = asset_res[0]
 
