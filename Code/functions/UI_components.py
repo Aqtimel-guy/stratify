@@ -203,9 +203,10 @@ def show_buy_component(ticker, asset_price):
                         cloud_engine = get_supabase_engine()
                         
                         # 2. FIX: Open a clean connection, NOT a transaction block (.connect() instead of .begin())
-                        with cloud_engine.connect() as con:
+                        with cloud_engine.connect() as cloud_connection:
                             success, msg = execute_asset_trade(
-                                con=con, 
+                                cloud_con=cloud_connection, 
+                                duckdb_con=duckdb.connect(":memory:"),  # Safe, fast, and will never lock your file!
                                 portfolio_id=portfolio_id, 
                                 ticker=ticker, 
                                 timestamp=sim_date, 
@@ -230,7 +231,7 @@ def show_buy_component(ticker, asset_price):
                     st.rerun()
 
 # For showing holding positions
-def render_holdings_table(con, portfolio_id, sim_date):
+def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
     st.subheader("🏢 Current Holdings (FIFO)")
 
     # --- INJECTING TARGETED STYLE FOR HOLDINGS TABLE ---
@@ -321,19 +322,17 @@ def render_holdings_table(con, portfolio_id, sim_date):
         unsafe_allow_html=True
     )
 
-    # 1. FIXED: Convert query to Named Binds and wrap with text() to resolve the execution ArgumentError
+    # 1. FIXED: Extract transaction history for FIFO calculations from Cloud (Supabase)
     tx_query = """
     SELECT asset_id, quantity, price_per_share, side, timestamp
     FROM assets_transactions
     WHERE portfolio_id = :portfolio_id AND timestamp <= :sim_date
     ORDER BY timestamp, transaction_id
     """
-    
-    # We execute using the dictionary parameter layout required by SQLAlchemy 2.0
-    tx_result = con.execute(text(tx_query), {"portfolio_id": portfolio_id, "sim_date": sim_date})
+    tx_result = cloud_con.execute(text(tx_query), {"portfolio_id": portfolio_id, "sim_date": sim_date})
     all_tx = pd.DataFrame(tx_result.fetchall(), columns=tx_result.keys()) if hasattr(tx_result, 'keys') else pd.DataFrame()
 
-    # 2. FIXED: Convert holdings query to Named Binds and wrap with text()
+    # 2. FIXED: Extract current active holdings matrix from Cloud (Supabase)
     holdings_query = """
     SELECT a.asset_id, a.ticker, a.name, a.industry, h.quantity
     FROM holdings h
@@ -341,7 +340,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
     WHERE h.portfolio_id = :portfolio_id AND h.quantity > 0
     ORDER BY h.quantity DESC
     """
-    hold_result = con.execute(text(holdings_query), {"portfolio_id": portfolio_id})
+    hold_result = cloud_con.execute(text(holdings_query), {"portfolio_id": portfolio_id})
     holdings_df = pd.DataFrame(hold_result.fetchall(), columns=hold_result.keys()) if hasattr(hold_result, 'keys') else pd.DataFrame()
 
     if holdings_df.empty:
@@ -374,14 +373,18 @@ def render_holdings_table(con, portfolio_id, sim_date):
         else:
             avg_buy_price = 0.0
         
-        # B) FIXED: Convert prices query to Named Binds and wrap with text()
-        current_price_res = con.execute(text("""
-            SELECT close FROM prices 
-            WHERE asset_id = :asset_id AND timestamp <= :sim_date 
-            ORDER BY timestamp DESC LIMIT 1
-        """), {"asset_id": asset_id, "sim_date": sim_date}).fetchone()
-        
-        current_price = current_price_res[0] if current_price_res else 0.0
+        # B) FIXED: Evaluate Current Market Price from GCS (via DuckDB connection context)
+        try:
+            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+            current_price_res = duckdb_con.execute(f"""
+                SELECT close FROM read_parquet('{gcs_prices_url}') 
+                WHERE asset_id = ? AND date <= ? 
+                ORDER BY date DESC LIMIT 1
+            """, [asset_id, sim_date]).fetchone()
+            
+            current_price = float(current_price_res[0]) if current_price_res else 0.0
+        except Exception:
+            current_price = 0.0
 
         total_value = available_qty * current_price
         pnl_perc = ((current_price / avg_buy_price) - 1) * 100 if avg_buy_price > 0 else 0
@@ -413,10 +416,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
         with cols[7]:
             # Safeguard cash extraction from session state layout
             p_cash = st.session_state.get('current_available_cash', 0.0)
-            if hasattr(p_cash, 'fetchone'):
-                p_cash = float(p_cash.fetchone()[0])
-            else:
-                p_cash = float(p_cash)
+            p_cash = float(p_cash) if not hasattr(p_cash, 'fetchone') else float(p_cash.fetchone()[0])
 
             with st.popover("💼 Trade", width="stretch"):
                 # 1. Select Trade Side using a unique persistent key anchor blueprint
@@ -452,7 +452,13 @@ def render_holdings_table(con, portfolio_id, sim_date):
                             st.error(f"❌ Cannot sell {trade_qty}. You only have {available_qty} shares.")
                         else:
                             success, msg = execute_asset_trade(
-                                con, portfolio_id, ticker, sim_date, trade_qty, side='sell'
+                                cloud_con=cloud_con, 
+                                duckdb_con=duckdb_con, 
+                                portfolio_id=portfolio_id, 
+                                ticker=ticker, 
+                                timestamp=sim_date, 
+                                quantity=trade_qty, 
+                                side='sell'
                             )
                             if success:
                                 st.toast(f"📉 Successfully sold {trade_qty:,} shares of {ticker}!")
@@ -489,7 +495,13 @@ def render_holdings_table(con, portfolio_id, sim_date):
                             st.error(f"❌ Insufficient cash. Total cost is ${est_cost:,.2f} but you only have ${p_cash:,.2f}")
                         else:
                             success, msg = execute_asset_trade(
-                                con, portfolio_id, ticker, sim_date, trade_qty, side='buy'
+                                cloud_con=cloud_con, 
+                                duckdb_con=duckdb_con, 
+                                portfolio_id=portfolio_id, 
+                                ticker=ticker, 
+                                timestamp=sim_date, 
+                                quantity=trade_qty, 
+                                side='buy'
                             )
                             if success:
                                 st.toast(f"🚀 Successfully purchased {trade_qty:,} shares of {ticker}!")
@@ -502,7 +514,6 @@ def render_holdings_table(con, portfolio_id, sim_date):
 
         # Subtle structural line break between rows 
         st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
-
 
 # for portfolio performance analsys 
 def render_performance_chart(df, title="Portfolio Performance History"):

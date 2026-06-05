@@ -102,11 +102,11 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
 
 
 # for executing a trade
-def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy'):
+def execute_asset_trade(cloud_con, duckdb_con, portfolio_id, ticker, timestamp, quantity, side): 
     """
     Executes an asset trade (buy/sell), updates the core portfolios liquidity ledger,
     modifies asset positioning frames, and captures a historical snapshot.
-    Fetches market data from local DuckDB before running cloud updates.
+    Fetches market data from GCS via DuckDB before running cloud updates on Supabase.
     All source documentation and comments are maintained strictly in English.
     
     side: 'buy' or 'sell'
@@ -115,51 +115,56 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
     
     try:
         # --- Step 1: Query asset metadata from cloud (Supabase) ---
-        asset_res = con.execute(
-            text("SELECT asset_id FROM assets WHERE ticker = :ticker LIMIT 1"), 
+        asset_res = cloud_con.execute(
+            text("SELECT asset_id FROM assets WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(:ticker)) LIMIT 1"), 
             {"ticker": ticker}
         ).fetchone()
-        
+
         if not asset_res:
-            logger.warning(f"Trade failed: Ticker '{ticker}' not found in Supabase 'assets' table.")
-            return False, f"Asset {ticker} not found"
+            logger.warning(f"Trade failed: Ticker '{ticker}' not found in Supabase.")
+            return False, f"Asset '{ticker}' not found"
+
         asset_id = asset_res[0]
 
-        # --- CRITICAL FIX: Query price from LOCAL DuckDB layer instead of Cloud ---
-        price_query = """
-            SELECT close FROM prices 
-            WHERE asset_id = $asset_id AND timestamp <= $timestamp 
-            ORDER BY timestamp DESC LIMIT 1
-        """
-        try:
-            price_res_df = duckdb.execute(price_query, {"asset_id": asset_id, "timestamp": timestamp}).df()
-            if price_res_df.empty:
-                return False, f"Price for {ticker} not found in historical matrix"
-            asset_price = float(price_res_df.iloc[0]["close"])
-        except Exception as duck_err:
-            logger.error(f"Failed to fetch market price from local DuckDB: {duck_err}")
-            return False, f"Internal price evaluation engine error: {duck_err}"
-
-        # --- Step 2: Query portfolio liquidity balance from cloud ---
-        portfolio_res = con.execute(
+        # --- Step 2: Query portfolio liquidity balance from cloud (Supabase) ---
+        portfolio_res = cloud_con.execute(
             text("SELECT starting_at, available_cash FROM portfolios WHERE portfolio_id = :portfolio_id"), 
             {"portfolio_id": portfolio_id}
         ).fetchone()
         
         if not portfolio_res:
+            logger.warning(f"Trade execution aborted: Portfolio ID {portfolio_id} not found.")
             return False, "Portfolio not found"
             
-        portfolio_start_day, portfolio_available_cash = portfolio_res
-        portfolio_available_cash = float(portfolio_available_cash)
+        portfolio_start_day, raw_cash = portfolio_res
+        portfolio_available_cash = float(raw_cash) if raw_cash is not None else 0.0
 
-        # --- Step 3: Structural Validations ---
+        # --- Step 3: Evaluate Historical Asset Price from GCS (DuckDB) ---
+        try:
+            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+            price_res = duckdb_con.execute(f"""
+                SELECT close 
+                FROM read_parquet('{gcs_prices_url}') 
+                WHERE asset_id = ? AND date = ? 
+                LIMIT 1
+            """, [asset_id, timestamp]).fetchone()
+            
+            if not price_res:
+                return False, f"No price data available for {ticker} on {timestamp} in cloud storage."
+                
+            asset_price = float(price_res[0])
+        except Exception as price_err:
+            logger.error(f"Internal price evaluation engine error on GCS layer: {price_err}")
+            return False, f"Price evaluation engine error: {price_err}"
+
+        # --- Step 4: Structural Validations ---
         total_amount = quantity * asset_price
         
         if side == 'buy' and portfolio_available_cash < total_amount:
             return False, "Insufficient funds"
 
         if side == 'sell':
-            holding_res = con.execute(
+            holding_res = cloud_con.execute(
                 text("SELECT quantity FROM holdings WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"), 
                 {"portfolio_id": portfolio_id, "asset_id": asset_id}
             ).fetchone()
@@ -168,18 +173,18 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             if amount_held < quantity:
                 return False, f"Not enough shares (Held: {amount_held}, Request: {quantity})"
 
-        # --- Step 4: Atomic Transaction Lifecycle Execution on Cloud ---
-        is_nested = con.in_transaction()
-        tx = None if is_nested else con.begin()
+        # --- Step 5: Atomic Transaction Lifecycle Execution on Cloud (Supabase) ---
+        is_nested = cloud_con.in_transaction()
+        tx = None if is_nested else cloud_con.begin()
 
         try:
             # A. Record the event inside assets_transactions table
-            max_id_res = con.execute(
+            max_id_res = cloud_con.execute(
                 text("SELECT COALESCE(MAX(transaction_id), 0) FROM assets_transactions")
             ).fetchone()
             next_transaction_id = int(max_id_res[0]) + 1
 
-            con.execute(
+            cloud_con.execute(
                 text("""
                     INSERT INTO assets_transactions (transaction_id, portfolio_id, asset_id, timestamp, quantity, price_per_share, total_value, side)
                     VALUES (:transaction_id, :portfolio_id, :asset_id, :timestamp, :quantity, :price_per_share, :total_value, :side)
@@ -199,13 +204,13 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             # B. Mutate and manage inventory allocations within the holdings table
             qty_change = quantity if side == 'buy' else -quantity
             
-            existing_holding = con.execute(
+            existing_holding = cloud_con.execute(
                 text("SELECT quantity FROM holdings WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"),
                 {"portfolio_id": portfolio_id, "asset_id": asset_id}
             ).fetchone()
 
             if existing_holding:
-                con.execute(
+                cloud_con.execute(
                     text("""
                         UPDATE holdings 
                         SET quantity = quantity + :qty_change
@@ -214,7 +219,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
                     {"qty_change": qty_change, "portfolio_id": portfolio_id, "asset_id": asset_id}
                 )
             else:
-                con.execute(
+                cloud_con.execute(
                     text("""
                         INSERT INTO holdings (portfolio_id, asset_id, quantity)
                         VALUES (:portfolio_id, :asset_id, :qty_change)
@@ -224,7 +229,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
 
             # C. Adjust liquidity balances inside the portfolios framework
             cash_change = -total_amount if side == 'buy' else total_amount
-            con.execute(
+            cloud_con.execute(
                 text("""
                     UPDATE portfolios 
                     SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
@@ -234,29 +239,28 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             )
 
             # D. Architectural cleanup: Purge empty zeroed inventory assets
-            con.execute(
+            cloud_con.execute(
                 text("DELETE FROM holdings WHERE quantity <= 0 AND portfolio_id = :portfolio_id"), 
                 {"portfolio_id": portfolio_id}
             )
             
             # E. Trigger historical ledger timeline update snapshot
-            capture_portfolio_snapshot(con, portfolio_id, timestamp)
+            capture_portfolio_snapshot(cloud_con, portfolio_id, timestamp)
             
-            # FIX: Force explicit database commit depending on active transaction frame
+            # Force explicit database commit depending on active transaction frame
             if tx:
                 tx.commit()
             else:
-                con.commit()
+                cloud_con.commit()
                 
             return True, f"Successfully {side} {quantity} shares of {ticker}"
 
         except Exception as inner_error:
-            # FIX: Ensure rollback executes safely on the exact available context boundary
             if tx:
                 tx.rollback()
             else:
                 try:
-                    con.rollback()
+                    cloud_con.rollback()
                 except Exception:
                     pass
             raise inner_error
@@ -264,6 +268,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
     except Exception as e:
         logger.error(f"Asset trade execution pipeline failed: {e}")
         return False, str(e)
+
 
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
