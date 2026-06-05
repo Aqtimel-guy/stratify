@@ -58,30 +58,41 @@ def get_supabase_engine():
         
     return st.session_state.supabase_engine
 
-# for data fetching
 def get_data(query, params=None, use_cloud=False):
     """
     Unified data fetching interface.
     Routes queries to Supabase (PostgreSQL) if use_cloud is True, 
     otherwise routes to the local DuckDB instance.
+    Automatically handles syntax translation for positional parameters.
     """
+
     # ---- OPTION A: Cloud Database Execution (Supabase) ----
     if use_cloud:
         engine = get_supabase_engine()
-
-        # NO replace of ? -> %s
-        return pd.read_sql(
-            text(query),
-            con=engine,
-            params=params
-        )
         
-        # Explicitly wrap query in text() to ensure SQLAlchemy compatibility
+        cloud_query = query
+        cloud_params = {}
+        
+        # PostgreSQL with SQLAlchemy text() expects named parameters (:param) instead of '?'
+        if params is not None:
+            if not isinstance(params, (list, tuple)):
+                params = [params]
+            
+            if '?' in query:
+                for i, param in enumerate(params):
+                    placeholder = f"param_{i}"
+                    # Replace exactly one '?' at a time with the new named placeholder
+                    cloud_query = cloud_query.replace('?', f":{placeholder}", 1)
+                    cloud_params[placeholder] = param
+            else:
+                # Fallback if params are already passed as a dictionary mapping
+                cloud_params = params if isinstance(params, dict) else {}
+
+        # Executing cleanly within a connection context manager to prevent connection leaks
         with engine.connect() as connection:
-            return pd.read_sql(text(cloud_query), con=connection, params=params)
+            return pd.read_sql(text(cloud_query), con=connection, params=cloud_params)
 
     # ---- OPTION B: Local Database Execution (DuckDB) ----
-    # Standardized fallback checking the correct session key
     con = st.session_state.get('duckdb_con')
     
     if con:
@@ -89,14 +100,13 @@ def get_data(query, params=None, use_cloud=False):
             return con.execute(query, params).df()
         return con.execute(query).df()
     
-    # Emergency fallback if connection was not initialized in session state
+    # Emergency fallback layer if the standard session connection is missing
     db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
     with duckdb.connect(db_path) as emergency_con:
         if params:
             return emergency_con.execute(query, params).df()
         return emergency_con.execute(query).df()
     
-
 # for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
