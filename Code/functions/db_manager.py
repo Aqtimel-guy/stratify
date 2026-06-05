@@ -514,15 +514,25 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             
             if not df_prices.empty:
                 # Keep only the latest price per asset (as-of logic)
+                # Ensure the dataframe is sorted by timestamp before taking the tail
                 df_prices = df_prices.sort_values(by='timestamp').groupby('asset_id').tail(1)
                 
-                # Merge holdings data with fetched localized historical prices
+                # Merge holdings with prices. 
+                # Note: Assuming df_prices contains a 'close' column from the SQL query
                 df_valuation = pd.merge(df_holdings, df_prices, on="asset_id", how="inner")
-                df_valuation["market_value"] = df_valuation["quantity"] * df_valuation["price"]
-                total_market_value = float(df_valuation["market_value"].sum())
+                
+                # Safety check: Ensure the required columns exist after the merge
+                # Rename 'close' to 'price' if it exists to match calculation expectations
+                if 'close' in df_valuation.columns:
+                    df_valuation = df_valuation.rename(columns={'close': 'price'})
+                
+                if 'quantity' in df_valuation.columns and 'price' in df_valuation.columns:
+                    df_valuation["market_value"] = df_valuation["quantity"] * df_valuation["price"]
+                    total_market_value = float(df_valuation["market_value"].sum())
+                else:
+                    logger.error(f"Valuation failed: Missing required columns 'quantity' or 'price'. Columns found: {df_valuation.columns.tolist()}")
             else:
                 logger.warning(f"No asset historical prices found in DuckDB for portfolio={portfolio_id} at timestamp={timestamp}")
-
         # 3. Final Evaluation Matrix Aggregation
         total_value = portfolio_cash + total_market_value
 
