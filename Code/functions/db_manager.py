@@ -494,15 +494,19 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
         total_market_value = 0.0
 
         if not df_holdings.empty:
+            # Extract list of asset IDs
             asset_ids = df_holdings["asset_id"].tolist()
             
-            # Create a temporary table to handle asset list safely in DuckDB
-            duckdb_con.execute("CREATE OR REPLACE TEMPORARY TABLE target_assets AS SELECT unnest(?) as asset_id", [asset_ids])
+            # Create a dataframe from the list to avoid "List argument" errors
+            df_target_assets = pd.DataFrame({'asset_id': asset_ids})
+            
+            # Register the pandas dataframe as a temporary table in DuckDB
+            duckdb_con.register('target_assets', df_target_assets)
             
             gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
             
-            # Simplified query: Filter Parquet directly using JOIN
-            # We defer the 'as-of' logic (latest timestamp) to Pandas to ensure stability
+            # Simplified query: Filter Parquet directly using the registered temporary table
+            # We filter data based on the target asset list and the simulation timestamp
             prices_query = f"""
                 SELECT p.asset_id, p.timestamp, p.close
                 FROM read_parquet('{gcs_prices_url}') p
@@ -510,6 +514,7 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
                 WHERE p.timestamp <= ?
             """
             
+            # Execute query using the registered table
             df_prices = duckdb_con.execute(prices_query, [timestamp]).df()
             
             if not df_prices.empty:
