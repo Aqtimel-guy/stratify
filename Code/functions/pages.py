@@ -828,6 +828,8 @@ def show_portfolios_page():
         for index, row in user_portfolios.iterrows():
             p_id = row['portfolio_id']
             p_name = row['portfolio_name']
+            portfolio_id = st.session_state.get('active_portfolio_id') 
+            sim_date = st.session_state.get('sim_date')
             
             with cols[index % 2]:
                 with st.container():
@@ -848,11 +850,12 @@ def show_portfolios_page():
                         else:
                             sim_date_parsed = pd.to_datetime(raw_sim_date).to_pydatetime()
 
-                        p_value = portfolio_value_calculator(
-                            duckdb_con=duckdb.connect(":memory:"),
-                            portfolio_id=p_id,
-                            timestamp=sim_date_parsed
-                        )
+                        p_value = float(portfolio_value_calculator(
+                            duckdb_con=st.session_state.con,  
+                            portfolio_id=portfolio_id, 
+                            timestamp=sim_date
+                        ))
+                        
                         val_str = f"${p_value:,.2f}"
                     except Exception:
                         val_str = "Error calculating"
