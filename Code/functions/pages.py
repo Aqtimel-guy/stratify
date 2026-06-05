@@ -14,293 +14,311 @@ def go_to(page_name):
     
 
 def show_login_page():
-    # Check if redirected from a successful registration - display green success message
-    if st.session_state.get('reg_success'):
-        st.success("Registration successful! Please login with your new credentials.")
-        # Reset the flag so the message doesn't persist on page refresh
-        st.session_state.reg_success = False
+    """
+    Renders the login page and handles authentication flow.
+    """
 
-    # Centered and styled Title using custom HTML/CSS
+    # ---------------------------------------------------------------------
+    # 1. Registration success message (one-time)
+    # ---------------------------------------------------------------------
+    if st.session_state.get("reg_success"):
+        st.success("Registration successful! Please log in.")
+        st.session_state["reg_success"] = False
+
+    # ---------------------------------------------------------------------
+    # 2. Title section
+    # ---------------------------------------------------------------------
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Sign In to Stratify</h1>
-            <p style="color: #7F8C8D; font-size: 16px;">Gamify your financial strategy</p>
+            <h1 style="color: #2E4057;">Sign In to Stratify</h1>
+            <p style="color: #7F8C8D;">Gamify your financial strategy</p>
         </div>
-        """, 
+        """,
         unsafe_allow_html=True
     )
-    
-    # Use prefilled email from registration if available
-    prefilled_email = st.session_state.get('prefilled_email', "")
-    
-    # Create a layout with 3 columns to center the login container (ratio: 1:2:1)
-    left_co, main_co, right_co = st.columns([1, 2, 1])
-    
+
+    prefilled_email = st.session_state.get("prefilled_email", "")
+
+    # ---------------------------------------------------------------------
+    # 3. Layout
+    # ---------------------------------------------------------------------
+    _, main_co, _ = st.columns([1, 2, 1])
+
     with main_co:
-        # Styled container using Streamlit's native card aesthetic
         with st.container(border=True):
             with st.form("login_form", clear_on_submit=False):
-                st.markdown("<h4 style='color: #34495E;'>Credentials</h4>", unsafe_allow_html=True)
-                
-                user_email = st.text_input("Email", value=prefilled_email, placeholder="example@mail.com")
-                user_password = st.text_input("Password", type="password", placeholder="••••••••")
-            
-                # Custom CSS inject to make the login button full-width and styled
-                st.markdown(
-                    """
-                    <style>
-                    div[data-testid="stFormSubmitButton"] > button {
-                        width: 100%;
-                        background-color: #4CAF50;
-                        color: white;
-                        border-radius: 5px;
-                        border: none;
-                        padding: 0.5rem 1rem;
-                        font-weight: bold;
-                    }
-                    div[data-testid="stFormSubmitButton"] > button:hover {
-                        background-color: #45a049;
-                        border: none;
-                        color: white;
-                    }
-                    </style>
-                    """, 
-                    unsafe_allow_html=True
+
+                st.markdown("### Credentials")
+
+                user_email = st.text_input(
+                    "Email",
+                    value=prefilled_email,
+                    placeholder="example@mail.com"
                 )
-                
-                submit_button_loggin = st.form_submit_button("Login")
-                
-                if submit_button_loggin:
+
+                user_password = st.text_input(
+                    "Password",
+                    type="password",
+                    placeholder="••••••••"
+                )
+
+                submit_button = st.form_submit_button("Login")
+
+                # ---------------------------------------------------------
+                # 4. Form submission
+                # ---------------------------------------------------------
+                if submit_button:
+
                     if not user_email or not user_password:
                         st.warning("Please fill in all fields.")
-                    else:
-                        user_id, first_name = loggin_func(user_email, user_password)
-                    
-                        if user_id is not None:
-                            # Save credentials to Session State
-                            st.session_state.user_id = user_id
-                            st.session_state.first_name = first_name
-                            st.session_state.logged_in = True
-                            
-                            # Clean up temporary prefilled email after successful login
-                            if 'prefilled_email' in st.session_state:
-                                del st.session_state.prefilled_email
-                            
-                            st.success("Logged in successfully!")
-                            go_to("home_page")
-                        else:
-                            st.error("Login failed. Check your details.")
+                        return
 
-        # Secondary actions (Registration and Forgot Password) positioned cleanly below the form
-        st.write("") # Spacer
-        col_reg, col_forgot = st.columns(2)
-        
-        with col_reg:
-            if st.button("New here? Register", use_container_width=True):
-                go_to("regestration_page")
-                
-        with col_forgot:
-            if st.button("Forgot password?", use_container_width=True):
-                go_to("password_recovery_page")
-        
+                    user_id, first_name = loggin_func(
+                        user_email,
+                        user_password
+                    )
+
+                    if user_id is not None:
+                        # ---------------- SUCCESS LOGIN ----------------
+                        st.session_state["user_id"] = user_id
+                        st.session_state["first_name"] = first_name
+                        st.session_state["logged_in"] = True
+
+                        # clear sensitive temp data
+                        st.session_state.pop("prefilled_email", None)
+
+                        # reset any auth protection state if exists
+                        if "auth_attempts" in st.session_state:
+                            st.session_state["auth_attempts"] = 0
+                        if "auth_locked_until" in st.session_state:
+                            st.session_state["auth_locked_until"] = 0
+
+                        st.success("Logged in successfully!")
+                        go_to("home_page")
+
+                    else:
+                        st.error("Invalid email or password.")
+
+    # ---------------------------------------------------------------------
+    # 5. Secondary actions
+    # ---------------------------------------------------------------------
+    st.write("")
+    col_reg, col_forgot = st.columns(2)
+
+    with col_reg:
+        if st.button("New here? Register", use_container_width=True):
+            go_to("regestration_page")
+
+    with col_forgot:
+        if st.button("Forgot password?", use_container_width=True):
+            go_to("password_recovery_page")
+  
+  
   
 def show_registration_page():
-    # Centered and styled Title using custom HTML/CSS
+    """
+    Renders user registration page and handles signup flow.
+    """
+
+    # ---------------------------------------------------------------------
+    # 1. Title
+    # ---------------------------------------------------------------------
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Create Your Stratify Account</h1>
-            <p style="color: #7F8C8D; font-size: 16px;">Join us and start gamifying your financial strategy</p>
+            <h1 style="color: #2E4057;">Create Your Stratify Account</h1>
+            <p style="color: #7F8C8D;">Join us and start gamifying your financial strategy</p>
         </div>
-        """, 
+        """,
         unsafe_allow_html=True
     )
-    
-    # Create a layout with 3 columns to center the registration container (ratio: 1:2:1)
+
     left_co, main_co, right_co = st.columns([0.5, 2, 0.5])
-    
+
     with main_co:
-        # Styled container for the registration form
         with st.container(border=True):
             with st.form("registration_form", clear_on_submit=False):
-                st.markdown("<h4 style='color: #34495E;'>Personal Information</h4>", unsafe_allow_html=True)
-                
-                # Names section distributed into 3 columns
+
+                st.markdown("### Personal Information")
+
+                # ---------------------------------------------------------
+                # Inputs
+                # ---------------------------------------------------------
                 col_first, col_middle, col_last = st.columns(3)
+
                 with col_first:
                     first_name = st.text_input("First name *", placeholder="John")
+
                 with col_middle:
                     middle_name = st.text_input("Middle name", placeholder="Snow")
+
                 with col_last:
                     last_name = st.text_input("Last name *", placeholder="Stark")
-                
-                # Account Details section
-                st.markdown("<hr style='margin: 15px 0; border-style: dashed;'>", unsafe_allow_html=True)
+
+                st.markdown("---")
+
                 user_email = st.text_input("Email Address *", placeholder="example@mail.com")
-                
-                # Passwords section distributed into 2 columns
+
                 col_pass, col_confirm = st.columns(2)
+
                 with col_pass:
-                    user_password = st.text_input("Password *", type="password", placeholder="••••••••")
+                    user_password = st.text_input("Password *", type="password")
+
                 with col_confirm:
-                    user_password_confirm = st.text_input("Confirm password *", type="password", placeholder="••••••••")
-                
-                # Date of Birth
+                    user_password_confirm = st.text_input("Confirm password *", type="password")
+
                 today = datetime.date.today()
                 hundred_years_ago = today.replace(year=today.year - 100)
+
                 date_of_birth = st.date_input(
                     "Date of Birth",
                     value=datetime.date(2000, 1, 1),
-                    min_value=hundred_years_ago,    
-                    max_value=today,                
-                    help="Click to open the calendar and select your birth date"
+                    min_value=hundred_years_ago,
+                    max_value=today
                 )
-                
-                st.markdown("<p style='color: #7F8C8D; font-size: 12px;'>* Indicates mandatory fields</p>", unsafe_allow_html=True)
-                
-                # Custom CSS inject to make the register button full-width and styled green
-                st.markdown(
-                    """
-                    <style>
-                    div[data-testid="stFormSubmitButton"] > button {
-                        width: 100%;
-                        background-color: #4CAF50;
-                        color: white;
-                        border-radius: 5px;
-                        border: none;
-                        padding: 0.5rem 1rem;
-                        font-weight: bold;
-                    }
-                    div[data-testid="stFormSubmitButton"] > button:hover {
-                        background-color: #45a049;
-                        border: none;
-                        color: white;
-                    }
-                    </style>
-                    """, 
-                    unsafe_allow_html=True
-                )
-                
-                submit_button = st.form_submit_button("Register")
 
-                # Form Validations
-                if submit_button:
-                    is_valid = True
-                    
-                    if not first_name.strip() or not last_name.strip() or not user_email.strip() or not user_password.strip():
-                        st.error("All mandatory fields must be filled.")
-                        is_valid = False
-                    
-                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-                    if is_valid and not re.match(email_pattern, user_email):
-                        st.error("Please enter a valid email address.")
-                        is_valid = False
-                        
-                    # MODIFIED: Added use_cloud=True to check email from Supabase global database instead of local DuckDB
-                    if is_valid and not get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [user_email], use_cloud=True).empty:
-                        st.error("Email is already in use at Stratify")
-                        is_valid = False
-                        
-                    if is_valid and len(user_password) < 8:
-                        st.error("Password too short! Minimum 8 characters.")
-                        is_valid = False
-                        
-                    if is_valid and user_password != user_password_confirm:
+                st.markdown("* Required fields")
+
+                submit = st.form_submit_button("Register")
+
+                # ---------------------------------------------------------
+                # 2. Submission
+                # ---------------------------------------------------------
+                if submit:
+
+                    # Basic validation (UI-level only)
+                    if not all([first_name, last_name, user_email, user_password]):
+                        st.error("Please fill in all required fields.")
+                        return
+
+                    if user_password != user_password_confirm:
                         st.error("Passwords do not match.")
-                        is_valid = False
+                        return
 
-                    # Final Submission Process
-                    if is_valid:
-                        m_name = middle_name.strip() if middle_name.strip() else None
-                        
-                        success = registration_func(
-                            user_email, first_name, m_name, last_name, date_of_birth, user_password, user_password_confirm
-                        )
-                        
-                        if success:
-                            # State management for redirection and pre-filling the login form
-                            st.session_state.reg_success = True
-                            st.session_state.prefilled_email = user_email
-                            
-                            st.success("Registration completed! Redirecting to login...")
-                            go_to("login_page")
-                        else:
-                            st.error("Something went wrong during registration.")
+                    if len(user_password) < 8:
+                        st.error("Password must be at least 8 characters.")
+                        return
 
-        # Back to Login secondary action below the main container
-        st.write("") # Spacer
-        if st.button("← Already have an account? Login", use_container_width=True):
-            go_to("login_page")
-        
+                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    if not re.match(email_pattern, user_email):
+                        st.error("Invalid email format.")
+                        return
+
+                    # -----------------------------------------------------
+                    # 3. Duplicate check (cloud)
+                    # -----------------------------------------------------
+                    exists = get_data(
+                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1",
+                        {"email": user_email},
+                        use_cloud=True
+                    )
+
+                    if not exists.empty:
+                        st.error("Email already registered.")
+                        return
+
+                    # -----------------------------------------------------
+                    # 4. Call backend service
+                    # -----------------------------------------------------
+                    m_name = middle_name.strip() if middle_name.strip() else None
+
+                    success = registration_func(
+                        user_email,
+                        first_name,
+                        m_name,
+                        last_name,
+                        date_of_birth,
+                        user_password,
+                        user_password_confirm
+                    )
+
+                    if success:
+                        st.session_state["reg_success"] = True
+                        st.session_state["prefilled_email"] = user_email
+
+                        st.success("Account created successfully!")
+                        go_to("login_page")
+                    else:
+                        st.error("Registration failed. Please try again.")
+
+    # ---------------------------------------------------------------------
+    # 5. Back to login
+    # ---------------------------------------------------------------------
+    st.write("")
+
+    if st.button("← Already have an account? Login", use_container_width=True):
+        go_to("login_page") 
+ 
+ 
+ 
  
 def show_password_recovery_page():
-    # Centered and styled Title using custom HTML/CSS
+    """
+    Placeholder password recovery page (development mode only).
+    No real recovery logic is executed yet.
+    """
+
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Reset Your Password</h1>
-            <p style="color: #7F8C8D; font-size: 16px;">We'll help you get back into Stratify</p>
+            <h1 style="color: #2E4057;">Reset Your Password</h1>
+            <p style="color: #7F8C8D;">We'll help you get back into Stratify</p>
         </div>
-        """, 
+        """,
         unsafe_allow_html=True
     )
-    
-    # Create a layout with 3 columns to center the recovery container (ratio: 1:2:1)
+
     left_co, main_co, right_co = st.columns([1, 2, 1])
-    
+
     with main_co:
-        # Styled container for the password recovery form
         with st.container(border=True):
             with st.form("password_recovery_form", clear_on_submit=False):
-                st.markdown("<h4 style='color: #34495E;'>Account Recovery</h4>", unsafe_allow_html=True)
-                
-                email = st.text_input("Enter your registered email *", placeholder="example@mail.com")
-                
-                # Custom CSS inject to make the recovery button full-width and styled blue/steel
-                st.markdown(
-                    """
-                    <style>
-                    div[data-testid="stFormSubmitButton"] > button {
-                        width: 100%;
-                        background-color: #2E4057;
-                        color: white;
-                        border-radius: 5px;
-                        border: none;
-                        padding: 0.5rem 1rem;
-                        font-weight: bold;
-                    }
-                    div[data-testid="stFormSubmitButton"] > button:hover {
-                        background-color: #1F2D3E;
-                        border: none;
-                        color: white;
-                    }
-                    </style>
-                    """, 
-                    unsafe_allow_html=True
+
+                st.markdown("### Account Recovery")
+
+                email = st.text_input(
+                    "Enter your registered email *",
+                    placeholder="example@mail.com"
                 )
-                
-                submit_button = st.form_submit_button("Recover Password")
-        
-                # Form Validation and Submission
-                if submit_button:
-                    if email.strip():
-                        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-                            st.error("Please enter a valid email address.")
-                        # MODIFIED: Added use_cloud=True to check the recovery email in the global database
-                        elif get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [email], use_cloud=True).empty:
-                            st.error("No account found with that email.")
-                        # Placeholder for future logic
-                        else:
-                            st.info("Password recovery feature: Once the app is live, a reset link will be sent to this email.")
-                    else:
-                        st.warning("Please enter a valid email address.")
-        
-        # Back to Login secondary action positioned cleanly below the form container
-        st.write("") # Spacer
-        if st.button("← Back to Login", use_container_width=True):
-            go_to("login_page")
-            
+
+                submit = st.form_submit_button("Recover Password")
+
+                if submit:
+
+                    # -----------------------------------------------------
+                    # Basic validation only (no backend logic yet)
+                    # -----------------------------------------------------
+                    if not email or not email.strip():
+                        st.warning("Please enter your email.")
+                        return
+
+                    email = email.strip()
+
+                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+                    if not re.match(email_pattern, email):
+                        st.error("Invalid email format.")
+                        return
+
+                    # -----------------------------------------------------
+                    # SAFE PLACEHOLDER (no user enumeration)
+                    # -----------------------------------------------------
+                    st.info(
+                        "If this email exists in our system, "
+                        "you will receive recovery instructions once the feature is enabled."
+                    )
+
+    # ---------------------------------------------------------------------
+    # Navigation
+    # ---------------------------------------------------------------------
+    st.write("")
+
+    if st.button("← Back to Login", use_container_width=True):
+        go_to("login_page")      
+    
+    
+    
             
 ######################################           
 
@@ -707,8 +725,8 @@ def show_portfolios_page():
             transform: translateY(-1px);
         }
 
-        /* --- CUSTOM CRIMSON LOGOUT CONTAINER TARGETING --- */
-        .custom-logout-container button {
+        /* --- TARGETING SIDEBAR LOGOUT BUTTON SPECIFICALLY VIA KEY --- */
+        div[data-testid="stSidebar"] button[key="sidebar_logout_small"] {
             background-color: rgba(239, 68, 68, 0.1) !important;
             border: 1px solid #EF4444 !important;
             border-radius: 10px !important;
@@ -717,25 +735,15 @@ def show_portfolios_page():
             font-weight: 600 !important;
             transition: all 0.2s ease-in-out !important;
             width: 100% !important;
-            display: block !important;
-        }
-        
-        .custom-logout-container button, 
-        .custom-logout-container button p,
-        .custom-logout-container button span {
             color: #EF4444 !important;
         }
         
-        .custom-logout-container button:hover {
+        div[data-testid="stSidebar"] button[key="sidebar_logout_small"]:hover {
             background-color: #EF4444 !important;
             border-color: #EF4444 !important;
+            color: #FFFFFF !important;
             transform: translateY(-1px) !important;
             box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3) !important;
-        }
-        
-        .custom-logout-container button:hover p,
-        .custom-logout-container button:hover span {
-            color: #FFFFFF !important;
         }
         </style>
         """,
@@ -778,11 +786,10 @@ def show_portfolios_page():
     
     st.sidebar.write("") 
     
-    st.sidebar.markdown('<div class="custom-logout-container">', unsafe_allow_html=True)
+    # FIXED: Avoided enclosing Streamlit components inside raw HTML block markers
     if st.sidebar.button("Logout", key="sidebar_logout_small"):
         st.session_state.clear()  
         st.sidebar.rerun()  
-    st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
     # ==========================================
     # MAIN SURFACE SURFACE: PORTFOLIOS GRID
@@ -799,8 +806,6 @@ def show_portfolios_page():
 
     user_id = int(st.session_state.user_id)
 
-    # FIXED: Swapped out %s/list mapping for a dictionary with explicit named parameters (:user_id) 
-    # to perfectly align with the core SQLAlchemy text() compilation layer in get_data.
     user_portfolios = get_data("""
         SELECT 
             portfolio_id, 
@@ -826,14 +831,21 @@ def show_portfolios_page():
                 with st.container():
                     st.markdown(f"<h4 style='color: #2E4057; margin-bottom: 8px;'>📁 {p_name}</h4>", unsafe_allow_html=True)
 
-                    # Safe parsing: Guard against string representation types returned via driver interfaces
+                    # Safe parsing: Guard against type mismatches returned from cloud database drivers
                     start_dt = pd.to_datetime(row["starting_at"]).strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
                     curr_dt = pd.to_datetime(row["current_sim_date"]).strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
 
                     # Calculate live portfolio tracking performance matrix valuations
                     try:
-                        # Extracting native datetime instance structures safely to pass into the valuation engine
-                        sim_date_parsed = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
+                        # FIXED: Resilient parsing approach to guarantee a native datetime object regardless of driver raw data types
+                        raw_sim_date = row["current_sim_date"]
+                        if hasattr(raw_sim_date, "to_pydatetime"):
+                            sim_date_parsed = raw_sim_date.to_pydatetime()
+                        elif isinstance(raw_sim_date, (datetime.date, datetime.datetime)):
+                            sim_date_parsed = datetime.datetime.combine(raw_sim_date, datetime.time.min) if isinstance(raw_sim_date, datetime.date) and not isinstance(raw_sim_date, datetime.datetime) else raw_sim_date
+                        else:
+                            sim_date_parsed = pd.to_datetime(raw_sim_date).to_pydatetime()
+
                         p_value = portfolio_value_calculator(p_id, sim_date_parsed)
                         val_str = f"${p_value:,.2f}"
                     except Exception:
@@ -856,7 +868,7 @@ def show_portfolios_page():
                             st.session_state.current_portfolio_id = p_id
                             st.session_state.current_portfolio_name = p_name
                             
-                            # Standardizing datetime formats stored in system runtime states
+                            # Standardizing datetime formats safely across driver type states
                             st.session_state.current_sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
                             st.session_state.current_portfolio_starting_at = pd.to_datetime(row["starting_at"]).to_pydatetime()
                             go_to("dashboard_home")
@@ -933,7 +945,7 @@ def show_portfolios_page():
         if st.button("🏠 Back to Home", use_container_width=True):
             go_to("home_page")
 
-#############################
+       
             
 def show_dashboard_home():
     """
@@ -1394,7 +1406,7 @@ def show_dashboard_home():
     with cloud_engine.connect() as holdings_con:
         render_holdings_table(holdings_con, portfolio_id, sim_date)
 
-###########################    
+    
     
 def dashboard_sidebar():
     with st.sidebar:
@@ -1631,7 +1643,7 @@ def dashboard_sidebar():
             st.session_state.page = "portfolios"
             st.rerun()
             
-#########################       
+       
             
 def show_asset_explorer():
     dashboard_sidebar()

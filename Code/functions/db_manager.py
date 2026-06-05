@@ -126,6 +126,7 @@ def get_data(query, params=None, use_cloud=False):
         if params:
             return emergency_con.execute(query, params).df()
         return emergency_con.execute(query).df()
+    
 # for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
@@ -550,6 +551,55 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
         if should_close:
             con.close()
             
+# for getting portfolio card data (precomputed for performance)    
+def get_portfolio_card_data(user_id):
+    """
+    Returns precomputed portfolio card data.
+    UI should NOT compute anything.
+    """
+
+    df = get_data("""
+        SELECT 
+            portfolio_id,
+            portfolio_name,
+            available_cash,
+            starting_at,
+            current_sim_date
+        FROM portfolios
+        WHERE user_id = :user_id
+        ORDER BY created_at DESC
+    """, {"user_id": user_id}, use_cloud=True)
+
+    if df.empty:
+        return df
+
+    results = []
+
+    for _, row in df.iterrows():
+        p_id = row["portfolio_id"]
+
+        try:
+            sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
+
+            value = portfolio_value_calculator(
+                p_id,
+                sim_date
+            )
+
+        except Exception:
+            value = None
+
+        results.append({
+            "portfolio_id": p_id,
+            "portfolio_name": row["portfolio_name"],
+            "start_date": pd.to_datetime(row["starting_at"]).date() if row["starting_at"] else None,
+            "sim_date": pd.to_datetime(row["current_sim_date"]).date() if row["current_sim_date"] else None,
+            "value": value
+        })
+
+    return pd.DataFrame(results)
+          
+
 # for making sure no dubble writing happens leading to a crash
 def is_action_allowed(wait_time=2):
     """
