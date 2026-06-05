@@ -460,15 +460,13 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
     logger = logging.getLogger(__name__)
     should_close_cloud = False
 
-    # ---------------------------------------------------------------------
     # 1. Establish Cloud Connection for Metadata (Portfolios & Holdings)
-    # ---------------------------------------------------------------------
     cloud_engine = get_supabase_engine()
     cloud_con = cloud_engine.connect()
     should_close_cloud = True
 
     try:
-        # --- A. Fetch Available Cash From Cloud ---
+        # A. Fetch Available Cash From Cloud
         cash_res = cloud_con.execute(
             text("""
                 SELECT available_cash
@@ -480,7 +478,7 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
 
         portfolio_cash = float(cash_res[0]) if cash_res and cash_res[0] is not None else 0.0
 
-        # --- B. Fetch Raw Asset Holdings Quantities From Cloud ---
+        # B. Fetch Raw Asset Holdings Quantities From Cloud
         holdings_res = cloud_con.execute(
             text("""
                 SELECT asset_id, quantity
@@ -492,40 +490,34 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
 
         df_holdings = pd.DataFrame(holdings_res, columns=["asset_id", "quantity"])
 
-        # ---------------------------------------------------------------------
         # 2. Compute Market Value Using Local Pricing Layer (DuckDB)
-        # ---------------------------------------------------------------------
         total_market_value = 0.0
 
         if not df_holdings.empty:
-            # Extract unique assets to optimize lookup inside the analytical engine
             asset_ids = df_holdings["asset_id"].tolist()
             
-            # Target GCS immutable snapshot bucket deployment reference
-            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"            
+            # Create a temporary table to handle asset list safely in DuckDB
+            duckdb_con.execute("CREATE OR REPLACE TEMPORARY TABLE target_assets AS SELECT unnest(?) as asset_id", [asset_ids])
             
-            # Fast historical as-of price lookup inside DuckDB scanning the GCS parquet file directly
-            # Changed target table to read_parquet() and validated column filters target 'timestamp'
+            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+            
+            # Use JOIN against temporary table to avoid ParserException with IN/ANY lists
             prices_query = f"""
                 WITH ranked_prices AS (
                     SELECT 
-                        asset_id, 
-                        close,
-                        ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY timestamp DESC) as rn
-                    FROM read_parquet('{gcs_prices_url}')
-                    WHERE asset_id = ANY(:asset_list)
-                    AND timestamp <= :target_time
+                        p.asset_id, 
+                        p.close,
+                        ROW_NUMBER() OVER (PARTITION BY p.asset_id ORDER BY p.timestamp DESC) as rn
+                    FROM read_parquet('{gcs_prices_url}') p
+                    INNER JOIN target_assets ta ON p.asset_id = ta.asset_id
+                    WHERE p.timestamp <= :target_time
                 )
                 SELECT asset_id, close AS price
                 FROM ranked_prices
                 WHERE rn = 1
             """
             
-            # Execute lookup using the active connection context injected as an argument
-            df_prices = duckdb_con.execute(prices_query, {
-                "asset_list": asset_ids, 
-                "target_time": timestamp
-            }).df()
+            df_prices = duckdb_con.execute(prices_query, {"target_time": timestamp}).df()
             
             if not df_prices.empty:
                 # Merge holdings data with fetched localized historical prices
@@ -535,9 +527,7 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             else:
                 logger.warning(f"No asset historical prices found in DuckDB for portfolio={portfolio_id} at timestamp={timestamp}")
 
-        # ---------------------------------------------------------------------
         # 3. Final Evaluation Matrix Aggregation
-        # ---------------------------------------------------------------------
         total_value = portfolio_cash + total_market_value
 
         logger.info(
@@ -559,8 +549,8 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
 
     finally:
         if should_close_cloud:
-            cloud_con.close()
-            
+            cloud_con.close()       
+
 # for getting portfolio card data (precomputed for performance)    
 def get_portfolio_card_data(user_id):
     """
