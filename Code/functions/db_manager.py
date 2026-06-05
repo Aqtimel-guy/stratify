@@ -513,8 +513,8 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
                         close,
                         ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY timestamp DESC) as rn
                     FROM read_parquet('{gcs_prices_url}')
-                    WHERE asset_id IN (SELECT UNNEST(?))
-                      AND timestamp <= ?
+                    WHERE asset_id IN (SELECT UNNEST(:asset_list))
+                    AND timestamp <= :target_time
                 )
                 SELECT asset_id, close AS price
                 FROM ranked_prices
@@ -525,7 +525,8 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             df_prices = duckdb_con.execute(prices_query, {
                 "asset_list": asset_ids, 
                 "target_time": timestamp
-            }).df()            
+            }).df()
+            
             if not df_prices.empty:
                 # Merge holdings data with fetched localized historical prices
                 df_valuation = pd.merge(df_holdings, df_prices, on="asset_id", how="inner")
