@@ -678,11 +678,12 @@ def asset_search_component(con):
     
     # Render searchable configuration box populated with structured cloud metadata
     selected_option = st.selectbox(
-        "",
-        options=[""] + st.session_state.all_assets_list,
-        format_func=lambda x: "Type to search..." if x == "" else x,
-        index=0,
-        key="strategy_search_box"
+    label="Select Asset to Analyze",   # Clean structural accessibility label
+    label_visibility="collapsed",
+    options=[""] + st.session_state.all_assets_list,
+    format_func=lambda x: "Type to search..." if x == "" else x,
+    index=0,
+    key="strategy_search_box"
     )
 
     # Parse and anchor selected node metadata securely across runtime cycles
