@@ -139,17 +139,18 @@ def registration_func(
     """
     Secure user registration using Supabase as source of truth.
     No manual ID generation. DB handles identity safely.
+    Mirrors newly created instances to the local analytics cache (DuckDB).
     """
 
     logger = logging.getLogger(__name__)
 
     # ---------------------------------------------------------------------
-    # 1. Validation
+    # 1. Validation Layer
     # ---------------------------------------------------------------------
     if not email or not isinstance(email, str):
         return False
 
-    email_pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+    email_pattern = r"^^[\w\.-]+@[\w\.-]+\.\w+$"
     if not re.match(email_pattern, email):
         return False
 
@@ -174,7 +175,7 @@ def registration_func(
         return False
 
     # ---------------------------------------------------------------------
-    # 2. Hash password
+    # 2. Cryptographic Hashing Layer
     # ---------------------------------------------------------------------
     hashed_password = bcrypt.hashpw(
         raw_password.encode("utf-8"),
@@ -184,12 +185,13 @@ def registration_func(
     dob_str = date_of_birth.strftime("%Y-%m-%d")
 
     # ---------------------------------------------------------------------
-    # 3. Check duplicate email (cloud)
+    # 3. Duplicate Prevention Check (Cloud Verification)
     # ---------------------------------------------------------------------
     check_query = """
         SELECT 1 FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1
     """
 
+    # Leverages our upgraded resilient cloud connection handler
     existing = get_data(check_query, {"email": email}, use_cloud=True)
 
     if not existing.empty:
@@ -197,7 +199,7 @@ def registration_func(
         return False
 
     # ---------------------------------------------------------------------
-    # 4. Insert into Supabase (NO manual ID)
+    # 4. Remote Production Insertion (Supabase Identity Handled)
     # ---------------------------------------------------------------------
     try:
         engine = get_supabase_engine()
@@ -231,6 +233,7 @@ def registration_func(
             "password_hash": hashed_password
         }
 
+        # Using transaction block engine context manager for cloud isolation safety
         with engine.begin() as conn:
             result = conn.execute(text(insert_query), params)
             new_user_id = result.fetchone()[0]
@@ -241,10 +244,12 @@ def registration_func(
         return False
 
     # ---------------------------------------------------------------------
-    # 5. Optional local mirror (DuckDB)
+    # 5. Local Analytical Mirroring (DuckDB Synchronization)
     # ---------------------------------------------------------------------
     try:
-        with duckdb.connect(DB_PATH) as local_con:
+        # Pulling standardized path explicitly from secrets deployment config
+        db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
+        with duckdb.connect(db_path) as local_con:
             local_con.execute("""
                 INSERT INTO users (
                     user_id,
@@ -269,7 +274,7 @@ def registration_func(
     except Exception as e:
         logger.error(f"Local sync failed (non-critical): {e}")
 
-    logger.info(f"User registered successfully: {new_user_id}")
+    logger.info(f"User registered successfully with assigned production ID: {new_user_id}")
     return True
 
 
