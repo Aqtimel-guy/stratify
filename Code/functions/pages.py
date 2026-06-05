@@ -107,11 +107,11 @@ def show_login_page():
     col_reg, col_forgot = st.columns(2)
 
     with col_reg:
-        if st.button("New here? Register", use_container_width=True):
+        if st.button("New here? Register", width="stretch"):
             go_to("regestration_page")
 
     with col_forgot:
-        if st.button("Forgot password?", use_container_width=True):
+        if st.button("Forgot password?", width="stretch"):
             go_to("password_recovery_page")
   
   
@@ -247,7 +247,7 @@ def show_registration_page():
     # ---------------------------------------------------------------------
     st.write("")
 
-    if st.button("← Already have an account? Login", use_container_width=True):
+    if st.button("← Already have an account? Login", width="stretch"):
         go_to("login_page") 
  
  
@@ -314,7 +314,7 @@ def show_password_recovery_page():
     # ---------------------------------------------------------------------
     st.write("")
 
-    if st.button("← Back to Login", use_container_width=True):
+    if st.button("← Back to Login", width="stretch"):
         go_to("login_page")      
     
     
@@ -509,20 +509,20 @@ def show_home_page():
         with st.container():
             st.markdown("💼 **Real time Market**", unsafe_allow_html=True)
             st.write("Current market coming soon.")
-            st.button("Tuned", disabled=True, use_container_width=True, key="market_btn")
+            st.button("Tuned", disabled=True, width="stretch", key="market_btn")
 
     with gadget2:
         with st.container():
             st.markdown("📈 **My Simulation portfolios**", unsafe_allow_html=True)
             st.write("Define your investment strategy and test it.")
-            if st.button("Go to simulation portfolios", use_container_width=True, key="view_port"):
+            if st.button("Go to simulation portfolios", width="stretch", key="view_port"):
                 go_to("portfolios")
 
     with gadget3:
         with st.container():
             st.markdown("🚀 **Labs**", unsafe_allow_html=True)
             st.write("AI & Crypto coming soon.")
-            st.button("Tuned", disabled=True, use_container_width=True, key="labs_btn")
+            st.button("Tuned", disabled=True, width="stretch", key="labs_btn")
 
     st.write("") # Micro-spacer
     
@@ -866,7 +866,7 @@ def show_portfolios_page():
                     btn_col_left, btn_col_right = st.columns([2, 1])
                     
                     with btn_col_left:
-                        if st.button("Enter Portfolio", key=f"enter_{p_id}", use_container_width=True):
+                        if st.button("Enter Portfolio", key=f"enter_{p_id}", width="stretch"):
                             st.session_state.current_portfolio_id = p_id
                             st.session_state.current_portfolio_name = p_name
                             
@@ -876,10 +876,10 @@ def show_portfolios_page():
                             go_to("dashboard_home")
                             
                     with btn_col_right:
-                        with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", use_container_width=True):
+                        with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", width="stretch"):
                             st.markdown("<p style='font-size: 11px; color:#F44336; font-weight:bold;'>⚠️ Permanent Action</p>", unsafe_allow_html=True)
                             
-                            if st.button("Confirm", key=f"delete_{p_id}", use_container_width=True):
+                            if st.button("Confirm", key=f"delete_{p_id}", width="stretch"):
                                 success, message = delete_portfolio(p_id)
                                 if success:
                                     st.toast(f"🗑️ {p_name} deleted successfully!")
@@ -895,7 +895,7 @@ def show_portfolios_page():
     with col_b:
         create_popover_key = f"create_portfolio_popover_v{st.session_state.portfolio_create_version}"
         
-        with st.popover("➕ Create New Portfolio", key=create_popover_key, use_container_width=True):
+        with st.popover("➕ Create New Portfolio", key=create_popover_key, width="stretch"):
             st.markdown(
                 """
                 <div style="text-align: center; margin-bottom: 15px;">
@@ -929,7 +929,7 @@ def show_portfolios_page():
                 submit_col_left, submit_btn_col, submit_col_right = st.columns([1, 2, 1])
                 
                 with submit_btn_col:
-                    submit_clicked = st.form_submit_button("🔨 Create Strategy Now", use_container_width=True)
+                    submit_clicked = st.form_submit_button("🔨 Create Strategy Now", width="stretch")
                     
                 if submit_clicked:
                     if not new_name:
@@ -944,7 +944,7 @@ def show_portfolios_page():
                             st.error(message)
 
     with col_a:
-        if st.button("🏠 Back to Home", use_container_width=True):
+        if st.button("🏠 Back to Home", width="stretch"):
             go_to("home_page")
 
        
@@ -1237,7 +1237,7 @@ def show_dashboard_home():
     v_key = st.session_state.cash_op_version
     with col2:
         # Single master popover entry point to clear main dashboard space
-        with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", use_container_width=False):
+        with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", width="content"):
             st.markdown("### 🛠️ Strategy Capital Operations")
             st.caption("Execute safe fluid balance adjustments for this active strategy context frame.")
             
@@ -1306,7 +1306,7 @@ def show_dashboard_home():
                     key=f"dynamic_note_input_v{v_key}"
                 )
                 
-                if st.form_submit_button(submit_label, use_container_width=True, disabled=is_disabled):
+                if st.form_submit_button(submit_label, width="stretch", disabled=is_disabled):
                     current_click_time = time.time()
                     time_delta = current_click_time - st.session_state.last_transaction_time
                     
@@ -1345,7 +1345,7 @@ def show_dashboard_home():
                             st.error(message)
                             
     with col3:
-        with st.popover("📜 Portfolio Cash History", use_container_width=True):
+        with st.popover("📜 Portfolio Cash History", width="stretch"):
             with cloud_engine.connect() as hist_con:
                 df = get_portfolio_cash_history(portfolio_id, sim_date)
 
@@ -1395,7 +1395,7 @@ def show_dashboard_home():
                 
                 st.dataframe(
                     styled_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True
                 )
     
@@ -1563,7 +1563,7 @@ def dashboard_sidebar():
             # Setting a unique dynamic key prefix so the CSS can securely detect the active element
             btn_key = f"active_nav_{page_val}" if is_current else f"nav_{page_val}"
             
-            if st.button(label, use_container_width=True, key=btn_key):
+            if st.button(label, width="stretch", key=btn_key):
                 st.session_state.page = page_val
                 st.rerun()
         
@@ -1587,17 +1587,17 @@ def dashboard_sidebar():
         # Step Increments Row
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("＋ 1D", use_container_width=True, help="Advance 1 day", key="tm_jump_1d"):
+            if st.button("＋ 1D", width="stretch", help="Advance 1 day", key="tm_jump_1d"):
                 safe_jump(current_dt + datetime.timedelta(days=1))
                 st.rerun()
 
         with col2:
-            if st.button("＋ 1M", use_container_width=True, help="Advance 30 days", key="tm_jump_1m"):
+            if st.button("＋ 1M", width="stretch", help="Advance 30 days", key="tm_jump_1m"):
                 safe_jump(current_dt + datetime.timedelta(days=30))
                 st.rerun()
 
         with col3:
-            if st.button("＋ 1Y", use_container_width=True, help="Advance 365 days", key="tm_jump_1y"):
+            if st.button("＋ 1Y", width="stretch", help="Advance 365 days", key="tm_jump_1y"):
                 safe_jump(current_dt + datetime.timedelta(days=365))
                 st.rerun()
 
@@ -1619,7 +1619,7 @@ def dashboard_sidebar():
             picked_dt = datetime.datetime.combine(picked_date, datetime.time.min)
             
             if picked_dt > current_dt:
-                if st.button("🚀 Execute Time Travel", use_container_width=True, key="tm_execute_travel"):
+                if st.button("🚀 Execute Time Travel", width="stretch", key="tm_execute_travel"):
                     if handle_time_jump(picked_dt, p_id):
                         st.rerun()
 
@@ -1630,7 +1630,7 @@ def dashboard_sidebar():
         # ==========================================
         # SECTION 3: SYSTEM CONTEXT SAFE RESET
         # ==========================================
-        if st.button("🔙 Unload & Exit Portfolio", use_container_width=True, help="Safely discard session context state and go home", key="sys_exit_portfolio"):
+        if st.button("🔙 Unload & Exit Portfolio", width="stretch", help="Safely discard session context state and go home", key="sys_exit_portfolio"):
             keys_to_clear = [
                 'current_portfolio_id', 
                 'current_portfolio_name', 
@@ -1715,7 +1715,7 @@ def show_asset_explorer():
                     if st.button(
                         f"🔍 Analyze {asset['ticker']}", 
                         key=f"btn1_{asset['ticker']}", 
-                        use_container_width=True
+                        width="stretch"
                     ): 
                         st.session_state.last_inspected_ticker = asset['ticker']
                         st.rerun()

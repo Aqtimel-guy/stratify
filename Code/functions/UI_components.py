@@ -26,13 +26,13 @@ def show_cash_management_ui():
     # 1. Deposit
     with col1:
         # שימוש במפתח ייחודי שניתן לאפס אם רוצים (אופציונלי)
-        with st.popover("➕ Deposit Cash", use_container_width=True):
+        with st.popover("➕ Deposit Cash", width="stretch"):
             dep_amount = st.number_input("Amount to Deposit", min_value=1, step=100, key="dep_val")
             
             confirm_dep = st.checkbox(f"I confirm depositing ${dep_amount:,.2f}", key="conf_dep_check")
             
             if confirm_dep:
-                if st.button("🚀 Execute Deposit", use_container_width=True):
+                if st.button("🚀 Execute Deposit", width="stretch"):
                     if is_action_allowed(wait_time=2):
                         with duckdb.connect(DB_PATH) as con:
                             success, msg = execute_cash_transaction(
@@ -68,13 +68,13 @@ def show_cash_management_ui():
 
     # 2. Withdrawal
     with col2:
-        with st.popover("➖ Withdraw Cash", use_container_width=True):
+        with st.popover("➖ Withdraw Cash", width="stretch"):
             with_amount = st.number_input("Amount to Withdraw", min_value=1, step=100, key="with_val")
             
             confirm_with = st.checkbox(f"I confirm withdrawing ${with_amount:,.2f}", key="conf_with_check")
             
             if confirm_with:
-                if st.button("💸 Execute Withdrawal", use_container_width=True):
+                if st.button("💸 Execute Withdrawal", width="stretch"):
                     if is_action_allowed(wait_time=2):
                         with duckdb.connect(DB_PATH) as con:
                             success, msg = execute_cash_transaction(
@@ -138,7 +138,7 @@ def display_asset_card(asset):
         
     # Analysis Trigger Component aligned with execution state safeguards
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("📊 Run Deep Financial Analysis", key=f"analysis_btn_{asset['ticker']}", type="primary", use_container_width=True):
+    if st.button("📊 Run Deep Financial Analysis", key=f"analysis_btn_{asset['ticker']}", type="primary", width="stretch"):
         st.session_state.selected_ticker_for_analysis = asset['ticker']
         st.success(f"Selected {asset['ticker']} for quantitative research down-screen.")
 
@@ -161,7 +161,7 @@ def show_buy_component(ticker, asset_price):
     if confirm_key not in st.session_state:
         st.session_state[confirm_key] = False
 
-    with st.popover(f"🛒 Buy {ticker}", use_container_width=True):
+    with st.popover(f"🛒 Buy {ticker}", width="stretch"):
         st.subheader(f"Purchase {ticker}")
         st.write(f"Cash Available: **${current_cash:,.2f}**")
         
@@ -187,7 +187,7 @@ def show_buy_component(ticker, asset_price):
 
         # 4. Smart two-step verification mechanism without redundant reruns
         if not st.session_state[confirm_key]:
-            if st.button("Review Order", use_container_width=True):
+            if st.button("Review Order", width="stretch"):
                 st.session_state[confirm_key] = True
                 st.rerun()  # Rerun is required here to switch to confirmation buttons layout
         else:
@@ -225,7 +225,7 @@ def show_buy_component(ticker, asset_price):
                         st.warning("Slow down...")
 
             with col_b:
-                if st.button("❌ Cancel", use_container_width=True):
+                if st.button("❌ Cancel", width="stretch"):
                     st.session_state[confirm_key] = False
                     st.rerun()
 
@@ -418,7 +418,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
             else:
                 p_cash = float(p_cash)
 
-            with st.popover("💼 Trade", use_container_width=True):
+            with st.popover("💼 Trade", width="stretch"):
                 # 1. Select Trade Side using a unique persistent key anchor blueprint
                 trade_side = st.radio(
                     "Direction",
@@ -447,7 +447,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                     est_credit = trade_qty * current_price
                     st.markdown(f"<p style='font-size:11px; color:#64748B; margin-top:2px;'>Est. Credit: <strong>${est_credit:,.2f}</strong></p>", unsafe_allow_html=True)
                     
-                    if st.button("Confirm Sale", key=f"btn_s_commit_{ticker}_{idx}", type="primary", use_container_width=True):
+                    if st.button("Confirm Sale", key=f"btn_s_commit_{ticker}_{idx}", type="primary", width="stretch"):
                         if trade_qty > available_qty:
                             st.error(f"❌ Cannot sell {trade_qty}. You only have {available_qty} shares.")
                         else:
@@ -484,7 +484,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                         unsafe_allow_html=True
                     )
                     
-                    if st.button("Confirm Purchase", key=f"btn_b_commit_{ticker}_{idx}", type="primary", use_container_width=True):
+                    if st.button("Confirm Purchase", key=f"btn_b_commit_{ticker}_{idx}", type="primary", width="stretch"):
                         if est_cost > p_cash:
                             st.error(f"❌ Insufficient cash. Total cost is ${est_cost:,.2f} but you only have ${p_cash:,.2f}")
                         else:
@@ -497,7 +497,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                             else:
                                 st.error(msg)
                             
-            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}_{idx}", help="View Deep Analysis", use_container_width=True):
+            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}_{idx}", help="View Deep Analysis", width="stretch"):
                 show_asset_analysis_dialog(ticker)
 
         # Subtle structural line break between rows 
@@ -648,7 +648,7 @@ def render_performance_chart(df, title="Portfolio Performance History"):
 
     st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         config={"displayModeBar": False},
     )
 
@@ -834,7 +834,7 @@ def show_asset_analysis_dialog(asset_ticker):
                 template="plotly_white",
                 hovermode="x unified"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.warning("No data available for this specific time range.")
 
@@ -1116,7 +1116,7 @@ def strategy_creating_component(con, portfolio_id):
             with col_skip:
                 if st.button(
                     "🚀 Start Questionnaire",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary",
                 ):
                     st.session_state.show_questions = True
@@ -1161,22 +1161,22 @@ def strategy_creating_component(con, portfolio_id):
 
             with col1:
                 if i > 0:
-                    if st.button("⬅ Previous", use_container_width=True):
+                    if st.button("⬅ Previous", width="stretch"):
                         st.session_state.current_question -= 1
                         st.rerun()
 
             with col2:
-                if st.button("❌ Exit", use_container_width=True):
+                if st.button("❌ Exit", width="stretch"):
                     st.session_state.show_questions = False
                     st.rerun()
 
             with col3:
                 if i < 6:
-                    if st.button("Next ➡", use_container_width=True, type="primary"):
+                    if st.button("Next ➡", width="stretch", type="primary"):
                         st.session_state.current_question += 1
                         st.rerun()
                 else:
-                    if st.button("✅ Proceed to Sliders", use_container_width=True, type="primary"):
+                    if st.button("✅ Proceed to Sliders", width="stretch", type="primary"):
 
                         @st.dialog("Processing your strategy 🧠")
                         def processing_modal():
@@ -1266,7 +1266,7 @@ def strategy_creating_component(con, portfolio_id):
                     st.session_state[f"pop_rev_{portfolio_id}"] = 0
 
                 # Render popover with a dynamic key configuration
-                with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", use_container_width=True):
+                with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", width="stretch"):
                     st.markdown("<p style='font-size:14px; font-weight:600; margin-bottom:4px;'>Strategy Name</p>", unsafe_allow_html=True)
                     
                     new_strat_name = st.text_input(
@@ -1277,7 +1277,7 @@ def strategy_creating_component(con, portfolio_id):
                     )
 
                     # Dynamic database injection execution block
-                    if st.button("✅ Save Configuration", use_container_width=True, type="primary", key=f"pop_save_confirm_{portfolio_id}"):
+                    if st.button("✅ Save Configuration", width="stretch", type="primary", key=f"pop_save_confirm_{portfolio_id}"):
                         if new_strat_name.strip():
                             u_id = int(st.session_state.get("user_id", 0))
                             p_id = int(portfolio_id)
@@ -1427,11 +1427,11 @@ def strategy_creating_component(con, portfolio_id):
 
                     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
                     
-                    with st.popover("🗑 Delete Strategy", use_container_width=True):
+                    with st.popover("🗑 Delete Strategy", width="stretch"):
                         st.write(f"Permanently delete '{selected_name}'?")
                         
                         # The actual inner confirmation execution action button
-                        if st.button("⚠️ Confirm Delete", key=f"pop_del_btn_{portfolio_id}", use_container_width=True, type="primary"):
+                        if st.button("⚠️ Confirm Delete", key=f"pop_del_btn_{portfolio_id}", width="stretch", type="primary"):
                             con.execute(
                                 """
                                 DELETE FROM user_preferences_strategy
@@ -1820,7 +1820,7 @@ def strategy_creating_component(con, portfolio_id):
 
                         st.plotly_chart(
                             fig,
-                            use_container_width=True,
+                            width="stretch",
                             config={'displayModeBar': False}
                         )
                     else:
@@ -1850,7 +1850,7 @@ def strategy_creating_component(con, portfolio_id):
                 if st.button(
                     " 🚀 Procceed to the last step",
                     type="primary",
-                    use_container_width=True
+                    width="stretch"
                 ):
                     st.session_state.active_tab = 3
                     st.rerun()
@@ -2121,7 +2121,7 @@ def strategy_creating_component(con, portfolio_id):
                     st.button(
                         label="✓ Selected" if selected else f"Select {option}",
                         key=f"native_click_{div_key}_{option}",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary" if selected else "secondary", # Primary colors it blue based on your theme
                         on_click=set_diversification,
                         args=(option,)
@@ -2141,7 +2141,7 @@ def strategy_creating_component(con, portfolio_id):
         if st.button(
             "🚀 Generate Portfolio",
             type="primary",
-            use_container_width=True
+            width="stretch"
         ):
 
             st.toast("Building your optimized portfolio...", icon="⚙️")
@@ -2318,7 +2318,7 @@ def render_stock_factor_maps(con, ticker: str):
                 "Growth",
                 "Defensive"
             ),
-            use_container_width=True
+            width="stretch"
         )
 
     with col2:
@@ -2330,7 +2330,7 @@ def render_stock_factor_maps(con, ticker: str):
                 "Value",
                 "Size"
             ),
-            use_container_width=True
+            width="stretch"
         )
 
     with col3:
@@ -2342,5 +2342,5 @@ def render_stock_factor_maps(con, ticker: str):
                 "Momentum",
                 "Quality"
             ),
-            use_container_width=True
+            width="stretch"
         )
