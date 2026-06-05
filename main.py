@@ -5,10 +5,14 @@ import datetime
 import re
 import os
 
-# --- CRITICAL STREAMLIT INITIALIZATION ---
-# set_page_config MUST be executed before any other Streamlit command or state modification
+# -------------------------------------------------------------------
+# STREAMLIT CONFIG (MUST BE FIRST)
+# -------------------------------------------------------------------
 st.set_page_config(page_title="Stratify 2026", layout="wide")
 
+# -------------------------------------------------------------------
+# IMPORTS
+# -------------------------------------------------------------------
 from Code.functions.db_manager import *
 from Code.functions.portfolio_managment import *
 from Code.functions.trading_logic import *
@@ -16,99 +20,157 @@ from Code.functions.users_managment import *
 from Code.functions.UI_components import *
 from Code.functions.pages import *
 
-# -----------------------------------------------------------------------------
-# DYNAMIC DATABASE PATH RESOLUTION (STRICT ENV CHECK)
-# Supports both local Windows pathing and Streamlit Cloud Linux environments
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# PATH RESOLUTION
+# -------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Check if running on Streamlit Cloud deployment vs Local machine
 if "mount/src" in BASE_DIR.replace("\\", "/"):
-    # Target path inside standard root repository structure
     DB_PATH = os.path.join(BASE_DIR, "Data_Storage", "stratify.duckdb")
-    
-    # Fallback backup check: verify physical file existence, adapt path if structure differs
+
     if not os.path.exists(DB_PATH):
-        ALTERNATIVE_PATH = os.path.join(os.path.dirname(BASE_DIR), "Data_Storage", "stratify.duckdb")
-        if os.path.exists(ALTERNATIVE_PATH):
-            DB_PATH = ALTERNATIVE_PATH
-            
-    if 'use_cloud' not in st.session_state:
-        st.session_state.use_cloud = True
+        alt = os.path.join(os.path.dirname(BASE_DIR), "Data_Storage", "stratify.duckdb")
+        if os.path.exists(alt):
+            DB_PATH = alt
+
+    USE_CLOUD = True
 else:
-    # Local fallback using absolute Windows directory structure
-    DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
-    if 'use_cloud' not in st.session_state:
-        st.session_state.use_cloud = False
+    DB_PATH = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
+    USE_CLOUD = False
 
-# Store DB path
 st.session_state["DB_PATH"] = DB_PATH
+st.session_state["use_cloud"] = USE_CLOUD
 
-# Create persistent DuckDB connection (IMPORTANT)
+
+# -------------------------------------------------------------------
+# CONNECTIONS
+# -------------------------------------------------------------------
 @st.cache_resource
 def get_duckdb_connection(db_path: str):
     return duckdb.connect(db_path)
 
-duckdb_con = get_duckdb_connection(st.session_state["DB_PATH"])
+
+def init_connections():
+    # DuckDB (always exists)
+    if "duckdb_con" not in st.session_state:
+        st.session_state.duckdb_con = get_duckdb_connection(st.session_state["DB_PATH"])
+
+    # cloud connection placeholder (never None surprise)
+    if "con" not in st.session_state:
+        st.session_state.con = None
+
+    if "cloud_con" not in st.session_state:
+        st.session_state.cloud_con = None
 
 
-def main():
-    # Setting initial states (Establishes core connection context via init_session_state)
-    init_session_state()
-    
-    # -------------------------------------------------------------------------
-    # CLOUD DATABASE ENGINE INJECTION LAYER
-    # Registers remote Parquet references into active database connection catalog
-    # -------------------------------------------------------------------------
-    if st.session_state.get('use_cloud', False) and 'con' in st.session_state:
-        con = st.session_state.con
+# -------------------------------------------------------------------
+# SESSION INIT (SAFE DEFAULTS)
+# -------------------------------------------------------------------
+def init_session_state():
+    defaults = {
+        "page": "login_page",
+        "user_id": None,
+        "use_cloud": st.session_state.get("use_cloud", False),
+        "cloud_con": None,
+        "con": None
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+# -------------------------------------------------------------------
+# CLOUD SETUP (SAFE)
+# -------------------------------------------------------------------
+def setup_cloud_catalog():
+    if not st.session_state.get("use_cloud", False):
+        return
+
+    con = st.session_state.get("con")
+
+    if con is None:
+        try:
+            con = duckdb.connect(st.session_state["DB_PATH"])
+            st.session_state.con = con
+        except Exception as e:
+            st.sidebar.error(f"Cloud connection failed: {e}")
+            return
+
+    try:
         base_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
-        
-        if con is not None:
-            try:
-                # Install and configure httpfs driver parameters cleanly
-                con.execute("INSTALL httpfs;")
-                con.execute("LOAD httpfs;")
-                
-                # Map logical relation targets directly to underlying cloud storage binaries
-                con.execute(f"CREATE OR REPLACE VIEW assets AS SELECT * FROM read_parquet('{base_url}/assets.parquet');")
-                con.execute(f"CREATE OR REPLACE VIEW prices AS SELECT * FROM read_parquet('{base_url}/prices.parquet');")
-                con.execute(f"CREATE OR REPLACE VIEW fundamentals AS SELECT * FROM read_parquet('{base_url}/fundamentals.parquet');")
-                con.execute(f"CREATE OR REPLACE VIEW asset_factors_normalized_final AS SELECT * FROM read_parquet('{base_url}/asset_factors_normalized_final.parquet');")
-            except Exception as schema_err:
-                st.sidebar.error(f"⚠️ Cloud catalog registration failed: {schema_err}")
-        else:
-            st.sidebar.error("⚠️ Local data catalog connection driver not active.")
 
-    # -------------------------------------------------------------------------
-    # ROUTER & APPLICATION LIFE CYCLE WORKSPACE UI
-    # -------------------------------------------------------------------------
-    
-    # Fallback logic for lost or corrupted routing key state
-    if "page" not in st.session_state:
-        st.error("Oops, something went wrong. Please log in again.") 
-        st.session_state.page = "login_page"
-        
-    # Standard application UI Workspace routing definitions
-    if st.session_state.page == "login_page":
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
+
+        con.execute(f"""
+            CREATE OR REPLACE VIEW assets AS 
+            SELECT * FROM read_parquet('{base_url}/assets.parquet');
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE VIEW prices AS 
+            SELECT * FROM read_parquet('{base_url}/prices.parquet');
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE VIEW fundamentals AS 
+            SELECT * FROM read_parquet('{base_url}/fundamentals.parquet');
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE VIEW asset_factors_normalized_final AS 
+            SELECT * FROM read_parquet('{base_url}/asset_factors_normalized_final.parquet');
+        """)
+
+    except Exception as e:
+        st.sidebar.error(f"⚠️ Cloud catalog registration failed: {e}")
+
+
+# -------------------------------------------------------------------
+# MAIN APP
+# -------------------------------------------------------------------
+def main():
+    init_session_state()
+    init_connections()
+    setup_cloud_catalog()
+
+    # ---------------- ROUTER ----------------
+    page = st.session_state.get("page", "login_page")
+
+    if page == "login_page":
         show_login_page()
-    elif st.session_state.page == "regestration_page":
+
+    elif page == "regestration_page":
         show_registration_page()
-    elif st.session_state.page == "password_recovery_page":
+
+    elif page == "password_recovery_page":
         show_password_recovery_page()
-    elif st.session_state.page == "home_page":
+
+    elif page == "home_page":
         show_home_page()
-    elif st.session_state.page == "portfolios":
-         show_portfolios_page()
-    elif st.session_state.page == "dashboard_home":
+
+    elif page == "portfolios":
+        show_portfolios_page()
+
+    elif page == "dashboard_home":
         show_dashboard_home()
-    elif st.session_state.page == "asset_explorer":
+
+    elif page == "asset_explorer":
         show_asset_explorer()
-    elif st.session_state.page == "strategy_builder":
+
+    elif page == "strategy_builder":
         show_strategy_builder()
-    elif st.session_state.page == "portfolio_performance_analysis":
+
+    elif page == "portfolio_performance_analysis":
         show_portfolio_performance_analysis()
-        
-        
+
+
+# -------------------------------------------------------------------
+# ENTRY POINT
+# -------------------------------------------------------------------
 if __name__ == "__main__":
     main()
+    
+    
+
