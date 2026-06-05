@@ -214,275 +214,388 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     
 # for getting all the data over an asset up to a sim_time
 def get_asset_full_data(ticker, sim_time, portfolio_id=None):
-    # 1. מידע בסיסי ותאריך התחלה
+    """
+    Returns full asset dataset up to a simulation timestamp.
+    Data sources:
+    - Supabase: assets, holdings
+    - GCS / DuckDB layer: prices, fundamentals, features (via get_data abstraction)
+    """
+
+    # 1. Asset metadata + first trade date (split to avoid correlated subquery issues)
     asset_df = get_data("""
-        SELECT asset_id, ticker, name, sector, industry, is_etf,
-               (SELECT MIN(timestamp) FROM prices WHERE asset_id = assets.asset_id) as first_trade_date
-        FROM assets WHERE ticker = ?
+        SELECT asset_id, ticker, name, sector, industry, is_etf
+        FROM assets
+        WHERE ticker = ?
     """, [ticker.upper()])
-    
+
     if asset_df.empty:
         return None
 
-    asset_id = int(asset_df.iloc[0]['asset_id'])
+    asset_id = int(asset_df.iloc[0]["asset_id"])
 
-    # 2. בדיקת אחזקות בתיק (אם רלוונטי)
+    # separate query for first trade date (better for Supabase performance)
+    first_trade_df = get_data("""
+        SELECT MIN(timestamp) AS first_trade_date
+        FROM prices
+        WHERE asset_id = ?
+    """, [asset_id])
+
+    first_trade_date = (
+        first_trade_df.iloc[0]["first_trade_date"]
+        if not first_trade_df.empty
+        else None
+    )
+
+    # attach info
+    info = asset_df.iloc[0].to_dict()
+    info["first_trade_date"] = first_trade_date
+
+    # 2. Holdings (Supabase)
     shares_held = 0
     if portfolio_id:
-        h_df = get_data("SELECT quantity FROM holdings WHERE portfolio_id = ? AND asset_id = ?", 
-                        [portfolio_id, asset_id])
-        shares_held = h_df.iloc[0]['quantity'] if not h_df.empty else 0
+        h_df = get_data("""
+            SELECT quantity
+            FROM holdings
+            WHERE portfolio_id = ? AND asset_id = ?
+        """, [portfolio_id, asset_id])
 
-    # 3. שליפת היסטוריית מחירים (שנה אחורה לניתוח)
+        if not h_df.empty:
+            shares_held = float(h_df.iloc[0]["quantity"])
+
+    # 3. Price history (GCS / Parquet layer via abstraction)
     prices_df = get_data("""
-        SELECT timestamp, open, high, low, close, adj_close, volume 
-        FROM prices 
-        WHERE asset_id = ? AND timestamp <= ? 
+        SELECT timestamp, open, high, low, close, adj_close, volume
+        FROM prices
+        WHERE asset_id = ? AND timestamp <= ?
         ORDER BY timestamp ASC
     """, [asset_id, sim_time])
 
-    # 4. שליפת פונדמנטלס ופיצ'רים
-    fundamentals_df = get_data("SELECT * FROM fundamentals WHERE asset_id = ? AND timestamp <= ? ORDER BY timestamp ASC", [asset_id, sim_time])
-    features_df = get_data("SELECT * FROM features WHERE asset_id = ? AND timestamp <= ? ORDER BY timestamp ASC", [asset_id, sim_time])
+    # 4. Fundamentals
+    fundamentals_df = get_data("""
+        SELECT *
+        FROM fundamentals
+        WHERE asset_id = ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+    """, [asset_id, sim_time])
 
-    # איסוף הכל למבנה נתונים אחד
+    # 5. Features
+    features_df = get_data("""
+        SELECT *
+        FROM features
+        WHERE asset_id = ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+    """, [asset_id, sim_time])
+
+    # 6. Latest price (safe handling)
+    latest_price = None
+    if not prices_df.empty:
+        latest_price = prices_df.iloc[-1]["close"]
+
     return {
-        "info": asset_df.iloc[0].to_dict(),
+        "info": info,
         "shares_held": shares_held,
         "prices": prices_df,
         "fundamentals": fundamentals_df,
         "features": features_df,
-        "latest_price": prices_df.iloc[-1]['close'] if not prices_df.empty else None
+        "latest_price": latest_price
     }
 
 # for recording snapshots of portfolios 
 def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
     """
-    Records a portfolio valuation snapshot in history. Pre-cleans existing rows 
-    for the same portfolio and date to maintain data integrity without relying on DB constraints.
-    All source documentation and comments are maintained strictly in English.
+    Records a portfolio valuation snapshot in portfolio_history.
+
+    Data sources:
+    - Supabase: portfolios, portfolio_history, holdings (indirect via calculator)
+    - GCS/DuckDB: market data via portfolio_value_calculator
+
+    This function assumes the provided connection is a SQLAlchemy connection.
     """
+
     logger = logging.getLogger(__name__)
-    
+
     try:
-        # 1. Calculate the real-time dynamic valuation of the portfolio assets
-        total_value = portfolio_value_calculator(portfolio_id, sim_date, con=connection)
-        
-        # 2. Fetch the current available cash ledger balance using cloud-native parameters
+        # ---------------------------------------------------------------------
+        # 1. Portfolio total value (market value + cash)
+        # ---------------------------------------------------------------------
+        total_value = portfolio_value_calculator(
+            portfolio_id,
+            sim_date,
+            con=connection
+        )
+
+        # ---------------------------------------------------------------------
+        # 2. Cash balance (Supabase)
+        # ---------------------------------------------------------------------
         cash_res = connection.execute(
-            text("SELECT available_cash FROM portfolios WHERE portfolio_id = :id"),
-            {"id": portfolio_id}
+            text("""
+                SELECT available_cash
+                FROM portfolios
+                WHERE portfolio_id = :portfolio_id
+            """),
+            {"portfolio_id": portfolio_id}
         ).fetchone()
-        
-        available_cash = float(cash_res[0]) if cash_res else 0.0
-        
-        # 3. Safe Clean-up: Delete any existing historical slice for this portfolio on this exact date
-        # This completely replaces the need for an 'ON CONFLICT' constraint in the cloud schema
+
+        available_cash = float(cash_res[0]) if cash_res and cash_res[0] is not None else 0.0
+
+        # ---------------------------------------------------------------------
+        # 3. Idempotent write strategy (DELETE + INSERT)
+        # ---------------------------------------------------------------------
+        # NOTE: kept as-is for compatibility, but logically represents UPSERT behavior
+
         connection.execute(
             text("""
-                DELETE FROM portfolio_history 
-                WHERE portfolio_id = :portfolio_id AND timestamp = :timestamp
+                DELETE FROM portfolio_history
+                WHERE portfolio_id = :portfolio_id
+                  AND timestamp = :timestamp
             """),
-            {"portfolio_id": portfolio_id, "timestamp": sim_date}
+            {
+                "portfolio_id": portfolio_id,
+                "timestamp": sim_date
+            }
         )
-        
-        # 4. Standard safe INSERT layout execution
-        cloud_insert_query = text("""
-            INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-            VALUES (:portfolio_id, :timestamp, :portfolio_value, :available_cash);
-        """)
-        
+
         connection.execute(
-            cloud_insert_query,
+            text("""
+                INSERT INTO portfolio_history (
+                    portfolio_id,
+                    timestamp,
+                    portfolio_value,
+                    available_cash
+                )
+                VALUES (
+                    :portfolio_id,
+                    :timestamp,
+                    :portfolio_value,
+                    :available_cash
+                )
+            """),
             {
                 "portfolio_id": portfolio_id,
                 "timestamp": sim_date,
-                "portfolio_value": total_value,
+                "portfolio_value": float(total_value),
                 "available_cash": available_cash
             }
         )
-        
-        logger.info(f"Cloud portfolio history snapshot successfully synchronized for ID {portfolio_id}.")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Cloud portfolio snapshot transaction sequence failed: {e}")
-        raise e
 
+        logger.info(
+            f"Portfolio snapshot stored: "
+            f"portfolio_id={portfolio_id}, "
+            f"date={sim_date}, "
+            f"value={total_value:.2f}"
+        )
+
+        return True
+
+    except Exception as e:
+        logger.error(
+            f"Failed to capture portfolio snapshot "
+            f"(portfolio_id={portfolio_id}, sim_date={sim_date}): {e}"
+        )
+        raise
 
 # for serching assets
 def search_assets(con, search_term):
     """
-    מחפשת נכסים לפי טיקר או שם ומחזירה רשימה של תוצאות.
+    Searches assets by ticker or name and returns formatted results.
+    Data source: Supabase (production) or DuckDB (local/dev) via provided connection.
     """
-    if not search_term or len(search_term) < 1:
-        return []
-    
-    # חיפוש גמיש (LIKE) גם בטיקר וגם בשם
-    query = f"%{search_term}%"
-    results = con.execute("""
-        SELECT ticker, name 
-        FROM assets 
-        WHERE ticker LIKE ? OR name LIKE ?
-        LIMIT 10
-    """, [query, query]).fetchall()
-    
-    # עיצוב התוצאות למחרוזת קריאה: "AAPL | Apple Inc."
-    return [f"{r[0]} | {r[1]}" for r in results]
 
+    if not search_term or not search_term.strip():
+        return []
+
+    search_term = search_term.strip()
+    query = f"%{search_term}%"
+
+    # Use ILIKE for PostgreSQL compatibility (Supabase)
+    results = con.execute("""
+        SELECT ticker, name
+        FROM assets
+        WHERE ticker ILIKE :q OR name ILIKE :q
+        LIMIT 10
+    """, {"q": query}).fetchall()
+
+    return [f"{r[0]} | {r[1]}" for r in results]
 
 # for calculating portfolio's Value at a given time 
 def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     """
-    Computes the total financial valuation of a specific portfolio (Available Cash + Market Value of Holdings)
-    at a given historical timestamp slice using cloud-native engines.
-    All source documentation and comments are maintained strictly in English.
+    Computes total portfolio value at a given timestamp:
+    cash + market value of holdings.
+
+    Data sources:
+    - Supabase: holdings, portfolios
+    - GCS/DuckDB layer: prices (via SQL engine abstraction)
     """
+
     logger = logging.getLogger(__name__)
     should_close = False
 
-    # --- DEFENSIVE REALIGNMENT ---
-    # If the positional arguments are mixed up in legacy UI calls, safely swap them
-    if hasattr(timestamp, 'execute'):
+    # ---------------------------------------------------------------------
+    # 1. Connection normalization (safe cloud/local handling)
+    # ---------------------------------------------------------------------
+    if hasattr(timestamp, "execute"):
         con, timestamp = timestamp, con
 
-    # If the legacy DuckDB connection leaks in, bypass it and force cloud engine connectivity
-    if con is not None and ('duckdb' in str(type(con)).lower() or not hasattr(con, 'begin')):
-        con = None 
+    if con is not None and "duckdb" in str(type(con)).lower():
+        con = None
 
-    # Dynamic operational routing: Use passed active transaction context or spin up an isolated engine connection
     if con is None:
         engine = get_supabase_engine()
         con = engine.connect()
         should_close = True
 
     try:
-        ### --- STEP 1: QUERY RELEVANT SNAPSHOT DATA FROM CLOUD DB --- ###
-        
+        # -----------------------------------------------------------------
+        # 2. Portfolio holdings valuation (as-of query - optimized)
+        # -----------------------------------------------------------------
         query = text("""
-            SELECT 
-                h.asset_id, 
-                h.quantity, 
+            SELECT
+                h.asset_id,
+                h.quantity,
                 p.close AS price,
                 (h.quantity * p.close) AS market_value
             FROM holdings h
-            LEFT JOIN prices p ON h.asset_id = p.asset_id
+            JOIN LATERAL (
+                SELECT close
+                FROM prices p2
+                WHERE p2.asset_id = h.asset_id
+                  AND p2.timestamp <= :timestamp
+                ORDER BY p2.timestamp DESC
+                LIMIT 1
+            ) p ON TRUE
             WHERE h.portfolio_id = :portfolio_id
-            AND p.timestamp = (
-                SELECT MAX(timestamp) 
-                FROM prices 
-                WHERE asset_id = h.asset_id 
-                    AND timestamp <= :timestamp
-            )
         """)
-        
-        result_assets = con.execute(query, {"portfolio_id": portfolio_id, "timestamp": timestamp}).fetchall()
-        
-        if result_assets:
-            df_assets_holdings = pd.DataFrame(
-                result_assets, 
-                columns=['asset_id', 'quantity', 'price', 'market_value']
-            )
-        else:
-            df_assets_holdings = pd.DataFrame(columns=['asset_id', 'quantity', 'price', 'market_value'])
 
-        # Fetch the current unallocated cash reserves available in the target core profile
+        result = con.execute(
+            query,
+            {"portfolio_id": portfolio_id, "timestamp": timestamp}
+        ).fetchall()
+
+        df_assets = pd.DataFrame(
+            result,
+            columns=["asset_id", "quantity", "price", "market_value"]
+        )
+
+        # -----------------------------------------------------------------
+        # 3. Cash balance
+        # -----------------------------------------------------------------
         cash_res = con.execute(
             text("""
                 SELECT available_cash
                 FROM portfolios
                 WHERE portfolio_id = :portfolio_id
-            """), 
+            """),
             {"portfolio_id": portfolio_id}
         ).fetchone()
-        
-        portfolio_cash = float(cash_res[0]) if cash_res else 0.0
-        
-        ### --- STEP 2: AGGREGATE TOTAL NET VALUE --- ###
-        
-        total_market_value = float(df_assets_holdings['market_value'].sum()) if not df_assets_holdings.empty else 0.0
-        total_portfolio_value = portfolio_cash + total_market_value
-        
-        logger.info(
-            f"Portfolio {portfolio_id} valuation tracking at {timestamp}: "
-            f"Cash: {portfolio_cash:.2f}, Assets: {total_market_value:.2f}, Total: {total_portfolio_value:.2f}"
-        )
-        
-        return round(total_portfolio_value, 2)
 
-    except Exception as calc_error:
-        logger.error(f"Failed to execute calculation sequence context for Portfolio ID {portfolio_id}: {calc_error}")
-        raise calc_error
-        
+        portfolio_cash = float(cash_res[0]) if cash_res and cash_res[0] is not None else 0.0
+
+        # -----------------------------------------------------------------
+        # 4. Aggregation
+        # -----------------------------------------------------------------
+        total_market_value = (
+            float(df_assets["market_value"].sum())
+            if not df_assets.empty
+            else 0.0
+        )
+
+        total_value = portfolio_cash + total_market_value
+
+        logger.info(
+            f"Portfolio valuation computed: "
+            f"id={portfolio_id}, "
+            f"timestamp={timestamp}, "
+            f"cash={portfolio_cash:.2f}, "
+            f"market={total_market_value:.2f}, "
+            f"total={total_value:.2f}"
+        )
+
+        return round(total_value, 2)
+
+    except Exception as e:
+        logger.error(
+            f"Portfolio valuation failed: portfolio_id={portfolio_id}, error={e}"
+        )
+        raise
+
     finally:
         if should_close:
             con.close()
-     
             
 # for making sure no dubble writing happens leading to a crash
 def is_action_allowed(wait_time=2):
-    """בודקת אם עבר מספיק זמן מהפעולה האחרונה"""
+    """
+    Prevents rapid repeated actions (basic debounce mechanism).
+    Uses Streamlit session state to track last execution time.
+    """
+
     now = time.time()
-    last_time = st.session_state.get('last_action_time', 0)
-    
+    last_time = st.session_state.get("last_action_time", 0)
+
     if now - last_time < wait_time:
         return False
-    
-    st.session_state.last_action_time = now
-    return True   
 
-# for setting initial states 
-# also helps keeping track of session_state variables
+    st.session_state["last_action_time"] = now
+    return True
+
+
+
+# for setting initial states and to help keeping track of session_state variables
 def init_session_state():
     """
-    Initializes system-wide default session state variables for navigation, 
-    user authentication context, portfolio state tracking, and establishes
-    the core persistent connection driver for the local database catalog architecture.
+    Initializes system-wide Streamlit session state variables for:
+    - Navigation
+    - Authentication context
+    - Portfolio state tracking
+    - Core database connection
     """
-    # -------------------------------------------------------------------------
-    # CORE DATABASE CONTEXT ESTABLISHMENT
-    # -------------------------------------------------------------------------
-    # Ensure a single unified connection context exists across script executions
-    if 'con' not in st.session_state:
-        # Resolve path dynamically from session state registry (defaults to local)
-        resolved_db_path = st.session_state.get('DB_PATH', 'stratify.duckdb')
-        
+
+    # ---------------------------------------------------------------------
+    # CORE DATABASE CONNECTION (LOCAL DEV ONLY)
+    # ---------------------------------------------------------------------
+    # DuckDB is used only for local development / analytics purposes
+    if "con" not in st.session_state:
+        resolved_db_path = st.session_state.get("DB_PATH", "stratify.duckdb")
+
         try:
-            # Connect directly to the physical storage file containing local configurations
-            # read_only=False allows mutation of user preference matrices safely
-            st.session_state.con = duckdb.connect(database=resolved_db_path, read_only=False)
+            st.session_state["con"] = duckdb.connect(
+                database=resolved_db_path,
+                read_only=False
+            )
         except Exception as conn_error:
-            st.error(f"Critical System Failure: Unable to bind data pipeline driver. Info: {conn_error}")
-            st.session_state.con = None
+            st.error(
+                f"Failed to initialize local DuckDB connection: {conn_error}"
+            )
+            st.session_state["con"] = None
 
-    # -------------------------------------------------------------------------
-    # APP INITIALIZATION STATE VARIABLES
-    # -------------------------------------------------------------------------
-    if 'initialized' not in st.session_state:
-        # --- navigation ---
-        st.session_state.page = "login_page"    # default target landing zone
-        
-        # --- user authentication context ---
-        st.session_state.logged_in = False
-        st.session_state.reg_success = False
-        st.session_state.user_id = None
-        st.session_state.first_name = None
-        st.session_state.prefilled_email = ""
-        st.session_state.my_portfolios = []
+    # ---------------------------------------------------------------------
+    # INITIALIZATION FLAG
+    # ---------------------------------------------------------------------
+    if "initialized" not in st.session_state:
+        # Navigation
+        st.session_state["page"] = "login_page"
 
-        # --- active backtest portfolio matrix ---
-        st.session_state.my_portfolios_df = None
-        st.session_state.current_portfolio_id = None
-        st.session_state.current_portfolio_name = None
-        st.session_state.current_sim_date = None
-        st.session_state.current_portfolio_starting_at = None
-        st.session_state.current_available_cash = None
-        st.session_state.current_sim_date_display = None
+        # Authentication context
+        st.session_state["logged_in"] = False
+        st.session_state["reg_success"] = False
+        st.session_state["user_id"] = None
+        st.session_state["first_name"] = None
+        st.session_state["prefilled_email"] = ""
+        st.session_state["my_portfolios"] = []
 
-        # --- execution lifecycle & system logging metrics ---
-        st.session_state.last_action_time = 0
-        st.session_state.initialized = True
+        # Portfolio state
+        st.session_state["my_portfolios_df"] = None
+        st.session_state["current_portfolio_id"] = None
+        st.session_state["current_portfolio_name"] = None
+        st.session_state["current_sim_date"] = None
+        st.session_state["current_portfolio_starting_at"] = None
+        st.session_state["current_available_cash"] = None
+        st.session_state["current_sim_date_display"] = None
 
+        # UI / rate limiting
+        st.session_state["last_action_time"] = 0
 
-
+        # Mark system initialized
+        st.session_state["initialized"] = True
 
