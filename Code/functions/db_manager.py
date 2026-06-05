@@ -348,10 +348,10 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
         # 1. Portfolio total value (market value + cash)
         # ---------------------------------------------------------------------
         total_value = portfolio_value_calculator(
-            portfolio_id,
-            sim_date,
-            con=connection
-        )
+            duckdb_con=connection,
+            portfolio_id=portfolio_id,
+            timestamp=sim_date
+            )
 
         # ---------------------------------------------------------------------
         # 2. Cash balance (Supabase)
@@ -447,14 +447,14 @@ def search_assets(con, search_term):
     return [f"{r[0]} | {r[1]}" for r in results]
 
 # for calculating portfolio's Value at a given time 
-def portfolio_value_calculator(portfolio_id, timestamp, con=None):
+def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
     """
     Computes total portfolio value at a given timestamp:
     cash + market value of holdings.
 
     Data sources:
     - Supabase (Cloud): holdings, portfolios
-    - DuckDB (Local): prices 
+    - DuckDB (Local Context -> GCS): prices parquet
     All source documentation and comments are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
@@ -498,36 +498,31 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
         total_market_value = 0.0
 
         if not df_holdings.empty:
-            # We fetch the native duckdb connection context (assumed to be globally accessible via st.session_state or initialization)
-            # If your app passes duckdb connection globally, use it, or reference your local duckdb query abstraction layer.
-            # Here we abstract via a standard duckdb environment call or query wrapper:
-            import duckdb
-            
             # Extract unique assets to optimize lookup inside the analytical engine
             asset_ids = df_holdings["asset_id"].tolist()
             
-            # Fast historical as-of price lookup inside DuckDB using localized data frames
-            # Resolves the exact final price close for each asset before or at the current timestamp
-            prices_query = """
+            # Target GCS immutable snapshot bucket deployment reference
+            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+            
+            # Fast historical as-of price lookup inside DuckDB scanning the GCS parquet file directly
+            # Changed target table to read_parquet() and validated column filters target 'timestamp'
+            prices_query = f"""
                 WITH ranked_prices AS (
                     SELECT 
                         asset_id, 
                         close,
                         ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY timestamp DESC) as rn
-                    FROM prices
-                    WHERE asset_id IN $asset_list
-                      AND timestamp <= $target_time
+                    FROM read_parquet('{gcs_prices_url}')
+                    WHERE asset_id IN (SELECT UNNEST(?))
+                      AND timestamp <= ?
                 )
                 SELECT asset_id, close AS price
                 FROM ranked_prices
                 WHERE rn = 1
             """
             
-            # Execute lookup via DuckDB (reads from your local memory / parquet engine infrastructure)
-            df_prices = duckdb.execute(prices_query, {
-                "asset_list": asset_ids, 
-                "target_time": timestamp
-            }).df()
+            # Execute lookup using the active connection context injected as an argument
+            df_prices = duckdb_con.execute(prices_query, [asset_ids, timestamp]).df()
             
             if not df_prices.empty:
                 # Merge holdings data with fetched localized historical prices
@@ -562,7 +557,6 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     finally:
         if should_close_cloud:
             cloud_con.close()
-        
             
 # for getting portfolio card data (precomputed for performance)    
 def get_portfolio_card_data(user_id):
@@ -595,8 +589,9 @@ def get_portfolio_card_data(user_id):
             sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
 
             value = portfolio_value_calculator(
-                p_id,
-                sim_date
+                duckdb_con=duckdb.connect(":memory:"),  # Creates a clean, temporary in-memory connection
+                portfolio_id=p_id,
+                timestamp=sim_date
             )
 
         except Exception:

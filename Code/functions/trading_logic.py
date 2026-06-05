@@ -282,7 +282,11 @@ def record_portfolio_snapshot(con, portfolio_id, timestamp):
     
     try:
         # 1. Delegate dynamic valuation to our updated cloud-native calculator function
-        total_value = portfolio_value_calculator(portfolio_id, timestamp, con=con)
+        total_value = portfolio_value_calculator(
+                        duckdb_con=con, 
+                        portfolio_id=portfolio_id, 
+                        timestamp=timestamp
+                            )
         
         # 2. Extract the present cash balance frame using cloud binding parameters
         cash_res = con.execute(
