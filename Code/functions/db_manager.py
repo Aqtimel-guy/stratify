@@ -2,6 +2,7 @@ import duckdb
 import streamlit as st
 import logging
 import time
+import datetime
 import pandas as pd
 from sqlalchemy import create_engine , text
 import duckdb
@@ -452,63 +453,23 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
     cash + market value of holdings.
 
     Data sources:
-    - Supabase: holdings, portfolios
-    - GCS/DuckDB layer: prices (via SQL engine abstraction)
+    - Supabase (Cloud): holdings, portfolios
+    - DuckDB (Local): prices 
+    All source documentation and comments are maintained strictly in English.
     """
-
     logger = logging.getLogger(__name__)
-    should_close = False
+    should_close_cloud = False
 
     # ---------------------------------------------------------------------
-    # 1. Connection normalization (safe cloud/local handling)
+    # 1. Establish Cloud Connection for Metadata (Portfolios & Holdings)
     # ---------------------------------------------------------------------
-    if hasattr(timestamp, "execute"):
-        con, timestamp = timestamp, con
-
-    if con is not None and "duckdb" in str(type(con)).lower():
-        con = None
-
-    if con is None:
-        engine = get_supabase_engine()
-        con = engine.connect()
-        should_close = True
+    cloud_engine = get_supabase_engine()
+    cloud_con = cloud_engine.connect()
+    should_close_cloud = True
 
     try:
-        # -----------------------------------------------------------------
-        # 2. Portfolio holdings valuation (as-of query - optimized)
-        # -----------------------------------------------------------------
-        query = text("""
-            SELECT
-                h.asset_id,
-                h.quantity,
-                p.close AS price,
-                (h.quantity * p.close) AS market_value
-            FROM holdings h
-            JOIN LATERAL (
-                SELECT close
-                FROM prices p2
-                WHERE p2.asset_id = h.asset_id
-                  AND p2.timestamp <= :timestamp
-                ORDER BY p2.timestamp DESC
-                LIMIT 1
-            ) p ON TRUE
-            WHERE h.portfolio_id = :portfolio_id
-        """)
-
-        result = con.execute(
-            query,
-            {"portfolio_id": portfolio_id, "timestamp": timestamp}
-        ).fetchall()
-
-        df_assets = pd.DataFrame(
-            result,
-            columns=["asset_id", "quantity", "price", "market_value"]
-        )
-
-        # -----------------------------------------------------------------
-        # 3. Cash balance
-        # -----------------------------------------------------------------
-        cash_res = con.execute(
+        # --- A. Fetch Available Cash From Cloud ---
+        cash_res = cloud_con.execute(
             text("""
                 SELECT available_cash
                 FROM portfolios
@@ -519,15 +480,66 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
 
         portfolio_cash = float(cash_res[0]) if cash_res and cash_res[0] is not None else 0.0
 
-        # -----------------------------------------------------------------
-        # 4. Aggregation
-        # -----------------------------------------------------------------
-        total_market_value = (
-            float(df_assets["market_value"].sum())
-            if not df_assets.empty
-            else 0.0
-        )
+        # --- B. Fetch Raw Asset Holdings Quantities From Cloud ---
+        holdings_res = cloud_con.execute(
+            text("""
+                SELECT asset_id, quantity
+                FROM holdings
+                WHERE portfolio_id = :portfolio_id AND quantity > 0
+            """),
+            {"portfolio_id": portfolio_id}
+        ).fetchall()
 
+        df_holdings = pd.DataFrame(holdings_res, columns=["asset_id", "quantity"])
+
+        # ---------------------------------------------------------------------
+        # 2. Compute Market Value Using Local Pricing Layer (DuckDB)
+        # ---------------------------------------------------------------------
+        total_market_value = 0.0
+
+        if not df_holdings.empty:
+            # We fetch the native duckdb connection context (assumed to be globally accessible via st.session_state or initialization)
+            # If your app passes duckdb connection globally, use it, or reference your local duckdb query abstraction layer.
+            # Here we abstract via a standard duckdb environment call or query wrapper:
+            import duckdb
+            
+            # Extract unique assets to optimize lookup inside the analytical engine
+            asset_ids = df_holdings["asset_id"].tolist()
+            
+            # Fast historical as-of price lookup inside DuckDB using localized data frames
+            # Resolves the exact final price close for each asset before or at the current timestamp
+            prices_query = """
+                WITH ranked_prices AS (
+                    SELECT 
+                        asset_id, 
+                        close,
+                        ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY timestamp DESC) as rn
+                    FROM prices
+                    WHERE asset_id IN $asset_list
+                      AND timestamp <= $target_time
+                )
+                SELECT asset_id, close AS price
+                FROM ranked_prices
+                WHERE rn = 1
+            """
+            
+            # Execute lookup via DuckDB (reads from your local memory / parquet engine infrastructure)
+            df_prices = duckdb.execute(prices_query, {
+                "asset_list": asset_ids, 
+                "target_time": timestamp
+            }).df()
+            
+            if not df_prices.empty:
+                # Merge holdings data with fetched localized historical prices
+                df_valuation = pd.merge(df_holdings, df_prices, on="asset_id", how="inner")
+                df_valuation["market_value"] = df_valuation["quantity"] * df_valuation["price"]
+                total_market_value = float(df_valuation["market_value"].sum())
+            else:
+                logger.warning(f"No asset historical prices found in DuckDB for portfolio={portfolio_id} at timestamp={timestamp}")
+
+        # ---------------------------------------------------------------------
+        # 3. Final Evaluation Matrix Aggregation
+        # ---------------------------------------------------------------------
         total_value = portfolio_cash + total_market_value
 
         logger.info(
@@ -543,13 +555,14 @@ def portfolio_value_calculator(portfolio_id, timestamp, con=None):
 
     except Exception as e:
         logger.error(
-            f"Portfolio valuation failed: portfolio_id={portfolio_id}, error={e}"
+            f"Portfolio valuation failed safely: portfolio_id={portfolio_id}, error={e}"
         )
         raise
 
     finally:
-        if should_close:
-            con.close()
+        if should_close_cloud:
+            cloud_con.close()
+        
             
 # for getting portfolio card data (precomputed for performance)    
 def get_portfolio_card_data(user_id):
@@ -617,7 +630,6 @@ def is_action_allowed(wait_time=2):
     return True
 
 
-
 # for setting initial states and to help keeping track of session_state variables
 def init_session_state():
     """
@@ -675,4 +687,5 @@ def init_session_state():
 
         # Mark system initialized
         st.session_state["initialized"] = True
+
 
