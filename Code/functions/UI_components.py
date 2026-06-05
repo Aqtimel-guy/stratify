@@ -195,15 +195,15 @@ def show_buy_component(ticker, asset_price):
             col_a, col_b = st.columns(2)
             
             with col_a:
-                if st.button("✅ Confirm", type="primary", use_container_width=True):
+                if st.button("✅ Confirm", type="primary", width="stretch"):
                     # Rate-limiting action boundary check
                     if is_action_allowed(wait_time=2):
                         
-                        # --- CRITICAL FIX: Instantiate clear cloud transaction flow context ---
+                        # 1. Get engine
                         cloud_engine = get_supabase_engine()
                         
-                        with cloud_engine.begin() as con:
-                            # execute_asset_trade fetches its own market data locally and writes to Supabase
+                        # 2. FIX: Open a clean connection, NOT a transaction block (.connect() instead of .begin())
+                        with cloud_engine.connect() as con:
                             success, msg = execute_asset_trade(
                                 con=con, 
                                 portfolio_id=portfolio_id, 
@@ -215,7 +215,6 @@ def show_buy_component(ticker, asset_price):
                             
                         if success:
                             st.session_state[confirm_key] = False
-                            # Optimistic UI state update for immediate reflection on dashboard
                             st.session_state.current_available_cash -= total_cost
                             st.session_state.page = "dashboard_home"
                             st.toast(msg)
