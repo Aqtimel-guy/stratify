@@ -502,7 +502,7 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             asset_ids = df_holdings["asset_id"].tolist()
             
             # Target GCS immutable snapshot bucket deployment reference
-            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"            
             
             # Fast historical as-of price lookup inside DuckDB scanning the GCS parquet file directly
             # Changed target table to read_parquet() and validated column filters target 'timestamp'
@@ -513,8 +513,8 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
                         close,
                         ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY timestamp DESC) as rn
                     FROM read_parquet('{gcs_prices_url}')
-                    WHERE asset_id IN (SELECT UNNEST(:asset_list))
-                    AND timestamp <= :target_time
+                    WHERE asset_id IN (:asset_list)
+                      AND timestamp <= :target_time
                 )
                 SELECT asset_id, close AS price
                 FROM ranked_prices
