@@ -317,71 +317,76 @@ def record_portfolio_snapshot(con, portfolio_id, timestamp):
 
 # for showing the history of transactions
 @st.cache_data(show_spinner=False)
-def get_portfolio_cash_history(_con, portfolio_id, sim_date):
+def get_portfolio_cash_history(portfolio_id, sim_date):
     """
-    Builds a unified portfolio cash ledger directly from the Supabase cloud instance.
-    Processes deposits/withdrawals, trade impacts, and historical dividend allocations.
+    Builds a unified portfolio cash ledger by combining cloud and analytical layers.
+    Processes deposits/withdrawals and trades from Supabase, and matches historical 
+    dividend allocations from the local DuckDB storage engine.
     
     Optimized with:
     - Streamlit cache layer mapping
-    - Single-pass dynamic portfolio state simulation
+    - Cross-engine data merging pipelines
     - Vectorized pandas ledger cleaning pipelines
     All comments and documentation are maintained strictly in English.
     """
     logger = logging.getLogger(__name__)
 
     # =========================================
-    # CASH TRANSACTIONS
+    # 1. ESTABLISH CLOUD CONNECTION (SUPABASE)
     # =========================================
-    cash_query = text("""
-        SELECT
-            timestamp,
-            amount,
-            transaction_type AS type,
-            reference
-        FROM cash_transactions
-        WHERE portfolio_id = :portfolio_id
-          AND timestamp <= :sim_date
-    """)
+    # Fetching cloud connection context internally to preserve caching layer stability
+    cloud_engine = get_supabase_engine()
     
-    cash_res = _con.execute(cash_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
-    
-    if cash_res:
-        cash_df = pd.DataFrame(cash_res, columns=["timestamp", "amount", "type", "reference"])
-        cash_df["type"] = cash_df["type"].astype(str).str.lower()
-    else:
-        cash_df = pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+    with cloud_engine.connect() as cloud_con:
+        # --- CASH TRANSACTIONS (Cloud) ---
+        cash_query = text("""
+            SELECT
+                timestamp,
+                amount,
+                transaction_type AS type,
+                reference
+            FROM cash_transactions
+            WHERE portfolio_id = :portfolio_id
+              AND timestamp <= :sim_date
+        """)
+        
+        cash_res = cloud_con.execute(cash_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
+        
+        if cash_res:
+            cash_df = pd.DataFrame(cash_res, columns=["timestamp", "amount", "type", "reference"])
+            cash_df["type"] = cash_df["type"].astype(str).str.lower()
+        else:
+            cash_df = pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+
+        # --- ASSET TRANSACTIONS (Cloud) ---
+        tx_query = text("""
+            SELECT
+                t.timestamp,
+                t.asset_id,
+                a.ticker,
+                t.quantity,
+                t.price_per_share,
+                t.side
+            FROM assets_transactions t
+            JOIN assets a
+                ON t.asset_id = a.asset_id
+            WHERE t.portfolio_id = :portfolio_id
+              AND t.timestamp <= :sim_date
+            ORDER BY t.timestamp ASC
+        """)
+        
+        tx_res = cloud_con.execute(tx_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
+        
+        if tx_res:
+            tx_df = pd.DataFrame(tx_res, columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
+        else:
+            tx_df = pd.DataFrame(columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
 
     # =========================================
-    # ASSET TRANSACTIONS
+    # 2. LOCAL ANALYTICAL LAYER (DUCKDB)
     # =========================================
-    tx_query = text("""
-        SELECT
-            t.timestamp,
-            t.asset_id,
-            a.ticker,
-            t.quantity,
-            t.price_per_share,
-            t.side
-        FROM assets_transactions t
-        JOIN assets a
-            ON t.asset_id = a.asset_id
-        WHERE t.portfolio_id = :portfolio_id
-          AND t.timestamp <= :sim_date
-        ORDER BY t.timestamp ASC
-    """)
-    
-    tx_res = _con.execute(tx_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
-    
-    if tx_res:
-        tx_df = pd.DataFrame(tx_res, columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
-    else:
-        tx_df = pd.DataFrame(columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
-
-    # =========================================
-    # DIVIDEND EVENTS
-    # =========================================
-    div_query = text("""
+    # Historical large-scale dividend datasets are executed exclusively via local memory engines
+    div_query = """
         SELECT
             d.asset_id,
             d.timestamp,
@@ -390,15 +395,19 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
         FROM dividends d
         JOIN assets a
             ON d.asset_id = a.asset_id
-        WHERE d.timestamp <= :sim_date
+        WHERE d.timestamp <= $sim_date
         ORDER BY d.timestamp ASC
-    """)
+    """
     
-    div_res = _con.execute(div_query, {"sim_date": sim_date}).fetchall()
-    
-    if div_res:
-        div_df = pd.DataFrame(div_res, columns=["asset_id", "timestamp", "dividend_amount", "ticker"])
-    else:
+    try:
+        # Executes directly against the local duckdb instance/file infrastructure
+        div_res_df = duckdb.execute(div_query, {"sim_date": sim_date}).df()
+        if not div_res_df.empty:
+            div_df = div_res_df
+        else:
+            div_df = pd.DataFrame(columns=["asset_id", "timestamp", "dividend_amount", "ticker"])
+    except Exception as e:
+        logger.error(f"Failed to fetch dividends from local DuckDB storage layer: {e}")
         div_df = pd.DataFrame(columns=["asset_id", "timestamp", "dividend_amount", "ticker"])
 
     # =========================================
@@ -453,7 +462,6 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
     dividend_records = []
 
     if not tx_df.empty and not div_df.empty:
-        # Construct unified chronological event framework flow
         tx_events = tx_df.copy()
         tx_events["event_type"] = "transaction"
 
@@ -466,7 +474,6 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
         events["priority"] = events["event_type"].map({"transaction": 0, "dividend": 1})
         events = events.sort_values(["timestamp", "priority"])
 
-        # Track holdings inventory states across the time horizon
         holdings = {}
 
         # Executing single state machine simulation pass
@@ -522,6 +529,8 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
     unified = unified.sort_values("timestamp", ascending=False).reset_index(drop=True)
 
     return unified
+
+
 
 
 # for simulating time

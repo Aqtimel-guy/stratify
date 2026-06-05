@@ -607,6 +607,8 @@ def show_home_page():
     return
 
 
+######################################
+
 
 def show_portfolios_page():
     """
@@ -946,7 +948,8 @@ def show_portfolios_page():
             go_to("home_page")
 
        
-            
+
+     
 def show_dashboard_home():
     """
     Renders the main simulation strategy control center dashboard home view.
@@ -1344,7 +1347,7 @@ def show_dashboard_home():
     with col3:
         with st.popover("📜 Portfolio Cash History", use_container_width=True):
             with cloud_engine.connect() as hist_con:
-                df = get_portfolio_cash_history(hist_con, portfolio_id, sim_date)
+                df = get_portfolio_cash_history(portfolio_id, sim_date)
 
             if df.empty:
                 st.info("No cash history available.")
