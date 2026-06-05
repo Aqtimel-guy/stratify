@@ -507,10 +507,10 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
                 SELECT p.asset_id, p.timestamp, p.close
                 FROM read_parquet('{gcs_prices_url}') p
                 INNER JOIN target_assets ta ON p.asset_id = ta.asset_id
-                WHERE p.timestamp <= :target_time
+                WHERE p.timestamp <= ?
             """
             
-            df_prices = duckdb_con.execute(prices_query, {"target_time": timestamp}).df()
+            df_prices = duckdb_con.execute(prices_query, [timestamp]).df()
             
             if not df_prices.empty:
                 # Keep only the latest price per asset (as-of logic)
