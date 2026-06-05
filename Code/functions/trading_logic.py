@@ -12,48 +12,81 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 
 
 # for executing cash transactions (withdrawal / deposit)
-def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timestamp, reference=None):
+def execute_cash_transaction(cloud_con, duckdb_con, portfolio_id, amount, transaction_type, timestamp, reference=None):
     """
-    Executes a cash deposit or withdrawal, updates the central Supabase database,
-    and records an updated historical portfolio timeline snapshot.
-    All source documentation and comments are maintained strictly in English.
-    
-    transaction_type: 'deposit' or 'withdrawal'
+    Executes a cash deposit or withdrawal and records a portfolio snapshot.
+
+    Responsibilities:
+    - Validates cash balance
+    - Writes cash transaction ledger entry
+    - Updates portfolio liquidity
+    - Triggers portfolio snapshot (cloud + analytics)
     """
+
+    import logging
+    from sqlalchemy import text
+
     logger = logging.getLogger(__name__)
-    
+
     try:
-        # 1. Fetch and verify current cash balance using cloud-native parameters
-        res = con.execute(
-            text("SELECT available_cash FROM portfolios WHERE portfolio_id = :id"), 
+        # ------------------------------------------------------------
+        # 1. Fetch current cash balance
+        # ------------------------------------------------------------
+        res = cloud_con.execute(
+            text("""
+                SELECT available_cash
+                FROM portfolios
+                WHERE portfolio_id = :id
+            """),
             {"id": portfolio_id}
         ).fetchone()
-        
+
         if not res:
             return False, "Portfolio not found"
-        
+
         current_cash = float(res[0])
 
-        # 2. Enforce structural validation rules for withdrawal pipeline executions
+        # ------------------------------------------------------------
+        # 2. Validate withdrawal rules
+        # ------------------------------------------------------------
         if transaction_type == 'withdrawal' and amount > current_cash:
             return False, f"Insufficient funds. Available: ${current_cash:,.2f}"
 
-        # 3. Handle Context Transaction Lifespan
-        is_nested = con.in_transaction()
-        tx = None if is_nested else con.begin()
+        # ------------------------------------------------------------
+        # 3. Transaction scope
+        # ------------------------------------------------------------
+        is_nested = cloud_con.in_transaction()
+        tx = None if is_nested else cloud_con.begin()
 
         try:
-            # A. Allocate sequence primary keys and log the event inside the cash_transactions ledger audit table
-            max_id_res = con.execute(
+            # --------------------------------------------------------
+            # A. Insert cash transaction ledger entry
+            # --------------------------------------------------------
+            max_id_res = cloud_con.execute(
                 text("SELECT COALESCE(MAX(transaction_id), 0) FROM cash_transactions")
             ).fetchone()
+
             next_transaction_id = int(max_id_res[0]) + 1
 
-            con.execute(
+            cloud_con.execute(
                 text("""
-                    INSERT INTO cash_transactions (transaction_id, portfolio_id, timestamp, amount, transaction_type, reference)
-                    VALUES (:transaction_id, :portfolio_id, :timestamp, :amount, :transaction_type, :reference)
-                """), 
+                    INSERT INTO cash_transactions (
+                        transaction_id,
+                        portfolio_id,
+                        timestamp,
+                        amount,
+                        transaction_type,
+                        reference
+                    )
+                    VALUES (
+                        :transaction_id,
+                        :portfolio_id,
+                        :timestamp,
+                        :amount,
+                        :transaction_type,
+                        :reference
+                    )
+                """),
                 {
                     "transaction_id": next_transaction_id,
                     "portfolio_id": portfolio_id,
@@ -64,197 +97,47 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
                 }
             )
 
-            # B. Mutate and shift liquidity ledger balances inside the main portfolios table
+            # --------------------------------------------------------
+            # B. Update portfolio cash balance
+            # --------------------------------------------------------
             cash_change = amount if transaction_type == 'deposit' else -amount
-            con.execute(
-                text("""
-                    UPDATE portfolios 
-                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
-                    WHERE portfolio_id = :portfolio_id
-                """), 
-                {"cash_change": cash_change, "portfolio_id": portfolio_id}
-            )
-            
-            # C. Trigger system historical timeline layout matrix update snapshot
-            capture_portfolio_snapshot(con, portfolio_id, timestamp)
-            
-            if tx:
-                tx.commit()
-            else:
-                con.commit()
-                
-            logger.info(f"Successfully executed {transaction_type} of ${amount} for portfolio {portfolio_id}")
-            return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
-
-        except Exception as inner_error:
-            if tx:
-                tx.rollback()
-            else:
-                try:
-                    con.rollback()
-                except Exception:
-                    pass
-            raise inner_error
-
-    except Exception as e:
-        logger.error(f"Cash transaction workflow pipeline failed: {e}")
-        return False, str(e)
-
-
-# for executing a trade
-def execute_asset_trade(cloud_con, duckdb_con, portfolio_id, ticker, timestamp, quantity, side): 
-    """
-    Executes an asset trade (buy/sell), updates the core portfolios liquidity ledger,
-    modifies asset positioning frames, and captures a historical snapshot.
-    Fetches market data from GCS via DuckDB before running cloud updates on Supabase.
-    All source documentation and comments are maintained strictly in English.
-    
-    side: 'buy' or 'sell'
-    """
-    logger = logging.getLogger(__name__)
-    
-    try:
-        # --- Step 1: Query asset metadata from cloud (Supabase) ---
-        asset_res = cloud_con.execute(
-            text("SELECT asset_id FROM assets WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(:ticker)) LIMIT 1"), 
-            {"ticker": ticker}
-        ).fetchone()
-
-        if not asset_res:
-            logger.warning(f"Trade failed: Ticker '{ticker}' not found in Supabase.")
-            return False, f"Asset '{ticker}' not found"
-
-        asset_id = asset_res[0]
-
-        # --- Step 2: Query portfolio liquidity balance from cloud (Supabase) ---
-        portfolio_res = cloud_con.execute(
-            text("SELECT starting_at, available_cash FROM portfolios WHERE portfolio_id = :portfolio_id"), 
-            {"portfolio_id": portfolio_id}
-        ).fetchone()
-        
-        if not portfolio_res:
-            logger.warning(f"Trade execution aborted: Portfolio ID {portfolio_id} not found.")
-            return False, "Portfolio not found"
-            
-        portfolio_start_day, raw_cash = portfolio_res
-        portfolio_available_cash = float(raw_cash) if raw_cash is not None else 0.0
-
-        # --- Step 3: Evaluate Historical Asset Price from GCS (DuckDB) ---
-        # FIX: Changed query filter from 'date' to 'timestamp' to match the GCS Parquet schema definition
-        try:
-            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
-            price_res = duckdb_con.execute(f"""
-                SELECT close 
-                FROM read_parquet('{gcs_prices_url}') 
-                WHERE asset_id = ? AND timestamp = ? 
-                LIMIT 1
-            """, [asset_id, timestamp]).fetchone()
-            
-            if not price_res:
-                return False, f"No price data available for {ticker} on {timestamp} in cloud storage."
-                
-            asset_price = float(price_res[0])
-        except Exception as price_err:
-            logger.error(f"Internal price evaluation engine error on GCS layer: {price_err}")
-            return False, f"Price evaluation engine error: {price_err}"
-
-        # --- Step 4: Structural Validations ---
-        total_amount = quantity * asset_price
-        
-        if side == 'buy' and portfolio_available_cash < total_amount:
-            return False, "Insufficient funds"
-
-        if side == 'sell':
-            holding_res = cloud_con.execute(
-                text("SELECT quantity FROM holdings WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"), 
-                {"portfolio_id": portfolio_id, "asset_id": asset_id}
-            ).fetchone()
-            
-            amount_held = float(holding_res[0]) if holding_res else 0.0
-            if amount_held < quantity:
-                return False, f"Not enough shares (Held: {amount_held}, Request: {quantity})"
-
-        # --- Step 5: Atomic Transaction Lifecycle Execution on Cloud (Supabase) ---
-        is_nested = cloud_con.in_transaction()
-        tx = None if is_nested else cloud_con.begin()
-
-        try:
-            # A. Record the event inside assets_transactions table
-            max_id_res = cloud_con.execute(
-                text("SELECT COALESCE(MAX(transaction_id), 0) FROM assets_transactions")
-            ).fetchone()
-            next_transaction_id = int(max_id_res[0]) + 1
 
             cloud_con.execute(
                 text("""
-                    INSERT INTO assets_transactions (transaction_id, portfolio_id, asset_id, timestamp, quantity, price_per_share, total_value, side)
-                    VALUES (:transaction_id, :portfolio_id, :asset_id, :timestamp, :quantity, :price_per_share, :total_value, :side)
-                """), 
+                    UPDATE portfolios
+                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
+                    WHERE portfolio_id = :portfolio_id
+                """),
                 {
-                    "transaction_id": next_transaction_id,
-                    "portfolio_id": portfolio_id,
-                    "asset_id": asset_id,
-                    "timestamp": timestamp,
-                    "quantity": quantity,
-                    "price_per_share": asset_price,
-                    "total_value": total_amount,
-                    "side": side
+                    "cash_change": cash_change,
+                    "portfolio_id": portfolio_id
                 }
             )
 
-            # B. Mutate and manage inventory allocations within the holdings table
-            qty_change = quantity if side == 'buy' else -quantity
-            
-            existing_holding = cloud_con.execute(
-                text("SELECT quantity FROM holdings WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"),
-                {"portfolio_id": portfolio_id, "asset_id": asset_id}
-            ).fetchone()
-
-            if existing_holding:
-                cloud_con.execute(
-                    text("""
-                        UPDATE holdings 
-                        SET quantity = quantity + :qty_change
-                        WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id
-                    """),
-                    {"qty_change": qty_change, "portfolio_id": portfolio_id, "asset_id": asset_id}
-                )
-            else:
-                cloud_con.execute(
-                    text("""
-                        INSERT INTO holdings (portfolio_id, asset_id, quantity)
-                        VALUES (:portfolio_id, :asset_id, :qty_change)
-                    """),
-                    {"portfolio_id": portfolio_id, "asset_id": asset_id, "qty_change": qty_change}
-                )
-
-            # C. Adjust liquidity balances inside the portfolios framework
-            cash_change = -total_amount if side == 'buy' else total_amount
-            cloud_con.execute(
-                text("""
-                    UPDATE portfolios 
-                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
-                    WHERE portfolio_id = :portfolio_id
-                """), 
-                {"cash_change": cash_change, "portfolio_id": portfolio_id}
+            # --------------------------------------------------------
+            # C. Snapshot (IMPORTANT: now correct signature)
+            # --------------------------------------------------------
+            capture_portfolio_snapshot(
+                cloud_con=cloud_con,
+                duckdb_con=duckdb_con,
+                portfolio_id=portfolio_id,
+                sim_date=timestamp
             )
 
-            # D. Architectural cleanup: Purge empty zeroed inventory assets
-            cloud_con.execute(
-                text("DELETE FROM holdings WHERE quantity <= 0 AND portfolio_id = :portfolio_id"), 
-                {"portfolio_id": portfolio_id}
-            )
-            
-            # E. Trigger historical ledger timeline update snapshot
-            capture_portfolio_snapshot(cloud_con, portfolio_id, timestamp)
-            
-            # Force explicit database commit depending on active transaction frame
+            # --------------------------------------------------------
+            # D. Commit
+            # --------------------------------------------------------
             if tx:
                 tx.commit()
             else:
                 cloud_con.commit()
-                
-            return True, f"Successfully {side} {quantity} shares of {ticker}"
+
+            logger.info(
+                f"Cash transaction executed: {transaction_type} "
+                f"${amount} for portfolio {portfolio_id}"
+            )
+
+            return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
 
         except Exception as inner_error:
             if tx:
@@ -267,9 +150,250 @@ def execute_asset_trade(cloud_con, duckdb_con, portfolio_id, ticker, timestamp, 
             raise inner_error
 
     except Exception as e:
-        logger.error(f"Asset trade execution pipeline failed: {e}")
+        logger.error(f"Cash transaction failed: {e}")
         return False, str(e)
 
+# for executing a trade
+def execute_asset_trade( cloud_con, duckdb_con, portfolio_id, ticker, timestamp, quantity, side):
+    """
+    Executes an asset trade and records all related state changes.
+
+    Responsibilities:
+    - Resolve asset metadata
+    - Validate portfolio state
+    - Fetch historical price (DuckDB)
+    - Validate trade constraints
+    - Update holdings + cash
+    - Record transaction ledger
+    - Trigger portfolio snapshot
+    """
+
+    import logging
+    from sqlalchemy import text
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        # ------------------------------------------------------------
+        # 1. Resolve asset
+        # ------------------------------------------------------------
+        asset_res = cloud_con.execute(
+            text("""
+                SELECT asset_id
+                FROM assets
+                WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(:ticker))
+                LIMIT 1
+            """),
+            {"ticker": ticker}
+        ).fetchone()
+
+        if not asset_res:
+            return False, f"Asset '{ticker}' not found"
+
+        asset_id = asset_res[0]
+
+        # ------------------------------------------------------------
+        # 2. Resolve portfolio state
+        # ------------------------------------------------------------
+        portfolio_res = cloud_con.execute(
+            text("""
+                SELECT available_cash
+                FROM portfolios
+                WHERE portfolio_id = :portfolio_id
+            """),
+            {"portfolio_id": portfolio_id}
+        ).fetchone()
+
+        if not portfolio_res:
+            return False, "Portfolio not found"
+
+        portfolio_cash = float(portfolio_res[0] or 0.0)
+
+        # ------------------------------------------------------------
+        # 3. Fetch historical price (DuckDB)
+        # ------------------------------------------------------------
+        gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
+
+        price_res = duckdb_con.execute(f"""
+            SELECT close
+            FROM read_parquet('{gcs_prices_url}')
+            WHERE asset_id = ?
+              AND timestamp = ?
+            LIMIT 1
+        """, [asset_id, timestamp]).fetchone()
+
+        if not price_res:
+            return False, f"No price data for {ticker} at {timestamp}"
+
+        asset_price = float(price_res[0])
+
+        # ------------------------------------------------------------
+        # 4. Validation
+        # ------------------------------------------------------------
+        total_amount = quantity * asset_price
+
+        if side == "buy" and portfolio_cash < total_amount:
+            return False, "Insufficient funds"
+
+        if side == "sell":
+            holding_res = cloud_con.execute(
+                text("""
+                    SELECT quantity
+                    FROM holdings
+                    WHERE portfolio_id = :portfolio_id
+                      AND asset_id = :asset_id
+                """),
+                {"portfolio_id": portfolio_id, "asset_id": asset_id}
+            ).fetchone()
+
+            held_qty = float(holding_res[0]) if holding_res else 0.0
+
+            if held_qty < quantity:
+                return False, f"Not enough shares (held={held_qty})"
+
+        # ------------------------------------------------------------
+        # 5. Transaction block
+        # ------------------------------------------------------------
+        is_nested = cloud_con.in_transaction()
+        tx = None if is_nested else cloud_con.begin()
+
+        try:
+            # A. Ledger insert
+            max_id = cloud_con.execute(
+                text("SELECT COALESCE(MAX(transaction_id), 0) FROM assets_transactions")
+            ).fetchone()[0]
+
+            next_id = int(max_id) + 1
+
+            cloud_con.execute(
+                text("""
+                    INSERT INTO assets_transactions (
+                        transaction_id,
+                        portfolio_id,
+                        asset_id,
+                        timestamp,
+                        quantity,
+                        price_per_share,
+                        total_value,
+                        side
+                    )
+                    VALUES (
+                        :transaction_id,
+                        :portfolio_id,
+                        :asset_id,
+                        :timestamp,
+                        :quantity,
+                        :price_per_share,
+                        :total_value,
+                        :side
+                    )
+                """),
+                {
+                    "transaction_id": next_id,
+                    "portfolio_id": portfolio_id,
+                    "asset_id": asset_id,
+                    "timestamp": timestamp,
+                    "quantity": quantity,
+                    "price_per_share": asset_price,
+                    "total_value": total_amount,
+                    "side": side
+                }
+            )
+
+            # B. Holdings update
+            qty_change = quantity if side == "buy" else -quantity
+
+            existing = cloud_con.execute(
+                text("""
+                    SELECT quantity
+                    FROM holdings
+                    WHERE portfolio_id = :portfolio_id
+                      AND asset_id = :asset_id
+                """),
+                {"portfolio_id": portfolio_id, "asset_id": asset_id}
+            ).fetchone()
+
+            if existing:
+                cloud_con.execute(
+                    text("""
+                        UPDATE holdings
+                        SET quantity = quantity + :qty_change
+                        WHERE portfolio_id = :portfolio_id
+                          AND asset_id = :asset_id
+                    """),
+                    {
+                        "qty_change": qty_change,
+                        "portfolio_id": portfolio_id,
+                        "asset_id": asset_id
+                    }
+                )
+            else:
+                cloud_con.execute(
+                    text("""
+                        INSERT INTO holdings (portfolio_id, asset_id, quantity)
+                        VALUES (:portfolio_id, :asset_id, :qty_change)
+                    """),
+                    {
+                        "portfolio_id": portfolio_id,
+                        "asset_id": asset_id,
+                        "qty_change": qty_change
+                    }
+                )
+
+            # C. Cash update
+            cash_change = -total_amount if side == "buy" else total_amount
+
+            cloud_con.execute(
+                text("""
+                    UPDATE portfolios
+                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
+                    WHERE portfolio_id = :portfolio_id
+                """),
+                {
+                    "cash_change": cash_change,
+                    "portfolio_id": portfolio_id
+                }
+            )
+
+            # D. Cleanup
+            cloud_con.execute(
+                text("""
+                    DELETE FROM holdings
+                    WHERE quantity <= 0
+                      AND portfolio_id = :portfolio_id
+                """),
+                {"portfolio_id": portfolio_id}
+            )
+
+            # E. Snapshot (FIXED)
+            capture_portfolio_snapshot(
+                cloud_con=cloud_con,
+                duckdb_con=duckdb_con,
+                portfolio_id=portfolio_id,
+                sim_date=timestamp
+            )
+
+            # F. Commit
+            if tx:
+                tx.commit()
+            else:
+                cloud_con.commit()
+
+            return True, f"Executed {side} {quantity} {ticker}"
+
+        except Exception as inner:
+            if tx:
+                tx.rollback()
+            else:
+                try:
+                    cloud_con.rollback()
+                except Exception:
+                    pass
+            raise inner
+
+    except Exception as e:
+        logger.error(f"Trade execution failed: {e}")
+        return False, str(e)
 
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):

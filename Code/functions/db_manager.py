@@ -330,33 +330,42 @@ def get_asset_full_data(ticker, sim_time, portfolio_id=None):
     }
 
 # for recording snapshots of portfolios 
-def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
+def capture_portfolio_snapshot(cloud_con, duckdb_con, portfolio_id, sim_date):
     """
-    Records a portfolio valuation snapshot in portfolio_history.
+    Creates a portfolio snapshot and stores it in portfolio_history.
 
     Data sources:
-    - Supabase: portfolios, portfolio_history, holdings (indirect via calculator)
-    - GCS/DuckDB: market data via portfolio_value_calculator
+    - Cloud DB (Supabase/Postgres): portfolios, portfolio_history, holdings
+    - DuckDB: market data via portfolio_value_calculator
 
-    This function assumes the provided connection is a SQLAlchemy connection.
+    This function requires both:
+    - cloud_con: SQLAlchemy connection (write + read operations)
+    - duckdb_con: DuckDB analytics engine (price + valuation)
     """
+
 
     logger = logging.getLogger(__name__)
 
     try:
-        # ---------------------------------------------------------------------
-        # 1. Portfolio total value (market value + cash)
-        # ---------------------------------------------------------------------
+        # ------------------------------------------------------------
+        # 1. Validate DuckDB connection
+        # ------------------------------------------------------------
+        if duckdb_con is None:
+            raise ValueError("DuckDB connection is not initialized")
+
+        # ------------------------------------------------------------
+        # 2. Compute total portfolio value (market value + cash)
+        # ------------------------------------------------------------
         total_value = portfolio_value_calculator(
-            duckdb_con=connection,
+            duckdb_con=duckdb_con,
             portfolio_id=portfolio_id,
             timestamp=sim_date
-            )
+        )
 
-        # ---------------------------------------------------------------------
-        # 2. Cash balance (Supabase)
-        # ---------------------------------------------------------------------
-        cash_res = connection.execute(
+        # ------------------------------------------------------------
+        # 3. Fetch available cash from cloud database
+        # ------------------------------------------------------------
+        cash_res = cloud_con.execute(
             text("""
                 SELECT available_cash
                 FROM portfolios
@@ -367,16 +376,14 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
 
         available_cash = float(cash_res[0]) if cash_res and cash_res[0] is not None else 0.0
 
-        # ---------------------------------------------------------------------
-        # 3. Idempotent write strategy (DELETE + INSERT)
-        # ---------------------------------------------------------------------
-        # NOTE: kept as-is for compatibility, but logically represents UPSERT behavior
-
-        connection.execute(
+        # ------------------------------------------------------------
+        # 4. Idempotent snapshot write (DELETE + INSERT)
+        # ------------------------------------------------------------
+        cloud_con.execute(
             text("""
                 DELETE FROM portfolio_history
                 WHERE portfolio_id = :portfolio_id
-                  AND timestamp = :timestamp
+                AND timestamp = :timestamp
             """),
             {
                 "portfolio_id": portfolio_id,
@@ -384,7 +391,7 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
             }
         )
 
-        connection.execute(
+        cloud_con.execute(
             text("""
                 INSERT INTO portfolio_history (
                     portfolio_id,
@@ -407,11 +414,12 @@ def capture_portfolio_snapshot(connection, portfolio_id, sim_date):
             }
         )
 
+        # ------------------------------------------------------------
+        # 5. Logging
+        # ------------------------------------------------------------
         logger.info(
-            f"Portfolio snapshot stored: "
-            f"portfolio_id={portfolio_id}, "
-            f"date={sim_date}, "
-            f"value={total_value:.2f}"
+            f"Portfolio snapshot stored: portfolio_id={portfolio_id}, "
+            f"date={sim_date}, value={total_value:.2f}"
         )
 
         return True

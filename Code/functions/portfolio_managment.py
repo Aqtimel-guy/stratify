@@ -9,32 +9,41 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 
 
 # for creating a portfolio 
-def create_portfolio(user_id, portfolio_name, starting_at):
+def create_portfolio(cloud_con, duckdb_con, user_id, portfolio_name, starting_at):
     """
-    Creates a portfolio safely in Supabase.
+    Creates a new portfolio and triggers an initial snapshot.
+
+    Responsibilities:
+    - Validates input
+    - Enforces business constraints
+    - Persists portfolio in cloud DB
+    - Triggers initial snapshot (non-blocking)
+
+    Data sources:
+    - cloud_con: SQLAlchemy connection (Supabase/Postgres)
+    - duckdb_con: analytics engine (passed to snapshot via calculator chain)
     """
 
     logger = logging.getLogger(__name__)
-    engine = get_supabase_engine()
-    today = datetime.date.today()
-    today_datetime = datetime.datetime.combine(today, datetime.time.min)
 
-    # ----------------------------
-    # 0. FAST VALIDATIONS (no DB)
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 0. Basic validation (no DB calls)
+    # ------------------------------------------------------------
     if not portfolio_name or not portfolio_name.strip():
         return False, "Portfolio name is required."
+
+    today = datetime.date.today()
 
     if starting_at > today:
         return False, "Starting date cannot be in the future."
 
     try:
-        with engine.begin() as connection:
+        with cloud_con.begin():
 
-            # ----------------------------
-            # 1. USER EXISTS
-            # ----------------------------
-            user_exists = connection.execute(
+            # --------------------------------------------------------
+            # 1. Validate user exists
+            # --------------------------------------------------------
+            user_exists = cloud_con.execute(
                 text("SELECT 1 FROM users WHERE user_id = :user_id"),
                 {"user_id": user_id}
             ).fetchone()
@@ -42,10 +51,10 @@ def create_portfolio(user_id, portfolio_name, starting_at):
             if not user_exists:
                 return False, "User not found."
 
-            # ----------------------------
-            # 2. PORTFOLIO LIMIT
-            # ----------------------------
-            portfolio_count = connection.execute(
+            # --------------------------------------------------------
+            # 2. Portfolio limit check
+            # --------------------------------------------------------
+            portfolio_count = cloud_con.execute(
                 text("""
                     SELECT COUNT(*)
                     FROM portfolios
@@ -55,12 +64,12 @@ def create_portfolio(user_id, portfolio_name, starting_at):
             ).fetchone()[0]
 
             if portfolio_count >= 10:
-                return False, "You have reached the maximum limit of 10 portfolios."
+                return False, "Maximum portfolio limit reached."
 
-            # ----------------------------
-            # 3. UNIQUE NAME
-            # ----------------------------
-            name_exists = connection.execute(
+            # --------------------------------------------------------
+            # 3. Unique name check
+            # --------------------------------------------------------
+            name_exists = cloud_con.execute(
                 text("""
                     SELECT 1
                     FROM portfolios
@@ -71,12 +80,12 @@ def create_portfolio(user_id, portfolio_name, starting_at):
             ).fetchone()
 
             if name_exists:
-                return False, f"You already have a portfolio named '{portfolio_name}'."
+                return False, f"Portfolio '{portfolio_name}' already exists."
 
-            # ----------------------------
-            # 4. INSERT (NO MANUAL ID)
-            # ----------------------------
-            result = connection.execute(
+            # --------------------------------------------------------
+            # 4. Insert portfolio
+            # --------------------------------------------------------
+            result = cloud_con.execute(
                 text("""
                     INSERT INTO portfolios (
                         user_id,
@@ -101,32 +110,36 @@ def create_portfolio(user_id, portfolio_name, starting_at):
                 {
                     "user_id": user_id,
                     "portfolio_name": portfolio_name,
-                    "created_at": today_datetime,
+                    "created_at": datetime.datetime.combine(datetime.date.today(), datetime.time.min),
                     "starting_at": starting_at
                 }
             )
 
             portfolio_id = result.fetchone()[0]
 
-        # ----------------------------
-        # 5. SNAPSHOT OUTSIDE TRANSACTION
-        # ----------------------------
+        # ------------------------------------------------------------
+        # 5. Snapshot (outside transaction, safe side-effect)
+        # ------------------------------------------------------------
         try:
-            # use fresh connection if needed
-            with engine.begin() as conn2:
-                capture_portfolio_snapshot(conn2, portfolio_id, starting_at)
+            capture_portfolio_snapshot(
+                cloud_con=cloud_con,
+                duckdb_con=duckdb_con,
+                portfolio_id=portfolio_id,
+                sim_date=starting_at
+            )
 
         except Exception as snap_err:
-            logger.error(f"Snapshot failed (non-blocking): {snap_err}")
+            logger.error(f"Initial snapshot failed (non-blocking): {snap_err}")
 
-        logger.info(f"Portfolio created: {portfolio_id}")
+        logger.info(f"Portfolio created successfully: {portfolio_id}")
+
         return True, "Portfolio created successfully!"
 
     except Exception as e:
         logger.error(f"Portfolio creation failed: {e}")
         return False, "Internal error occurred."
-    
-    
+
+
 # for deleting a portfolio 
 def delete_portfolio(portfolio_id):
     """
@@ -218,65 +231,104 @@ def delete_portfolio(portfolio_id):
     
 ######################################################3
     
-# for going forward in time of the simulation
-def move_time_forward(portfolio_id, amount_of_time="1d"):
+def move_time_forward(cloud_con, duckdb_con, portfolio_id, amount_of_time="1d"):
     """
-    Advances the simulation timeline baseline and records state history logs before modifying records.
+    Advances the simulation timeline and records a portfolio snapshot before updating state.
+
+    Responsibilities:
+    - Reads current simulation state from cloud DB
+    - Captures portfolio snapshot (cloud + DuckDB)
+    - Advances simulation time safely
+    - Persists updated simulation state
     """
+
+    import logging
+    import datetime
+    import pandas as pd
+    from sqlalchemy import text
+
     logger = logging.getLogger(__name__)
-    engine = get_supabase_engine()  # Fetching the central cloud engine
-    
+
     try:
-        with engine.begin() as connection:
-            # 1. Retrieve the current simulation date directly within the active transaction
-            current_data = connection.execute(
-                text("SELECT current_sim_date FROM portfolios WHERE portfolio_id = :id"),
+        with cloud_con.begin():
+
+            # --------------------------------------------------------
+            # 1. Fetch current simulation date
+            # --------------------------------------------------------
+            current_data = cloud_con.execute(
+                text("""
+                    SELECT current_sim_date
+                    FROM portfolios
+                    WHERE portfolio_id = :id
+                """),
                 {"id": portfolio_id}
             ).fetchone()
-            
+
             if not current_data:
                 return False, "Portfolio not found"
-            
+
             raw_date = current_data[0]
-            
-            # Safe parsing: Ensure we possess a native datetime object for time math operations
+
+            # --------------------------------------------------------
+            # 2. Normalize datetime
+            # --------------------------------------------------------
             if isinstance(raw_date, pd.Timestamp):
                 current_sim_date = raw_date.to_pydatetime()
+
             elif isinstance(raw_date, datetime.date) and not isinstance(raw_date, datetime.datetime):
                 current_sim_date = datetime.datetime.combine(raw_date, datetime.time.min)
+
             elif isinstance(raw_date, str):
                 current_sim_date = pd.to_datetime(raw_date).to_pydatetime()
+
             else:
                 current_sim_date = raw_date
 
-            # 2. Append history state matrix checkpoint before applying delta offsets
-            # Pass the open connection context so the snapshot happens inside the same cloud transaction
-            capture_portfolio_snapshot(connection, portfolio_id, current_sim_date)
+            # --------------------------------------------------------
+            # 3. Snapshot BEFORE time advance
+            # --------------------------------------------------------
+            capture_portfolio_snapshot(
+                cloud_con=cloud_con,
+                duckdb_con=duckdb_con,
+                portfolio_id=portfolio_id,
+                sim_date=current_sim_date
+            )
 
-            # 3. Calculate the new advanced timeline step using Pandas frequencies
+            # --------------------------------------------------------
+            # 4. Compute new simulation date
+            # --------------------------------------------------------
             offset = pd.tseries.frequencies.to_offset(amount_of_time)
             new_sim_date = current_sim_date + offset
 
-            # 4. Guard clause: Do not allow the simulation time frame to leak into the real-world future
-            today_real = datetime.datetime.now()
-            if new_sim_date > today_real:
-                new_sim_date = today_real
+            # --------------------------------------------------------
+            # 5. Prevent future leakage
+            # --------------------------------------------------------
+            now_real = datetime.datetime.now()
+            if new_sim_date > now_real:
+                new_sim_date = now_real
 
-            # 5. Flush and write the new time evolution point to Supabase server
-            connection.execute(
-                text("UPDATE portfolios SET current_sim_date = :new_date WHERE portfolio_id = :id"),
+            # --------------------------------------------------------
+            # 6. Persist new simulation date
+            # --------------------------------------------------------
+            cloud_con.execute(
+                text("""
+                    UPDATE portfolios
+                    SET current_sim_date = :new_date
+                    WHERE portfolio_id = :id
+                """),
                 {"new_date": new_sim_date, "id": portfolio_id}
             )
-            
-        # 6. Update Streamlit session state memory environment (Done outside the database lifecycle)
-        st.session_state.current_current_sim_date = new_sim_date
-        
-        return True, new_sim_date  
-            
+
+        # ------------------------------------------------------------
+        # 7. Update Streamlit state (UI layer only)
+        # ------------------------------------------------------------
+        st.session_state.current_sim_date = new_sim_date
+
+        return True, new_sim_date
+
     except Exception as e:
-        logger.error(f"Error executing time slice transition shift: {e}")
+        logger.error(f"Time advancement failed: {e}")
         return False, str(e)
-    
 
 # for FIFO tracking 
 def calculate_fifo_avg_price(transactions):

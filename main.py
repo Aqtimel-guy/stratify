@@ -41,8 +41,15 @@ else:
     if 'use_cloud' not in st.session_state:
         st.session_state.use_cloud = False
 
-# Update streamlit session state with the globally resolved database path
-st.session_state.DB_PATH = DB_PATH
+# Store DB path
+st.session_state["DB_PATH"] = DB_PATH
+
+# Create persistent DuckDB connection (IMPORTANT)
+@st.cache_resource
+def get_duckdb_connection(db_path: str):
+    return duckdb.connect(db_path)
+
+duckdb_con = get_duckdb_connection(st.session_state["DB_PATH"])
 
 
 def main():
