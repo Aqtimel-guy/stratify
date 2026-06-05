@@ -241,20 +241,28 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             # E. Trigger historical ledger timeline update snapshot
             capture_portfolio_snapshot(con, portfolio_id, timestamp)
             
+            # FIX: Force explicit database commit depending on active transaction frame
             if tx:
                 tx.commit()
+            else:
+                con.commit()
                 
             return True, f"Successfully {side} {quantity} shares of {ticker}"
 
         except Exception as inner_error:
+            # FIX: Ensure rollback executes safely on the exact available context boundary
             if tx:
                 tx.rollback()
+            else:
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
             raise inner_error
 
     except Exception as e:
         logger.error(f"Asset trade execution pipeline failed: {e}")
         return False, str(e)
-
 
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
