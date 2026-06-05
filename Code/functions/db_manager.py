@@ -522,8 +522,10 @@ def portfolio_value_calculator(duckdb_con, portfolio_id, timestamp):
             """
             
             # Execute lookup using the active connection context injected as an argument
-            df_prices = duckdb_con.execute(prices_query, [asset_ids, timestamp]).df()
-            
+            df_prices = duckdb_con.execute(prices_query, {
+                "asset_list": asset_ids, 
+                "target_time": timestamp
+            }).df()            
             if not df_prices.empty:
                 # Merge holdings data with fetched localized historical prices
                 df_valuation = pd.merge(df_holdings, df_prices, on="asset_id", how="inner")
