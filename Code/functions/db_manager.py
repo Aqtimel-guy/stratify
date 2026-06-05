@@ -16,29 +16,29 @@ def get_local_db_connection():
     Initializes and returns a unified DuckDB connection inside session state,
     automatically registered with the GCS file system for remote Parquet reading.
     """
+    # FIX: Standardized connection key name to 'duckdb_con' across the app
     if 'duckdb_con' not in st.session_state:
-        # Check if you have DB_PATH or a default string file name
         db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
-        
-        # Open the connection
         con = duckdb.connect(db_path)
+        
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
-        # Seamlessly inject GCS cloud files support into DuckDB
+        
         try:
             con.register_filesystem(fsspec.filesystem('gcs'))
-        except Exception as e:
+        except Exception:
             pass
             
         st.session_state.duckdb_con = con
         
     return st.session_state.duckdb_con
 
-# for CLOUD CONNECTION 
+
+# for SUPABASE CONNECTION 
 def get_supabase_engine():
     """
     Returns a persistent SQLAlchemy engine for cloud database operations.
-    All infrastructure logging configurations remain strictly in English.
+    Leverages Supabase Connection Pooler to maintain stable remote connections.
     """
     if 'supabase_engine' not in st.session_state:
         db_password = st.secrets["database"]["password"]
@@ -48,83 +48,86 @@ def get_supabase_engine():
         db_name = "postgres"
         connection_string = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
         
-        # Adding pool_pre_ping to automatically repair dropped cloud connections
-        st.session_state.supabase_engine = create_engine(connection_string, pool_pre_ping=True)
+        # pool_pre_ping checks connection liveness before executing queries
+        st.session_state.supabase_engine = create_engine(
+            connection_string, 
+            pool_pre_ping=True,
+            pool_size=10,
+            max_overflow=20
+        )
         
     return st.session_state.supabase_engine
 
-# for getting assets details 
+# for data fetching
 def get_data(query, params=None, use_cloud=False):
     """
-    Unified data fetching function.
-    If use_cloud=True, queries the external Supabase database with safe parameter casting.
-    If use_cloud=False (default), queries the local DuckDB database using active session state if available.
-    All source documentation and comments are maintained strictly in English.
+    Unified data fetching interface.
+    Routes queries to Supabase (PostgreSQL) if use_cloud is True, 
+    otherwise routes to the local DuckDB instance.
     """
-    import pandas as pd
-    from sqlalchemy import text  # Added for safe execution context compilation
-
-    # ---- OPTION A: Querying the Cloud Database (Supabase) ----
+    # ---- OPTION A: Cloud Database Execution (Supabase) ----
     if use_cloud:
         engine = get_supabase_engine()
         
-        # PostgreSQL uses %s for parameters instead of ?
+        # PostgreSQL syntax utilizes %s for positional parameters instead of ?
         cloud_query = query.replace('?', '%s')
         
-        # Convert list/single params to a tuple that Pandas/SQLAlchemy expects
         if params is not None:
             if isinstance(params, list):
                 params = tuple(params)
             elif not isinstance(params, (tuple, dict)):
                 params = (params,)
         
-        # MINIMAL FIX: Wrap the cloud_query with text() so Pandas handles the parameters correctly without breaking legacy inputs
-        return pd.read_sql(text(cloud_query), con=engine, params=params)
+        # Explicitly wrap query in text() to ensure SQLAlchemy compatibility
+        with engine.connect() as connection:
+            return pd.read_sql(text(cloud_query), con=connection, params=params)
 
-    # ---- OPTION B: Querying the Local Database (DuckDB) ----
-    # 1. Check if an active connection exists in Streamlit session state
-    if 'con' in st.session_state:
-        con = st.session_state.con
+    # ---- OPTION B: Local Database Execution (DuckDB) ----
+    # Standardized fallback checking the correct session key
+    con = st.session_state.get('duckdb_con')
+    
+    if con:
         if params:
             return con.execute(query, params).df()
         return con.execute(query).df()
     
-    # 2. Fallback if no active session connection exists (e.g., initial startup)
-    import duckdb
-    with duckdb.connect(DB_PATH) as con:
+    # Emergency fallback if connection was not initialized in session state
+    db_path = st.secrets.get("LOCAL_DB_PATH", "stratify.db")
+    with duckdb.connect(db_path) as emergency_con:
         if params:
-            return con.execute(query, params).df()
-        return con.execute(query).df()
+            return emergency_con.execute(query, params).df()
+        return emergency_con.execute(query).df()
+    
 
 # for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     """
     Fetches comprehensive info about a specific asset as of the simulation date.
-    Implements multi-layered fallbacks and structural checks to prevent CatalogExceptions.
+    Optimized for remote server infrastructure to prevent massive network overhead
+    by migrating from full file downloads to targeted SQL database queries.
     """
-    base_cloud_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
     ticker_upper = ticker.upper()
     df_asset = pd.DataFrame()
     
-    # 1. Pipeline Execution Layer: Cloud (Pandas Engine)
+    # 1. Asset Metadata Layer
     if use_cloud:
         try:
-            df_all_assets = pd.read_parquet(f"{base_cloud_url}/assets.parquet")
-            df_asset = df_all_assets[df_all_assets['ticker'] == ticker_upper].copy()
+            # OPTIMIZED: Querying remote Supabase directly instead of reading heavy static assets Parquet
+            query_asset = "SELECT asset_id, ticker, name, sector, industry FROM assets WHERE ticker = ?"
+            df_asset = get_data(query_asset, [ticker_upper], use_cloud=True)
         except Exception as cloud_err:
-            st.sidebar.warning(f"⚠️ Cloud assets sync failed: {cloud_err}. Shifting to local engine safety routines.")
+            st.sidebar.warning(f"Cloud assets sync failed: {cloud_err}. Shifting to local engine.")
             use_cloud = False
 
-    # 2. Pipeline Execution Layer: Local Fallback (DuckDB Engine with safety verification)
+    # Local fallback for asset metadata
     if not use_cloud or df_asset.empty:
         try:
-            # Verify table catalog presence before execution to block driver-level exception bursts
             table_check = con.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'assets'").df()
             if not table_check.empty:
                 query_asset = "SELECT asset_id, ticker, name, sector, industry FROM assets WHERE ticker = ?"
                 df_asset = con.execute(query_asset, [ticker_upper]).df()
             else:
-                st.sidebar.error("⚠️ Database catalog mismatch: Table 'assets' is missing locally.")
+                st.sidebar.error("Database catalog mismatch: Table 'assets' is missing locally.")
                 return None
         except Exception:
             return None
@@ -132,7 +135,7 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     if df_asset.empty:
         return None
 
-    # Extract foundational key structural elements
+    # Extract foundational structural components
     asset_id = int(df_asset.iloc[0]['asset_id'])
     ticker_name = df_asset.iloc[0]['ticker']
     name = df_asset.iloc[0]['name']
@@ -142,22 +145,23 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
     current_price = None
     first_trade_date = None
 
-    # 3. Pricing Matrix Metrics Extraction Layer: Cloud
+    # 2. Pricing Matrix Layer
     if use_cloud:
         try:
-            df_all_prices = pd.read_parquet(f"{base_cloud_url}/prices.parquet")
-            df_filtered_prices = df_all_prices[
-                (df_all_prices['asset_id'] == asset_id) & 
-                (df_all_prices['timestamp'] <= sim_date)
-            ].sort_values(by='timestamp', ascending=True)
-            
-            current_price = df_filtered_prices.iloc[-1]['close'] if not df_filtered_prices.empty else None
-            first_trade_date = df_all_prices[df_all_prices['asset_id'] == asset_id]['timestamp'].min() if not df_all_prices.empty else None
+            # OPTIMIZED: Pulling only the specific asset's target price row via remote database engine
+            query_price = "SELECT close FROM prices WHERE asset_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1"
+            df_price = get_data(query_price, [asset_id, sim_date], use_cloud=True)
+            current_price = df_price.iloc[0]['close'] if not df_price.empty else None
+
+            # OPTIMIZED: Calculating aggregate min timestamp directly on cloud server
+            query_first_date = "SELECT MIN(timestamp) as min_ts FROM prices WHERE asset_id = ?"
+            df_first_date = get_data(query_first_date, [asset_id], use_cloud=True)
+            first_trade_date = df_first_date.iloc[0]['min_ts'] if not df_first_date.empty else None
         except Exception as price_cloud_err:
-            st.sidebar.error(f"⚠️ Cloud pricing matrix processing dropped: {price_cloud_err}")
+            st.sidebar.error(f"Cloud pricing matrix processing dropped: {price_cloud_err}")
             use_cloud = False
 
-    # 4. Pricing Matrix Metrics Extraction Layer: Local (With safety checks)
+    # Local fallback for pricing matrix
     if not use_cloud:
         try:
             table_check_prices = con.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'prices'").df()
@@ -172,21 +176,28 @@ def get_asset_snapshot(con, ticker, sim_date, use_cloud=False):
         except Exception:
             pass
 
-    # 5. Application Portfolio Layer Interface Tracking
+    # 3. Portfolio Holdings Layer
     portfolio_id = st.session_state.get('current_portfolio_id')
     shares_held = 0
+    
     if portfolio_id:
-        use_cloud_portfolio = st.session_state.get('use_cloud', False)
-        holdings_source = "holdings_cloud" if use_cloud_portfolio else "holdings"
-        
-        try:
-            table_check_holdings = con.execute(f"SELECT table_name FROM information_schema.tables WHERE table_name = '{holdings_source}'").df()
-            if not table_check_holdings.empty:
-                query_holdings = f"SELECT quantity FROM {holdings_source} WHERE portfolio_id = ? AND asset_id = ?"
-                df_holdings = con.execute(query_holdings, [int(portfolio_id), asset_id]).df()
+        if use_cloud:
+            try:
+                # OPTIMIZED: Direct production holdings check from cloud server
+                query_holdings = "SELECT quantity FROM holdings WHERE portfolio_id = ? AND asset_id = ?"
+                df_holdings = get_data(query_holdings, [int(portfolio_id), asset_id], use_cloud=True)
                 shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
-        except Exception:
-            shares_held = 0
+            except Exception:
+                shares_held = 0
+        else:
+            try:
+                table_check_holdings = con.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'holdings'").df()
+                if not table_check_holdings.empty:
+                    query_holdings = "SELECT quantity FROM holdings WHERE portfolio_id = ? AND asset_id = ?"
+                    df_holdings = con.execute(query_holdings, [int(portfolio_id), asset_id]).df()
+                    shares_held = df_holdings.iloc[0]['quantity'] if not df_holdings.empty else 0
+            except Exception:
+                shares_held = 0
 
     return {
         "asset_id": asset_id,
@@ -471,5 +482,7 @@ def init_session_state():
         # --- execution lifecycle & system logging metrics ---
         st.session_state.last_action_time = 0
         st.session_state.initialized = True
+
+
 
 

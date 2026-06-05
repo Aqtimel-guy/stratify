@@ -451,7 +451,7 @@ def growth_factor_raw_calculator(con , asset_id, w_eps=0.5, w_revenue=0.5):
     ]
     
     
-## seems to ok
+## seems ok
 def defensive_factor_raw_calculator(
     con,
     asset_id ,

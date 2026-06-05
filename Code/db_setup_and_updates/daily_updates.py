@@ -1,30 +1,52 @@
+import os
+import sys
+import time
+import logging
+from datetime import datetime, timedelta
+import numpy as np
+import pandas as pd
 import yfinance as yf
 import duckdb
-import pandas as pd
-from datetime import datetime, timedelta
-import logging
-import time
-import sys
 import os
-import numpy as np
+import sys
+from sync_local_to_parquet_gcs import export_and_upload_parquet
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Get the absolute path of the 'Code' directory (one level up from this file)
+code_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if code_dir not in sys.path:
+    sys.path.insert(0, code_dir)
+
+# Now Python can find 'strategy_builder' easily without any dots
 from strategy_builder.factor_formulas_raw import *
 from strategy_builder.normelizing_factors import *
 
 
+DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
+# --- ROBUST PROJECT ROOT RESOLUTION ---
+# Iteratively climbs up until it finds the directory containing 'functions'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = current_dir
+
+while project_root and project_root != os.path.dirname(project_root):
+    if os.path.isdir(os.path.join(project_root, "functions")):
+        break
+    project_root = os.path.dirname(project_root)
+
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 
 # Global logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-### fill asset table (1)
+# =========================================================================
+# PIPELINE COMPONENT 1: ASSETS INGESTION
+# =========================================================================
 
 def fill_assets_table():
     """
     Fetches S&P 500 companies data from GitHub, cleans it, 
-    and inserts it into the 'assets' table in DuckDB.
-    
+    and inserts it along with manual ETFs into the local 'assets' table.
     """
     logger = logging.getLogger(__name__)
 
@@ -33,7 +55,7 @@ def fill_assets_table():
     try:
         df = pd.read_csv(url)
     except Exception as e:
-        logger.error(f"Error fetching data: {e}")
+        logger.error(f"Error fetching data from GitHub: {e}")
         return
 
     # --- Step 2: Clean and rename columns to match DB schema ---
@@ -45,307 +67,309 @@ def fill_assets_table():
         "GICS Sub-Industry": "industry"
     }, inplace=True)
 
-    # --- Step 3: Connect to DuckDB ---
-    db_path = r'C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb'
-    con = duckdb.connect(db_path)
-    con.execute("INSTALL httpfs;")
-    con.execute("LOAD httpfs;")
-
-    # Ensure the sequence for asset_id exists
-    con.execute("CREATE SEQUENCE IF NOT EXISTS asset_id_seq START 1")
+    # --- Step 3: Connect to DuckDB via dynamic path catalog handle ---
+    print(f"Connecting to local DuckDB instance at: {DB_PATH}")
+    con = duckdb.connect(DB_PATH)
     
-    # Get initial count to calculate how many rows were actually added
-    count_before = con.execute("SELECT count(*) FROM assets").fetchone()[0]
+    try:
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
 
-    # --- Step 4: Register the DataFrame as a temporary virtual table ---
-    # This prevents scope issues where DuckDB might not 'see' the local df_clean variable
-    con.register('temp_assets_df', df_clean)
+        # Safeguard sequence management: fetch absolute max ID before inserting anything
+        max_id = con.execute("SELECT COALESCE(MAX(asset_id), 0) FROM assets").fetchone()[0]
+        con.execute("DROP SEQUENCE IF EXISTS asset_id_seq")
+        con.execute(f"CREATE SEQUENCE asset_id_seq START WITH {max_id + 1}")
+        
+        # Get baseline row count
+        count_before = con.execute("SELECT count(*) FROM assets").fetchone()[0]
 
-    # --- Step 5: Execute the Insert Query ---
-    # Using 'WHERE NOT IN' instead of 'ON CONFLICT' to prevent the sequence 
-    # from incrementing IDs for tickers that already exist.
-    con.execute("""
-        INSERT INTO assets (asset_id, ticker, name, sector, industry, is_etf)
-        SELECT 
-            nextval('asset_id_seq'), 
-            ticker, 
-            name, 
-            sector, 
-            industry,
+        # --- Step 4: Register S&P 500 Equities DataFrame ---
+        con.register('temp_assets_df', df_clean)
+
+        # --- Step 5: Execute Equities Insert Query ---
+        con.execute("""
+            INSERT INTO assets (asset_id, ticker, name, sector, industry, is_etf)
+            SELECT 
+                nextval('asset_id_seq'), 
+                ticker, 
+                name, 
+                sector, 
+                industry,
                 FALSE AS is_etf
-        FROM temp_assets_df
-        WHERE ticker NOT IN (SELECT ticker FROM assets)
-    """)
-    
-    ## --- step 5.1: insert specific ETFs
-    etfs = [
-    # --- Broad Market ---
-    {"ticker": "SPY", "name": "SPDR S&P 500 ETF Trust", "sector": "Benchmark", "industry": "Broad Market"},
-    {"ticker": "QQQ", "name": "Invesco QQQ Trust (Nasdaq 100)", "sector": "Benchmark", "industry": "Technology Index"},
-    {"ticker": "IWM", "name": "iShares Russell 2000 ETF", "sector": "Benchmark", "industry": "Small Cap"},
-    {"ticker": "DIA", "name": "SPDR Dow Jones Industrial Average", "sector": "Benchmark", "industry": "Blue Chip"},
-    {"ticker": "VTI", "name": "Vanguard Total Stock Market", "sector": "Benchmark", "industry": "Total Market"},
+            FROM temp_assets_df
+            WHERE ticker NOT IN (SELECT ticker FROM assets)
+        """)
+        
+        # --- Step 5.1: Define Specific ETFs Portfolio Framework ---
+        etfs = [
+            # --- Broad Market ---
+            {"ticker": "SPY", "name": "SPDR S&P 500 ETF Trust", "sector": "Benchmark", "industry": "Broad Market"},
+            {"ticker": "QQQ", "name": "Invesco QQQ Trust (Nasdaq 100)", "sector": "Benchmark", "industry": "Technology Index"},
+            {"ticker": "IWM", "name": "iShares Russell 2000 ETF", "sector": "Benchmark", "industry": "Small Cap"},
+            {"ticker": "DIA", "name": "SPDR Dow Jones Industrial Average", "sector": "Benchmark", "industry": "Blue Chip"},
+            {"ticker": "VTI", "name": "Vanguard Total Stock Market", "sector": "Benchmark", "industry": "Total Market"},
 
-    # --- סקטורים של ה-S&P 500 Select Sector SPDRs ---
-    {"ticker": "XLK", "name": "Technology Select Sector SPDR", "sector": "Technology", "industry": "Sector ETF"},
-    {"ticker": "XLF", "name": "Financial Select Sector SPDR", "sector": "Financials", "industry": "Sector ETF"},
-    {"ticker": "XLV", "name": "Health Care Select Sector SPDR", "sector": "Health Care", "industry": "Sector ETF"},
-    {"ticker": "XLY", "name": "Consumer Discretionary SPDR", "sector": "Consumer", "industry": "Sector ETF"},
-    {"ticker": "XLP", "name": "Consumer Staples Select Sector SPDR", "sector": "Consumer", "industry": "Defensive ETF"},
-    {"ticker": "XLI", "name": "Industrial Select Sector SPDR", "sector": "Industrials", "industry": "Sector ETF"},
-    {"ticker": "XLE", "name": "Energy Select Sector SPDR", "sector": "Energy", "industry": "Sector ETF"},
-    {"ticker": "XLRE", "name": "Real Estate Select Sector SPDR", "sector": "Real Estate", "industry": "Sector ETF"},
-    {"ticker": "XLU", "name": "Utilities Select Sector SPDR", "sector": "Utilities", "industry": "Sector ETF"},
-    {"ticker": "XLB", "name": "Materials Select Sector SPDR", "sector": "Materials", "industry": "Sector ETF"},
+            # --- S&P 500 Select Sector SPDRs ---
+            {"ticker": "XLK", "name": "Technology Select Sector SPDR", "sector": "Technology", "industry": "Sector ETF"},
+            {"ticker": "XLF", "name": "Financial Select Sector SPDR", "sector": "Financials", "industry": "Sector ETF"},
+            {"ticker": "XLV", "name": "Health Care Select Sector SPDR", "sector": "Health Care", "industry": "Sector ETF"},
+            {"ticker": "XLY", "name": "Consumer Discretionary SPDR", "sector": "Consumer", "industry": "Sector ETF"},
+            {"ticker": "XLP", "name": "Consumer Staples Select Sector SPDR", "sector": "Consumer", "industry": "Defensive ETF"},
+            {"ticker": "XLI", "name": "Industrial Select Sector SPDR", "sector": "Industrials", "industry": "Sector ETF"},
+            {"ticker": "XLE", "name": "Energy Select Sector SPDR", "sector": "Energy", "industry": "Sector ETF"},
+            {"ticker": "XLRE", "name": "Real Estate Select Sector SPDR", "sector": "Real Estate", "industry": "Sector ETF"},
+            {"ticker": "XLU", "name": "Utilities Select Sector SPDR", "sector": "Utilities", "industry": "Sector ETF"},
+            {"ticker": "XLB", "name": "Materials Select Sector SPDR", "sector": "Materials", "industry": "Sector ETF"},
 
-    # --- (Thematic Tech) ---
-    {"ticker": "SMH", "name": "VanEck Semiconductor ETF", "sector": "Technology", "industry": "Semiconductors"},
-    {"ticker": "CIBR", "name": "First Trust NASDAQ Cybersecurity", "sector": "Technology", "industry": "Cybersecurity"},
-    {"ticker": "BOTZ", "name": "Global X Robotics & AI ETF", "sector": "Technology", "industry": "AI & Robotics"},
-    {"ticker": "SKYY", "name": "First Trust Cloud Computing", "sector": "Technology", "industry": "Cloud Computing"},
-    {"ticker": "ARKK", "name": "ARK Innovation ETF", "sector": "Technology", "industry": "Disruptive Tech"},
+            # --- Thematic Tech ---
+            {"ticker": "SMH", "name": "VanEck Semiconductor ETF", "sector": "Technology", "industry": "Semiconductors"},
+            {"ticker": "CIBR", "name": "First Trust NASDAQ Cybersecurity", "sector": "Technology", "industry": "Cybersecurity"},
+            {"ticker": "BOTZ", "name": "Global X Robotics & AI ETF", "sector": "Technology", "industry": "AI & Robotics"},
+            {"ticker": "SKYY", "name": "First Trust Cloud Computing", "sector": "Technology", "industry": "Cloud Computing"},
+            {"ticker": "ARKK", "name": "ARK Innovation ETF", "sector": "Technology", "industry": "Disruptive Tech"},
 
-    # --- digital assets (Crypto) ---
-    {"ticker": "IBIT", "name": "iShares Bitcoin Trust", "sector": "Crypto", "industry": "Bitcoin"},
-    {"ticker": "ETHA", "name": "iShares Ethereum Trust", "sector": "Crypto", "industry": "Ethereum"},
-    {"ticker": "BITO", "name": "ProShares Bitcoin Strategy ETF", "sector": "Crypto", "industry": "Bitcoin Futures"},
-    {"ticker": "WGMI", "name": "Valkyrie Bitcoin Miners ETF", "sector": "Crypto", "industry": "Crypto Mining"},
+            # --- Digital Assets (Crypto) ---
+            {"ticker": "IBIT", "name": "iShares Bitcoin Trust", "sector": "Crypto", "industry": "Bitcoin"},
+            {"ticker": "ETHA", "name": "iShares Ethereum Trust", "sector": "Crypto", "industry": "Ethereum"},
+            {"ticker": "BITO", "name": "ProShares Bitcoin Strategy ETF", "sector": "Crypto", "industry": "Bitcoin Futures"},
+            {"ticker": "WGMI", "name": "Valkyrie Bitcoin Miners ETF", "sector": "Crypto", "industry": "Crypto Mining"},
 
-    # --- energy and commodities ---
-    {"ticker": "GLD", "name": "SPDR Gold Shares", "sector": "Commodities", "industry": "Gold"},
-    {"ticker": "SLV", "name": "iShares Silver Trust", "sector": "Commodities", "industry": "Silver"},
-    {"ticker": "USO", "name": "United States Oil Fund", "sector": "Commodities", "industry": "Crude Oil"},
-    {"ticker": "UNG", "name": "United States Natural Gas Fund", "sector": "Commodities", "industry": "Natural Gas"},
-    {"ticker": "ICLN", "name": "iShares Global Clean Energy", "sector": "Energy", "industry": "Renewable Energy"},
-    {"ticker": "URA", "name": "Global X Uranium ETF", "sector": "Energy", "industry": "Uranium"},
-    {"ticker": "COPX", "name": "Global X Copper Miners ETF", "sector": "Commodities", "industry": "Copper"},
-    {"ticker": "DBA", "name": "Invesco Agriculture Fund", "sector": "Commodities", "industry": "Agriculture"},
+            # --- Energy and Commodities ---
+            {"ticker": "GLD", "name": "SPDR Gold Shares", "sector": "Commodities", "industry": "Gold"},
+            {"ticker": "SLV", "name": "iShares Silver Trust", "sector": "Commodities", "industry": "Silver"},
+            {"ticker": "USO", "name": "United States Oil Fund", "sector": "Commodities", "industry": "Crude Oil"},
+            {"ticker": "UNG", "name": "United States Natural Gas Fund", "sector": "Commodities", "industry": "Natural Gas"},
+            {"ticker": "ICLN", "name": "iShares Global Clean Energy", "sector": "Energy", "industry": "Renewable Energy"},
+            {"ticker": "URA", "name": "Global X Uranium ETF", "sector": "Energy", "industry": "Uranium"},
+            {"ticker": "COPX", "name": "Global X Copper Miners ETF", "sector": "Commodities", "industry": "Copper"},
+            {"ticker": "DBA", "name": "Invesco Agriculture Fund", "sector": "Commodities", "industry": "Agriculture"},
 
-    # ---(Macro & Bonds) ---
-    {"ticker": "TLT", "name": "iShares 20+ Year Treasury Bond", "sector": "Bonds", "industry": "Long Term Treasuries"},
-    {"ticker": "IEF", "name": "iShares 7-10 Year Treasury Bond", "sector": "Bonds", "industry": "Mid Term Treasuries"},
-    {"ticker": "SHY", "name": "iShares 1-3 Year Treasury Bond", "sector": "Bonds", "industry": "Short Term Treasuries"},
-    {"ticker": "TIP", "name": "iShares TIPS Bond ETF", "sector": "Bonds", "industry": "Inflation Protected"},
-    {"ticker": "LQD", "name": "iShares Investment Grade Corp Bond", "sector": "Bonds", "industry": "Corporate Bonds"},
+            # --- Macro & Bonds ---
+            {"ticker": "TLT", "name": "iShares 20+ Year Treasury Bond", "sector": "Bonds", "industry": "Long Term Treasuries"},
+            {"ticker": "IEF", "name": "iShares 7-10 Year Treasury Bond", "sector": "Bonds", "industry": "Mid Term Treasuries"},
+            {"ticker": "SHY", "name": "iShares 1-3 Year Treasury Bond", "sector": "Bonds", "industry": "Short Term Treasuries"},
+            {"ticker": "TIP", "name": "iShares TIPS Bond ETF", "sector": "Bonds", "industry": "Inflation Protected"},
+            {"ticker": "LQD", "name": "iShares Investment Grade Corp Bond", "sector": "Bonds", "industry": "Corporate Bonds"},
 
-    # --- investment styles (Factor ETFs) ---
-    {"ticker": "VUG", "name": "Vanguard Growth ETF", "sector": "Style", "industry": "Growth"},
-    {"ticker": "VTV", "name": "Vanguard Value ETF", "sector": "Style", "industry": "Value"},
-    {"ticker": "MTUM", "name": "iShares MSCI USA Momentum", "sector": "Style", "industry": "Momentum"},
-    {"ticker": "QUAL", "name": "iShares MSCI USA Quality", "sector": "Style", "industry": "Quality"},
-    {"ticker": "NOBL", "name": "ProShares Dividend Aristocrats", "sector": "Style", "industry": "Dividends"},
+            # --- Investment Styles (Factor ETFs) ---
+            {"ticker": "VUG", "name": "Vanguard Growth ETF", "sector": "Style", "industry": "Growth"},
+            {"ticker": "VTV", "name": "Vanguard Value ETF", "sector": "Style", "industry": "Value"},
+            {"ticker": "MTUM", "name": "iShares MSCI USA Momentum", "sector": "Style", "industry": "Momentum"},
+            {"ticker": "QUAL", "name": "iShares MSCI USA Quality", "sector": "Style", "industry": "Quality"},
+            {"ticker": "NOBL", "name": "ProShares Dividend Aristocrats", "sector": "Style", "industry": "Dividends"},
 
-    # --- world wide markets (Global) ---
-    {"ticker": "EEM", "name": "iShares MSCI Emerging Markets", "sector": "Global", "industry": "Emerging Markets"},
-    {"ticker": "VGK", "name": "Vanguard FTSE Europe ETF", "sector": "Global", "industry": "Europe"},
-    {"ticker": "EWJ", "name": "iShares MSCI Japan ETF", "sector": "Global", "industry": "Japan"},
-    {"ticker": "FXI", "name": "iShares China Large-Cap ETF", "sector": "Global", "industry": "China"},
+            # --- Worldwide Markets (Global) ---
+            {"ticker": "EEM", "name": "iShares MSCI Emerging Markets", "sector": "Global", "industry": "Emerging Markets"},
+            {"ticker": "VGK", "name": "Vanguard FTSE Europe ETF", "sector": "Global", "industry": "Europe"},
+            {"ticker": "EWJ", "name": "iShares MSCI Japan ETF", "sector": "Global", "industry": "Japan"},
+            {"ticker": "FXI", "name": "iShares China Large-Cap ETF", "sector": "Global", "industry": "China"},
 
-    # --- fear and hedging (Sentiment/Inverse) ---
-    {"ticker": "VIXY", "name": "ProShares VIX Short-Term Futures", "sector": "Volatility", "industry": "VIX Factor"},
-    {"ticker": "SQQQ", "name": "ProShares Short QQQ (3x)", "sector": "Inverse", "industry": "Inverse Tech"},
-    {"ticker": "SH", "name": "ProShares Short S&P 500", "sector": "Inverse", "industry": "Inverse Market"}
-    ]
+            # --- Fear and Hedging (Sentiment/Inverse) ---
+            {"ticker": "VIXY", "name": "ProShares VIX Short-Term Futures", "sector": "Volatility", "industry": "VIX Factor"},
+            {"ticker": "SQQQ", "name": "ProShares Short QQQ (3x)", "sector": "Inverse", "industry": "Inverse Tech"},
+            {"ticker": "SH", "name": "ProShares Short S&P 500", "sector": "Inverse", "industry": "Inverse Market"}
+        ]
 
-    #   getting the max asset_id to ensure our sequence continues correctly without gaps
-    max_id = con.execute("SELECT COALESCE(MAX(asset_id), 0) FROM assets").fetchone()[0]
-    
-    #   resetting the sequence to start from max_id + 1 to avoid gaps in asset_id for new entries
-    con.execute("DROP SEQUENCE IF EXISTS asset_id_seq")
-    con.execute(f"CREATE SEQUENCE asset_id_seq START WITH {max_id + 1}")
+        temp_etf_df = pd.DataFrame(etfs)
 
-    # transform the list of dicts into a DataFrame for easier insertion
-    temp_etf_df = pd.DataFrame(etfs)
+        # Explicitly register ETF dataframe into connection context
+        con.register('temp_etf_df', temp_etf_df)
 
-    # 3. insert ETFs into the assets table, ensuring no duplicates based on ticker
-    con.execute("""
-        INSERT INTO assets (asset_id, ticker, name, sector, industry, is_etf)
-        SELECT 
-            nextval('asset_id_seq'), 
-            ticker, 
-            name, 
-            sector, 
-            industry,
-            TRUE AS is_etf
-        FROM temp_etf_df
-        WHERE ticker NOT IN (SELECT ticker FROM assets)
-    """)
+        # Insert ETFs into assets catalog ensuring absolute uniqueness
+        con.execute("""
+            INSERT INTO assets (asset_id, ticker, name, sector, industry, is_etf)
+            SELECT 
+                nextval('asset_id_seq'), 
+                ticker, 
+                name, 
+                sector, 
+                industry,
+                TRUE AS is_etf
+            FROM temp_etf_df
+            WHERE ticker NOT IN (SELECT ticker FROM assets)
+        """)
 
+        # --- Step 6: Telemetry Analysis ---
+        count_after = con.execute("SELECT count(*) FROM assets").fetchone()[0]
+        added_rows = count_after - count_before
+        
+        logger.info("-" * 30)
+        logger.info("Database Synchronization Status:")
+        logger.info(f"New structural assets added: {added_rows}")
+        logger.info(f"Total functional entities in database: {count_after}")
+        logger.info("-" * 30)
+        
+    except Exception as query_error:
+        logger.error(f"Critical execution error within query block: {query_error}")
+        
+    finally:
+        # --- Step 8: Safe Handle Closure ---
+        con.close()
 
-    # --- Step 6: Finalize ---
-    count_after = con.execute("SELECT count(*) FROM assets").fetchone()[0]
-    added_rows = count_after - count_before
-    
-    # --- Step 7: log update status  (can be removed in production) ---
-    logger.info("-" * 30)
-    logger.info("Database Update Status:")
-    logger.info(f"New assets added: {added_rows}")
-    logger.info(f"Total assets in database: {count_after}")
-    logger.info("-" * 30)
-    
-    # --- Step 8: Close the connection ---
-    con.close()
-
-
-### fill prices table (2)
 
 def fill_prices_table():
     """
     Advanced ETL for Price Data:
-    - Incremental loading
-    - Batch download
-    - Vectorized processing
-    - Robust (retry + cleaning)
-    - Uses DATE (no time component)
+    - Incremental loading per asset group to optimize network traffic
+    - Dynamic MultiIndex flattening safely handling yfinance structure variations
+    - Ingests clean records via transactional chunk streaming
     """
-
-    db_path = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
-    con = duckdb.connect(db_path)
-    con.execute("INSTALL httpfs;")
-    con.execute("LOAD httpfs;")
     logger = logging.getLogger(__name__)
+    print(f"Connecting to local DuckDB instance at: {DB_PATH}")
+    con = duckdb.connect(DB_PATH)
+    
+    try:
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
 
-    # --- Step 1: Load assets ---
-    tickers_df = con.execute("""
-        SELECT asset_id, ticker
-        FROM assets
-    """).fetchdf()
+        # --- Step 1: Load assets baseline data ---
+        tickers_df = con.execute("""
+            SELECT asset_id, ticker
+            FROM assets
+        """).fetchdf()
 
-    if tickers_df.empty:
-        logger.warning("No assets found in 'assets' table.")
-        con.close()
-        return
-
-    tickers_df['ticker_yf'] = tickers_df['ticker'].str.strip().str.replace(".", "-", regex=False)
-
-    # --- Step 2: Get last timestamps ---
-    last_dates = con.execute("""
-        SELECT asset_id, MAX(timestamp) AS last_timestamp
-        FROM prices
-        GROUP BY asset_id
-    """).fetchdf()
-
-    tickers_df = tickers_df.merge(last_dates, on="asset_id", how="left")
-
-    default_start = pd.Timestamp("2000-01-01")
-    tickers_df['last_timestamp'] = tickers_df['last_timestamp'].fillna(default_start)
-
-    # 🔥 convert to DATE (drop time completely)
-    tickers_df['last_timestamp'] = pd.to_datetime(tickers_df['last_timestamp']).dt.date
-
-    overall_min_date = tickers_df['last_timestamp'].min()
-    fetch_start = (overall_min_date + timedelta(days=1)).strftime('%Y-%m-%d')
-    end_date = datetime.today().strftime('%Y-%m-%d')
-
-    ticker_list = tickers_df['ticker_yf'].tolist()
-
-    if fetch_start >= end_date:
-        logger.info(f"Already up to date (last date: {overall_min_date})")
-        con.close()
-        return
-
-    logger.info(f"Downloading {len(ticker_list)} tickers from {fetch_start} to {end_date}")
-
-    # --- Step 3: Download with retry ---
-    raw_data = None
-    for attempt in range(3):
-        try:
-            raw_data = yf.download(
-                ticker_list,
-                start=fetch_start,
-                end=end_date,
-                interval="1d",
-                group_by='ticker',
-                auto_adjust=False,
-                threads=True
-            )
-            break
-        except Exception as e:
-            logging.warning(f"Download failed (attempt {attempt+1}): {e}")
-            time.sleep(2)
-
-    if raw_data is None or raw_data.empty:
-        logger.warning("No data downloaded.")
-        con.close()
-        return
-
-# --- Step 4: Flatten (Robust Version) ---
-    if isinstance(raw_data.columns, pd.MultiIndex):
-        # במצב Batch, יאהו מחזיר MultiIndex. ה-stack הופך את הטיקרים לאינדקס נוסף
-        data = raw_data.stack(level=0, future_stack=True).reset_index()
-        
-        # זיהוי דינמי של עמודת הטיקר - לפעמים יאהו קורא לזה 'Ticker' ולפעמים 'level_1'
-        possible_ticker_cols = ['level_1', 'Ticker', 'ticker']
-        found_col = next((c for c in possible_ticker_cols if c in data.columns), None)
-        
-        if found_col:
-            data.rename(columns={found_col: 'ticker_yf'}, inplace=True)
-        else:
-            # אם לא מצאנו, ננסה להבין איפה הטיקרים התחבאו
-            logger.error(f"Could not find ticker column in columns: {data.columns}")
-            con.close()
+        if tickers_df.empty:
+            logger.warning("No assets found in 'assets' table. Aborting price pipeline.")
             return
-    else:
-        # טיפול במקרה של טיקר בודד
-        data = raw_data.reset_index()
-        data['ticker_yf'] = ticker_list[0]
 
-    # --- Step 5: Rename columns ---
-    data.rename(columns={
-        'Date': 'timestamp',
-        'Open': 'open',
-        'High': 'high',
-        'Low': 'low',
-        'Close': 'close',
-        'Adj Close': 'adj_close',
-        'Volume': 'volume'
-    }, inplace=True)
+        tickers_df['ticker_yf'] = tickers_df['ticker'].str.strip().str.replace(".", "-", regex=False)
 
-    # 🔥 convert timestamp → DATE only
-    data['timestamp'] = pd.to_datetime(data['timestamp']).dt.date
+        # --- Step 2: Extract latest stored telemetry dates per asset ---
+        last_dates = con.execute("""
+            SELECT asset_id, MAX(timestamp) AS last_timestamp
+            FROM prices
+            GROUP BY asset_id
+        """).fetchdf()
 
-    # --- Step 6: Merge with asset_id ---
-    data = data.merge(
-        tickers_df[['asset_id', 'ticker_yf', 'last_timestamp']],
-        on='ticker_yf',
-        how='inner'
-    )
+        tickers_df = tickers_df.merge(last_dates, on="asset_id", how="left")
+        
+        # Explicitly fallback missing data assets to benchmark epoch (year 2000)
+        default_start = pd.Timestamp("2000-01-01")
+        tickers_df['last_timestamp'] = tickers_df['last_timestamp'].fillna(default_start)
+        tickers_df['last_timestamp'] = pd.to_datetime(tickers_df['last_timestamp']).dt.date
 
-    # --- Step 7: Incremental filter ---
-    data = data[data['timestamp'] > data['last_timestamp']]
+        # CRITICAL FIX: Segment tickers to prevent single outdated ticker from forcing 
+        # a massive global re-download of the entire S&P 500 matrix history.
+        today_date = datetime.utcnow().date()
+        tickers_df['days_outdated'] = tickers_df['last_timestamp'].apply(lambda x: (today_date - x).days)
+        
+        # Filter assets that actually require data refresh processing
+        active_targets = tickers_df[tickers_df['days_outdated'] > 1].copy()
+        
+        if active_targets.empty:
+            logger.info("All local market asset vector price tracks are already up to date.")
+            return
 
-    if data.empty:
-        logger.info("No new data after filtering.")
+        # Determine the boundaries based on target assets requirements
+        overall_min_date = active_targets['last_timestamp'].min()
+        fetch_start = (overall_min_date + timedelta(days=1)).strftime('%Y-%m-%d')
+        end_date = (today_date + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        ticker_list = active_targets['ticker_yf'].tolist()
+        logger.info(f"Downloading data snapshot for {len(ticker_list)} assets from {fetch_start} to {end_date}")
+
+        # --- Step 3: Executing Network Batch Download Handling Retries ---
+        raw_data = None
+        for attempt in range(3):
+            try:
+                raw_data = yf.download(
+                    ticker_list,
+                    start=fetch_start,
+                    end=end_date,
+                    interval="1d",
+                    group_by='ticker',
+                    auto_adjust=False,
+                    threads=True
+                )
+                if not raw_data.empty:
+                    break
+            except Exception as download_error:
+                logger.warning(f"Network processing failed (Attempt {attempt+1}/3): {download_error}")
+                time.sleep(3)
+
+        if raw_data is None or raw_data.empty:
+            logger.warning("Zero records received from structural data vendor API.")
+            return
+
+        # --- Step 4: Robust DataFrame MultiIndex Flattening Engine ---
+        if isinstance(raw_data.columns, pd.MultiIndex):
+            # Stack structural layers shifting tickers back to regular rows representation safely
+            data = raw_data.stack(level=0, future_stack=True).reset_index()
+            
+            # Map structural columns variations applied dynamically by vendor engine
+            possible_ticker_cols = ['level_1', 'Ticker', 'ticker', 'tickers']
+            found_col = next((c for c in possible_ticker_cols if c in data.columns), None)
+            
+            if found_col:
+                data.rename(columns={found_col: 'ticker_yf'}, inplace=True)
+            else:
+                # If column hidden within current index state, reset structure manually
+                if data.index.name in possible_ticker_cols:
+                    data = data.reset_index()
+                    data.rename(columns={data.columns[0]: 'ticker_yf'}, inplace=True)
+                else:
+                    logger.error(f"Structural layout mismatch: Unable to identify ticker column mapping out of: {data.columns}")
+                    return
+        else:
+            # Handle isolated fallback single element data structures
+            data = raw_data.reset_index()
+            data['ticker_yf'] = ticker_list[0]
+
+        # --- Step 5: Normalize Schema Layout ---
+        data.rename(columns={
+            'Date': 'timestamp',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Adj Close': 'adj_close',
+            'Volume': 'volume'
+        }, inplace=True)
+
+        data['timestamp'] = pd.to_datetime(data['timestamp']).dt.date
+
+        # --- Step 6: Map to Relational Primary Key System ---
+        data = data.merge(
+            active_targets[['asset_id', 'ticker_yf', 'last_timestamp']],
+            on='ticker_yf',
+            how='inner'
+        )
+
+        # --- Step 7: Incremental Isolation Filter Guard ---
+        data = data[data['timestamp'] > data['last_timestamp']]
+
+        if data.empty:
+            logger.info("Zero incremental delta changes detected following frame filtering operations.")
+            return
+
+        # --- Step 8: Cleanse Ingested Assets ---
+        data.dropna(subset=['close'], inplace=True)
+        data.drop_duplicates(subset=['asset_id', 'timestamp'], inplace=True)
+
+        final_cols = ['asset_id', 'timestamp', 'open', 'high', 'low', 'close', 'adj_close', 'volume']
+        data = data[final_cols]
+
+        logger.info(f"Streaming {len(data)} normalized market matrix records to local architecture...")
+
+        # --- Step 9: Transactional Chunk Isolation Stream Ingestion ---
+        chunk_size = 100_000
+        for i in range(0, len(data), chunk_size):
+            chunk = data.iloc[i:i+chunk_size]
+            con.register("temp_chunk", chunk)
+
+            con.execute("""
+                INSERT INTO prices (asset_id, timestamp, open, high, low, close, adj_close, volume)
+                SELECT asset_id, timestamp, open, high, low, close, adj_close, volume FROM temp_chunk
+                ON CONFLICT (asset_id, timestamp) DO NOTHING
+            """)
+
+        logger.info("✅ Prices catalog tracking sequence updated successfully.")
+
+    except Exception as pipeline_failure:
+        logger.error(f"Critical execution error tracking within active historical data processor: {pipeline_failure}")
+        
+    finally:
         con.close()
-        return
-
-    # --- Step 8: Clean ---
-    data.dropna(subset=['close'], inplace=True)
-
-    # remove duplicates just in case
-    data = data.drop_duplicates(subset=['asset_id', 'timestamp'])
-
-    final_cols = ['asset_id', 'timestamp', 'open', 'high', 'low', 'close', 'adj_close', 'volume']
-    data = data[final_cols]
-
-    logger.info(f"Inserting {len(data)} rows...")
-
-    # --- Step 9: Insert in chunks (safe for large data) ---
-    chunk_size = 100_000
-
-    for i in range(0, len(data), chunk_size):
-        chunk = data.iloc[i:i+chunk_size]
-        con.register("temp_chunk", chunk)
-
-        con.execute("""
-            INSERT INTO prices
-            SELECT * FROM temp_chunk
-            ON CONFLICT (asset_id, timestamp) DO NOTHING
-        """)
-
-    con.close()
-    logger.info("✅ Prices table updated successfully.")
-
 ### fill fundamentals table (3)
 
 def fill_fundamentals_table(test_only=False, force_refresh=False):
@@ -1017,9 +1041,12 @@ def daily_update_strategy():
 
 
 
-
+def master_daily_update(test_only=False, force_refresh=False):
+    '''This function will execute the entire daily update process, including data updates and cloud uploads.'''
+    daily_update_data(test_only=test_only, force_refresh=force_refresh)
+    daily_update_strategy()
+    export_and_upload_parquet() # then we export the updated tables to parquet files and upload them to S3 for use in the backtesting and live trading environments."
+    
 ###########################
 
-daily_update_data(test_only=False, force_refresh=False)
-
-daily_update_strategy()
+master_daily_update(test_only=False, force_refresh=False)

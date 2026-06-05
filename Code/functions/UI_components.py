@@ -855,20 +855,15 @@ def show_asset_analysis_dialog(asset_ticker):
     with tab3:
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
+        use_cloud = st.session_state.get('use_cloud', False)
         
-        # Safe fallback schema cross-check for user preference storage matrices
-        try:
-            strategies_df = con.execute("""
-                SELECT * FROM user_preferences_strategy 
-                WHERE user_id = ? AND portfolio_id = ?
-            """, [u_id, p_id]).df()
-        except duckdb.CatalogException:
-            # If explicit thread context lost connection binding, reconnect directly
-            fallback_db = duckdb.connect(database=st.session_state.get('DB_PATH', 'stratify.duckdb'), read_only=False)
-            strategies_df = fallback_db.execute("""
-                SELECT * FROM user_preferences_strategy 
-                WHERE user_id = ? AND portfolio_id = ?
-            """, [u_id, p_id]).df()
+        # 1. Architectural routing to fetch user strategy preferences
+        if use_cloud:
+            query_strat = "SELECT * FROM user_preferences_strategy WHERE user_id = :user_id AND portfolio_id = :portfolio_id"
+            strategies_df = get_data(query_strat, {"user_id": u_id, "portfolio_id": p_id}, use_cloud=True)
+        else:
+            query_strat = "SELECT * FROM user_preferences_strategy WHERE user_id = ? AND portfolio_id = ?"
+            strategies_df = get_data(query_strat, [u_id, p_id], use_cloud=False)
 
         if strategies_df.empty:
             st.info("No customized asset target strategies formulated for this portfolio yet.")
@@ -877,11 +872,15 @@ def show_asset_analysis_dialog(asset_ticker):
             if selected_name:
                 strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-            stock_data = con.execute("""
-                SELECT * FROM asset_factors_normalized_final 
-                WHERE asset_id = ? 
-                ORDER BY timestamp DESC LIMIT 1
-            """, [a_id]).df()
+            # 2. Architectural routing to fetch target asset normalized factors
+            FACTORS_SOURCE = "asset_factors_normalized_final_cloud" if use_cloud else "asset_factors_normalized_final"
+            
+            if use_cloud:
+                query_stock_factors = f"SELECT * FROM {FACTORS_SOURCE} WHERE asset_id = :asset_id ORDER BY timestamp DESC LIMIT 1"
+                stock_data = get_data(query_stock_factors, {"asset_id": int(a_id)}, use_cloud=True)
+            else:
+                query_stock_factors = f"SELECT * FROM {FACTORS_SOURCE} WHERE asset_id = ? ORDER BY timestamp DESC LIMIT 1"
+                stock_data = get_data(query_stock_factors, [int(a_id)], use_cloud=False)
 
             if stock_data.empty:
                 st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
@@ -985,6 +984,8 @@ def show_asset_analysis_dialog(asset_ticker):
             st.divider()
         except Exception as e:
             st.warning(f"Factor visualization unavailable: {e}")
+
+
 
 # Strategy creation and editing component
 def strategy_creating_component(con, portfolio_id):

@@ -238,4 +238,3 @@ def generate_random_user_weights(num_users=10**6):
 
 
 
-print(pd.DataFrame([questionnaire_to_weights(build_questionnaire(True, False, True, False, True, False, True))]))
