@@ -140,12 +140,13 @@ def execute_asset_trade(cloud_con, duckdb_con, portfolio_id, ticker, timestamp, 
         portfolio_available_cash = float(raw_cash) if raw_cash is not None else 0.0
 
         # --- Step 3: Evaluate Historical Asset Price from GCS (DuckDB) ---
+        # FIX: Changed query filter from 'date' to 'timestamp' to match the GCS Parquet schema definition
         try:
             gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
             price_res = duckdb_con.execute(f"""
                 SELECT close 
                 FROM read_parquet('{gcs_prices_url}') 
-                WHERE asset_id = ? AND date = ? 
+                WHERE asset_id = ? AND timestamp = ? 
                 LIMIT 1
             """, [asset_id, timestamp]).fetchone()
             
