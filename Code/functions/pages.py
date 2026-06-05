@@ -942,7 +942,14 @@ def show_portfolios_page():
                     if not new_name:
                         st.error("Portfolio name is required")
                     else:
-                        success, message = create_portfolio(user_id, new_name, start_date)
+                        success, message = create_portfolio(
+                            cloud_con=st.session_state.cloud_con,
+                            duckdb_con=st.session_state.duckdb_con,
+                            user_id=user_id,
+                            portfolio_name=new_name,
+                            starting_at=start_date
+                        )
+
                         if success:
                             st.session_state.portfolio_create_version += 1
                             st.toast(f"🚀 Portfolio '{new_name}' created successfully!")
