@@ -11,7 +11,7 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 
 
 
-# for executing cash transactions (withdrawl \ depost)
+# for executing cash transactions (withdrawal / deposit)
 def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timestamp, reference=None):
     """
     Executes a cash deposit or withdrawal, updates the central Supabase database,
@@ -39,8 +39,6 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
             return False, f"Insufficient funds. Available: ${current_cash:,.2f}"
 
         # 3. Handle Context Transaction Lifespan
-        # SQLAlchemy manages transactions via contexts. If the connection isn't already 
-        # in a transaction block, we initialize an explicit transaction checkpoint wrapper.
         is_nested = con.in_transaction()
         tx = None if is_nested else con.begin()
 
@@ -78,11 +76,8 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
             )
             
             # C. Trigger system historical timeline layout matrix update snapshot
-            # Routed to use our updated safe clean-up snapshot module function
             capture_portfolio_snapshot(con, portfolio_id, timestamp)
             
-            # CRITICAL FIX: Explicitly commit connection mutations if operating 
-            # within a pre-existing transaction block to ensure data persists in Supabase.
             if tx:
                 tx.commit()
             else:
@@ -92,7 +87,6 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
             return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
 
         except Exception as inner_error:
-            # Safely rollback mutations if this process instance owns the context block
             if tx:
                 tx.rollback()
             else:
@@ -106,11 +100,13 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
         logger.error(f"Cash transaction workflow pipeline failed: {e}")
         return False, str(e)
 
+
 # for executing a trade
 def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy'):
     """
     Executes an asset trade (buy/sell), updates the core portfolios liquidity ledger,
     modifies asset positioning frames, and captures a historical snapshot.
+    Fetches market data from local DuckDB before running cloud updates.
     All source documentation and comments are maintained strictly in English.
     
     side: 'buy' or 'sell'
@@ -118,7 +114,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
     logger = logging.getLogger(__name__)
     
     try:
-        # --- Step 1: Query relevant data using cloud-native parameters ---
+        # --- Step 1: Query asset metadata from cloud (Supabase) ---
         asset_res = con.execute(
             text("SELECT asset_id FROM assets WHERE ticker = :ticker LIMIT 1"), 
             {"ticker": ticker}
@@ -128,19 +124,22 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             return False, f"Asset {ticker} not found"
         asset_id = asset_res[0]
 
-        price_res = con.execute(
-            text("""
-                SELECT close FROM prices 
-                WHERE asset_id = :asset_id AND timestamp <= :timestamp 
-                ORDER BY timestamp DESC LIMIT 1
-            """), 
-            {"asset_id": asset_id, "timestamp": timestamp}
-        ).fetchone()
-        
-        if not price_res:
-            return False, f"Price for {ticker} not found"
-        asset_price = float(price_res[0])
+        # --- CRITICAL FIX: Query price from LOCAL DuckDB layer instead of Cloud ---
+        price_query = """
+            SELECT close FROM prices 
+            WHERE asset_id = $asset_id AND timestamp <= $timestamp 
+            ORDER BY timestamp DESC LIMIT 1
+        """
+        try:
+            price_res_df = duckdb.execute(price_query, {"asset_id": asset_id, "timestamp": timestamp}).df()
+            if price_res_df.empty:
+                return False, f"Price for {ticker} not found in historical matrix"
+            asset_price = float(price_res_df.iloc[0]["close"])
+        except Exception as duck_err:
+            logger.error(f"Failed to fetch market price from local DuckDB: {duck_err}")
+            return False, f"Internal price evaluation engine error: {duck_err}"
 
+        # --- Step 2: Query portfolio liquidity balance from cloud ---
         portfolio_res = con.execute(
             text("SELECT starting_at, available_cash FROM portfolios WHERE portfolio_id = :portfolio_id"), 
             {"portfolio_id": portfolio_id}
@@ -152,7 +151,7 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
         portfolio_start_day, portfolio_available_cash = portfolio_res
         portfolio_available_cash = float(portfolio_available_cash)
 
-        # --- Step 2: Structural Validations ---
+        # --- Step 3: Structural Validations ---
         total_amount = quantity * asset_price
         
         if side == 'buy' and portfolio_available_cash < total_amount:
@@ -168,13 +167,12 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             if amount_held < quantity:
                 return False, f"Not enough shares (Held: {amount_held}, Request: {quantity})"
 
-        # --- Step 3: Atomic Transaction Lifecycle Execution ---
+        # --- Step 4: Atomic Transaction Lifecycle Execution on Cloud ---
         is_nested = con.in_transaction()
         tx = None if is_nested else con.begin()
 
         try:
-            # A. Record the operational ledger event inside the assets_transactions audit table
-            # Primary key serial sequencing handling for cloud transactional environments
+            # A. Record the event inside assets_transactions table
             max_id_res = con.execute(
                 text("SELECT COALESCE(MAX(transaction_id), 0) FROM assets_transactions")
             ).fetchone()
@@ -200,7 +198,6 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             # B. Mutate and manage inventory allocations within the holdings table
             qty_change = quantity if side == 'buy' else -quantity
             
-            # Safe checking routine to bypass constraint mismatches across engine instances
             existing_holding = con.execute(
                 text("SELECT quantity FROM holdings WHERE portfolio_id = :portfolio_id AND asset_id = :asset_id"),
                 {"portfolio_id": portfolio_id, "asset_id": asset_id}
@@ -244,7 +241,6 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
             # E. Trigger historical ledger timeline update snapshot
             capture_portfolio_snapshot(con, portfolio_id, timestamp)
             
-            # Finalize operational cycle commit if owned by current invocation frame
             if tx:
                 tx.commit()
                 
