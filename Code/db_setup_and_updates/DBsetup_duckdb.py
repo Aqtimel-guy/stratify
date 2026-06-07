@@ -406,6 +406,27 @@ con.execute("""
         
         -- Overall monthly investment amount for this multi-strategy mix
         monthly_deposit INTEGER DEFAULT 0
+        
+        -- Sectors to Focus
+        focus_sectors VARCHAR DEFAULT NULL
+        
+        -- Sectors to AVOID
+        avoid_sectors VARCHAR DEFAULT NULL
+        
+        -- Deposits habbits
+        monthly_deposit INTEGER DEFAULT 0
+        initial_investment INTEGER DEFAULT 0
+        
+        -- Execution Settings
+        transaction_fee_per_trade_buy DOUBLE DEFAULT 0,
+        transaction_fee_per_trade_sell DOUBLE DEFAULT 0,
+        transaction_fee_deposit DOUBLE DEFAULT 0,
+        transaction_fee_withdraw DOUBLE DEFAULT 0,
+        
+        -- Diversification Level
+        diversification_level INTEGER DEFAULT 1 -- 1 low, 2 medium, 3 high
+
+
     );
 """)
 
@@ -444,25 +465,3 @@ print(
 
 con.close()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-    
-    
-    
-  
