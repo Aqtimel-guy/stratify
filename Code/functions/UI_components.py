@@ -7,6 +7,7 @@ from .trading_logic import execute_asset_trade , execute_cash_transaction
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
 from Code.strategy_builder.user_prefrence import *
+from Code.strategy_builder.save_final_strategy import *
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -1868,7 +1869,7 @@ def strategy_creating_component(con, portfolio_id):
 
             saved_strategies = con.execute(
                 """
-                SELECT strategy_name
+                SELECT strategy_name, portfolio_strategy_id
                 FROM user_preferences_strategy
                 WHERE portfolio_id = ?
                 AND user_id = ?
@@ -2092,12 +2093,19 @@ def strategy_creating_component(con, portfolio_id):
                 # =======================================
                 # Further Button
                 # =======================================
-                st.write("")
-                if st.button(
-                    " 🚀 Procceed to the last step",
-                    type="primary",
-                    use_container_width=True
-                ):
+                if st.button("🚀 Proceed to the last step", type="primary", use_container_width=True):
+                    # 1. Gather active strategies from UI
+                    active_allocations = []
+                    for name, s_id in saved_strategies:
+                        val = st.session_state.get(f"alloc_slider_{p_id}_{name}", 0)
+                        if val > 0:
+                            active_allocations.append({'id': s_id, 'pct': val})
+                    
+                    # 2. Save to session_state instead of DB
+                    # This makes the data available for the next tab/final save
+                    st.session_state['final_allocations'] = active_allocations
+                    
+                    # 3. Move to next tab
                     st.session_state.active_tab = 3
                     st.rerun()
 
@@ -2192,8 +2200,17 @@ def strategy_creating_component(con, portfolio_id):
                 pref_key = f"pref_sectors_{p_id}"
                 excl_key = f"excl_sectors_{p_id}"
 
+                # Ensure session state variables are initialized as lists
+                if not isinstance(st.session_state.get(pref_key), list):
+                    st.session_state[pref_key] = []
+                if not isinstance(st.session_state.get(excl_key), list):
+                    st.session_state[excl_key] = []
+
+                # Get current values for filtering
+                currently_excluded = st.session_state[excl_key]
+                currently_focused = st.session_state[pref_key]
+
                 # Preferred Sectors (Focus) - Filter out anything already excluded
-                currently_excluded = st.session_state.get(excl_key, [])
                 focus_options = [s for s in master_sector_list if s not in currently_excluded]
 
                 preferred_sectors = st.multiselect(
@@ -2204,7 +2221,6 @@ def strategy_creating_component(con, portfolio_id):
                 )
 
                 # Excluded Sectors (Avoid) - Filter out anything already focused
-                currently_focused = st.session_state.get(pref_key, [])
                 avoid_options = [s for s in master_sector_list if s not in currently_focused]
 
                 excluded_sectors = st.multiselect(
@@ -2213,7 +2229,8 @@ def strategy_creating_component(con, portfolio_id):
                     key=excl_key,
                     help="These sectors will be fully removed from recommendations."
                 )
-
+                
+                
         # ======================================================
         # CENTER COLUMN: DEPOSITS
         # ======================================================
@@ -2375,27 +2392,78 @@ def strategy_creating_component(con, portfolio_id):
 
         # Final value for your recommendation system
         diversification = st.session_state[div_key]
+        # Map the string from session_state to the integer expected by the DB
+        div_mapping = {"Low": 1, "Medium": 2, "High": 3}
+        raw_div = st.session_state.get(f"div_{p_id}", "Medium")
+        
+        
+        # --- CLEANING THE DATA BEFORE SAVING ---
+        # Convert strings back to lists if they were accidentally saved as strings
+        def force_list(val):
+            if isinstance(val, list):
+                return val
+            # If it's a string like "['a', 'b']", convert it to a real list
+            if isinstance(val, str):
+                try:
+                    import ast
+                    return ast.literal_eval(val)
+                except:
+                    return val.split(',') if val else []
+            return []
+
+        clean_pref = force_list(st.session_state.get(f"pref_sectors_{p_id}", []))
+        clean_excl = force_list(st.session_state.get(f"excl_sectors_{p_id}", []))
 
 
         
         
         # ======================================================
-        # FOOTER ACTION
+        # FINAL SUBMIT BUTTON
         # ======================================================
-        st.write("")
+        st.write("---")
+        if st.button("✅ Build Portfolio", type="primary", use_container_width=True):
+            try:
+                # 1. Collect all parameters from session state
+                params = {
+                    'con': con,
+                    'user_id': int(st.session_state.get("user_id")),
+                    'portfolio_id': p_id,
+                    'monthly_deposit': st.session_state.get(f"monthly_{p_id}", 0),
+                    'initial_investment': st.session_state.get(f"lump_{p_id}", 0),
+                    'diversification': div_mapping.get(raw_div, 2),
+                    'buy_fee': st.session_state.get(f"buy_fee_{p_id}", 0),
+                    'sell_fee': st.session_state.get(f"sell_fee_{p_id}", 0),
+                    'deposit_fee': st.session_state.get(f"dep_fee_{p_id}", 0),
+                    'withdrawal_fee': st.session_state.get(f"with_fee_{p_id}", 0),
+                    'preferred_sectors': clean_pref,
+                    'excluded_sectors': clean_excl
+                            }
 
-        if st.button(
-            "🚀 Generate Portfolio",
-            type="primary",
-            use_container_width=True
-        ):
+                # 2. Retrieve strategy allocations from previous step
+                allocations = st.session_state.get('final_allocations', [])
+                
+                # 3. Fill strategy slots (1-4)
+                for i in range(4):
+                    if i < len(allocations):
+                        params[f'strategy{i+1}_id'] = allocations[i]['id']
+                        params[f'strategy{i+1}_pct'] = allocations[i]['pct']
+                    else:
+                        params[f'strategy{i+1}_id'] = None
+                        params[f'strategy{i+1}_pct'] = 0
 
-            st.toast("Building your optimized portfolio...", icon="⚙️")
-
-            #st.session_state.active_tab = 4
-            st.rerun()
+                # 4. Execute save function
+                save_final_strategy(**params)
+                
+                st.write(
+                    con.execute("select * from multi_strategy order by multi_strategy_id limit 2 "))
+                
+                st.success("🎉 Portfolio configured successfully!")
+                
+                
+            except Exception as e:
+                st.error(f"Error saving portfolio: {str(e)}")
         
-        
+     
         
         
         

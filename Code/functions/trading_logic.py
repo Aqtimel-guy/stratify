@@ -4,6 +4,7 @@ import streamlit as st
 import datetime
 import pandas as pd
 import math
+import numpy as np
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
@@ -435,195 +436,69 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
 
 
 # for getting recomendations to buy/sell
-def get_strategy_matched_assets(
-    con: duckdb.DuckDBPyConnection,
-    sim_date: str,
-    num_assets: int = 10,
-    portfolio_id: int = None
-) -> pd.DataFrame:
-    """
-    Returns the assets that best match the user's latest strategy
-    up to the given simulation date.
-
-    Matching is based on Euclidean distance between:
-    - User strategy preferences
-    - Asset factor exposures
-
-    Parameters
-    ----------
-    con : duckdb.DuckDBPyConnection
-        Active DuckDB connection.
-
-    sim_date : str
-        Simulation cutoff timestamp/date.
-
-    num_assets : int, default=10
-        Number of matching assets to return.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame containing:
-        - Asset name
-        - Ticker
-        - Overall match percentage
-        - Individual factor match percentages
-    """
-    # Maximum possible Euclidean distance in 8 dimensions
-    MAX_DISTANCE = math.sqrt(8 * (100**2))
-    # Validate requested asset count
-    if num_assets <= 0:
-        raise ValueError("num_assets must be greater than 0")
-
-    # Fetch the latest available strategy before simulation date
-    strategy_query = """
-        SELECT
-            momentum_preference,
-            value_preference,
-            quality_preference,
-            growth_preference,
-            defensive_preference,
-            size_preference,
-            
+def get_closest_assets(con, strategy_id: int, sim_date: str, k: int = 20):
+    # Retrieve the user strategy vector
+    strategy = con.sql(
+        f"""
+        SELECT *
         FROM user_preferences_strategy
+        WHERE portfolio_strategy_id = {strategy_id}
+        """
+    ).df().iloc[0]
+
+    strategy_vector = np.array([
+        strategy["momentum_preference"],
+        strategy["value_preference"],
+        strategy["quality_preference"],
+        strategy["growth_preference"],
+        strategy["defensive_preference"],
+        strategy["size_preference"],
+    ])
+
+    # Filter assets by the specific sim_date to avoid duplicates over time
+    assets_df = con.execute("""
+    SELECT
+        asset_id,
+        momentum_factor_market,
+        value_factor_market,
+        quality_factor_market,
+        growth_factor_market,
+        defensive_factor_market,
+        size_factor_market
+    FROM asset_factors_normalized_final
+    WHERE timestamp = (
+        SELECT MAX(timestamp) 
+        FROM asset_factors_normalized_final 
         WHERE timestamp <= ?
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """
+    )
+""", [sim_date]).df()
 
-    strategy = con.execute(strategy_query, [sim_date]).fetchone()
+    if assets_df.empty:
+        return assets_df
 
-    # Explicit failure if no strategy exists
-    if strategy is None:
-        raise ValueError(
-            f"No strategy found on or before simulation date: {sim_date}"
-        )
+    # Extract factor matrix for distance calculation
+    asset_matrix = assets_df.iloc[:, 1:].to_numpy()
 
-    # Replace missing strategy values with neutral preference
-    preferences = [50 if value is None else value for value in strategy]
+    # Calculate Euclidean distance
+    distances = np.sum(
+        (asset_matrix - strategy_vector) ** 2,
+        axis=1
+    )
 
-    (
-        p_momentum,
-        p_value,
-        p_quality,
-        p_growth,
-        p_defensive,
-        p_size,
-    ) = preferences
+    # Get the top k closest assets
+    top_k_idx = np.argpartition(
+        distances,
+        min(k, len(distances) - 1)
+    )[:k]
 
-    # Constructing query with direct injection of scalar strategy preferences
-    # to avoid complex positional parameter mapping.
-    query = f"""
-        WITH latest_asset_factors AS (
-
-            SELECT
-                asset_id,
-                momentum_factor_market,
-                value_factor_market,
-                quality_factor_market,
-                growth_factor_market,
-                defensive_factor_market,
-                size_factor_market,
-                ROW_NUMBER() OVER (
-                    PARTITION BY asset_id
-                    ORDER BY timestamp DESC
-                ) AS rn
-            FROM asset_factors_normalized_final
-            WHERE timestamp <= ?
-
-        ),
-
-        filtered_assets AS (
-
-            -- Remove assets with missing factor values
-            SELECT 
-                a.asset_id,
-                a.momentum_factor_market,
-                a.value_factor_market,
-                a.quality_factor_market,
-                a.growth_factor_market,
-                a.defensive_factor_market,
-                a.size_factor_market,
-            FROM latest_asset_factors a
-            WHERE
-                a.rn = 1
-                AND a.momentum_factor_market IS NOT NULL
-                AND a.value_factor_market IS NOT NULL
-                AND a.quality_factor_market IS NOT NULL
-                AND a.growth_factor_market IS NOT NULL
-                AND a.defensive_factor_market IS NOT NULL
-                AND a.size_factor_market IS NOT NULL
-
-        ),
-
-        asset_distances AS (
-
-            SELECT
-                a.asset_id,
-                item.asset_name AS name,
-                item.ticker AS ticker,
-
-                -- Individual absolute distances
-                ABS({p_momentum} - a.momentum_factor_market) AS momentum_distance,
-                ABS({p_value} - a.value_factor_market) AS value_distance,
-                ABS({p_quality} - a.quality_factor_market) AS quality_distance,
-                ABS({p_growth} - a.growth_factor_market) AS growth_distance,
-                ABS({p_defensive} - a.defensive_factor_market) AS defensive_distance,
-                ABS({p_size} - a.size_factor_market) AS size_distance,
-
-                -- Squared Euclidean distance
-                (
-                    POWER({p_momentum} - a.momentum_factor_market, 2) +
-                    POWER({p_value} - a.value_factor_market, 2) +
-                    POWER({p_quality} - a.quality_factor_market, 2) +
-                    POWER({p_growth} - a.growth_factor_market, 2) +
-                    POWER({p_defensive} - a.defensive_factor_market, 2) +
-                    POWER({p_size} - a.size_factor_market, 2) +
-                ) AS squared_distance
-
-            FROM filtered_assets a
-            INNER JOIN assets item
-                ON a.asset_id = item.asset_id
-
-        )
-
-        SELECT
-            name,
-            ticker,
-
-            -- Convert Euclidean distance into normalized similarity percentage
-            ROUND(
-                GREATEST(
-                    0,
-                    100 * (
-                        1 - (
-                            SQRT(squared_distance) / {MAX_DISTANCE}
-                        )
-                    )
-                ),
-                2
-            ) AS overall_match_pct,
-
-            -- Individual factor match percentages
-            ROUND(GREATEST(0, 100 - momentum_distance), 2) AS momentum_match_pct,
-            ROUND(GREATEST(0, 100 - value_distance), 2) AS value_match_pct,
-            ROUND(GREATEST(0, 100 - quality_distance), 2) AS quality_match_pct,
-            ROUND(GREATEST(0, 100 - growth_distance), 2) AS growth_match_pct,
-            ROUND(GREATEST(0, 100 - defensive_distance), 2) AS defensive_match_pct,
-            ROUND(GREATEST(0, 100 - size_distance), 2) AS size_match_pct,
-
-        FROM asset_distances
-        ORDER BY squared_distance ASC
-        LIMIT ?
-    """
-
-    # Positional parameters are now extremely safe and clear
-    params = [sim_date, num_assets]
-
-    return con.execute(query, params).df()
-
+    return (
+        assets_df.iloc[top_k_idx]
+        .assign(distance=distances[top_k_idx])
+        .sort_values("distance")
+    )
 
 # for simulating time
+
 def handle_time_jump(new_date, p_id):
     # 1. חישוב תאריך גג (אתמול)
     yesterday = datetime.datetime.now() - datetime.timedelta(days=1)

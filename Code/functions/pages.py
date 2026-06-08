@@ -7,8 +7,6 @@ from .trading_logic import *
 
 
 
-
-
 def go_to(page_name):
     st.session_state.page = page_name
     st.rerun()
@@ -1756,6 +1754,59 @@ def show_asset_explorer():
                 show_asset_analysis_dialog(asset['ticker'])
                 
         st.divider()
+        
+        
+        
+        
+        
+        #### in the future will be moved into an own componante.
+        
+        #### in the future will be moved into an own component.
+
+        u_id = int(st.session_state.get('user_id', 1))
+        p_id = int(st.session_state.get('current_portfolio_id', 0))
+
+        # 1. Fetch strategies
+        strategies_df = con.execute("""
+            SELECT * 
+            FROM user_preferences_strategy 
+            WHERE user_id = ? AND portfolio_id = ?
+        """, [u_id, p_id]).df()
+
+        st.subheader("🎯 Strategy Selector")
+
+        # 2. Build mapping for selectbox
+        strategy_map = {
+            f"{row['strategy_name']} (id={row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
+            for _, row in strategies_df.iterrows()
+        }
+
+        selected_label = st.selectbox(
+            "Choose strategy",
+            options=list(strategy_map.keys())
+        )
+
+        selected_strategy_id = strategy_map[selected_label]
+        
+        sim_date = st.session_state["current_sim_date"]
+
+
+        # 3. Button to trigger computation
+        if st.button("🔍 Find closest assets", type="primary"):
+
+            results_df = get_closest_assets(
+                con,
+                selected_strategy_id,
+                sim_date,
+                k=10
+            )
+
+            st.session_state["closest_assets"] = results_df
+
+
+        # 4. Display results (persisted)
+        if "closest_assets" in st.session_state:
+            st.write(st.session_state["closest_assets"])
     
 
        
