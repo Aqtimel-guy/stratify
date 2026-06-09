@@ -1841,9 +1841,7 @@ def show_asset_explorer():
                     unsafe_allow_html=True
                 )
 
-                strategy_id = render_strategy_selector(con)
 
-                st.write("STRATEGY ID:", strategy_id)
 
                 render_asset_finder(con)
 
@@ -1860,6 +1858,8 @@ def show_asset_explorer():
        
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
+    
+
     
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date') # תיקון שם המשתנה מ-current_current...

@@ -2521,58 +2521,54 @@ def render_strategy_selector(con):
         key="strategy_selector_debug"
     )
 
-    st.write("DEBUG selected:", selected_label)
 
     return strategy_map[selected_label]
 
 
 def render_asset_finder(con):
-    """
-    Asset finder UI with:
-    - K control (20 / 5 / 10)
-    - Sector filtering
-    - Clean ranked display
-    """
 
-
-    
     sim_date = st.session_state.get("current_sim_date")
 
-
+    # ======================================================
+    # DATA CHECK
+    # ======================================================
+    df = st.session_state.get("closest_assets")
+    has_data = df is not None
 
     # ======================================================
-    # RESULTS
-    # ======================================================
-    if "closest_assets" not in st.session_state:
-        return
-
-    df = st.session_state["closest_assets"]
-
-    
-
-    # ======================================================
-    # UI CONTROLS (NEW)
+    # CONTROLS
     # ======================================================
 
-    col1, col2 , col3 , col4= st.columns([2,1,1,1])
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+    # ---- Strategy selector ----
     with col1:
         strategy_id = render_strategy_selector(con)
-        
 
+        if strategy_id is None:
+            st.warning("Please select a strategy")
+            return
+
+        st.session_state["strategy_id"] = strategy_id
+
+    # ---- K ----
     with col2:
         k_option = st.selectbox(
             "Show top assets",
             options=[20, 5, 10],
-            index=1
+            index=1,
+            key="k_option"
         )
 
-        
+    # ---- Sector filter ----
     with col3:
-        all_sectors = sorted(df["sector"].dropna().unique().tolist())
-        if "selected_sectors" not in st.session_state:
-            st.session_state.selected_sectors = all_sectors
 
-        # 1. The descriptive label stays fixed in its original position
+        df_sectors = pd.read_sql_query("SELECT DISTINCT sector FROM assets", con)
+        all_sectors = sorted(df_sectors["sector"].dropna().tolist())
+
+        if "selected_sectors" not in st.session_state:
+            st.session_state.selected_sectors = all_sectors.copy()
+
         st.markdown(
             """
             <div style="font-size:12px; line-height:1.1; margin-bottom: 2px;">
@@ -2582,56 +2578,65 @@ def render_asset_finder(con):
             unsafe_allow_html=True
         )
 
-        # 2. The expander stays in the natural document flow
         with st.popover("🎯 Filter sectors"):
-            
-            # 3. Use a container to force a 3-column layout inside the expanded area
-            # This keeps the checkboxes tidy and readable
+
             cols = st.columns(3)
-            
             new_selected = []
+
             for i, sector in enumerate(all_sectors):
                 with cols[i % 3]:
-                    if st.checkbox(
-                        sector, 
-                        value=(sector in st.session_state.selected_sectors), 
-                        key=f"expander_sector_{sector}"
-                    ):
+                    checked = st.checkbox(
+                        sector,
+                        value=(sector in st.session_state.selected_sectors),
+                        key=f"sector_{sector}"
+                    )
+                    if checked:
                         new_selected.append(sector)
-            
-            st.session_state.selected_sectors = new_selected
-        
+
+            # fallback to avoid empty selection breaking filters
+            st.session_state.selected_sectors = new_selected if new_selected else all_sectors
+
+    # ---- RUN BUTTON ----
     with col4:
-        # ======================================================
-        # RUN RECOMMENDATION
-        # ======================================================
+
         if st.button("🔍 Find closest assets", type="primary"):
 
             if strategy_id and sim_date:
+
                 results = get_closest_assets(con, strategy_id, sim_date)
+
                 st.session_state["closest_assets"] = results
+
+                st.rerun()
+
             else:
                 st.error("Missing strategy or simulation date.")
-        
+
     st.divider()
+
     # ======================================================
-    # APPLY FILTERS
+    # EMPTY STATE (UI STILL RENDERS ABOVE)
+    # ======================================================
+    if not has_data:
+        st.info("No assets loaded yet. Click 'Find closest assets'")
+        return
+
+    # ======================================================
+    # FILTERING
     # ======================================================
 
     filtered_df = df.copy()
 
-    # sector filter
-    selected_sectors = st.session_state.selected_sectors
-    
-    if selected_sectors:
-        filtered_df = filtered_df[filtered_df["sector"].isin(selected_sectors)]
+    selected_sectors = st.session_state.get("selected_sectors", all_sectors)
 
-    # K filter
-    
+    filtered_df = filtered_df[
+        filtered_df["sector"].isin(selected_sectors)
+    ]
+
     filtered_df = filtered_df.head(int(k_option))
 
     # ======================================================
-    # ASSET CARD
+    # CARD RENDER
     # ======================================================
 
     def render_asset_card(row, rank):
@@ -2670,13 +2675,12 @@ def render_asset_finder(con):
         with c1:
             if st.button(
                 "🔍 Analyze",
-                key=f"analyze_{row['ticker']}",
-                use_container_width=True
+                key=f"analyze_{row['ticker']}"
             ):
                 show_asset_analysis_dialog(row["ticker"])
 
         with c2:
-            with st.popover("💼 Trade", use_container_width=True):
+            with st.popover("💼 Trade"):
                 st.radio(
                     "Direction",
                     ["Buy", "Sell"],
@@ -2685,9 +2689,8 @@ def render_asset_finder(con):
                     key=f"side_{row['ticker']}"
                 )
 
-
     # ======================================================
-    # DISPLAY (2-COLUMN GRID)
+    # DISPLAY
     # ======================================================
 
     items = list(filtered_df.iterrows())
@@ -2697,16 +2700,14 @@ def render_asset_finder(con):
         col1, col2 = st.columns(2, gap="small")
 
         with col1:
-            if i < len(items):
-                _, row = items[i]
-                render_asset_card(row, i + 1)
+            _, row = items[i]
+            render_asset_card(row, i + 1)
 
         with col2:
             if i + 1 < len(items):
                 _, row = items[i + 1]
                 render_asset_card(row, i + 2)
-            
-            
+
 # for showing easily the factors of an asset
 def render_stock_factor_maps(con, ticker: str):
     """

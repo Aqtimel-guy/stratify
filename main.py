@@ -39,6 +39,7 @@ def main():
     
     # configuration
     st.set_page_config(page_title="Stratify 2026", layout="wide")
+   
 
     # if unknown page - back to loggin 
     if "page" not in st.session_state:
