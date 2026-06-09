@@ -1841,6 +1841,10 @@ def show_asset_explorer():
                     unsafe_allow_html=True
                 )
 
+                strategy_id = render_strategy_selector(con)
+
+                st.write("STRATEGY ID:", strategy_id)
+
                 render_asset_finder(con)
 
         # ======================================================
@@ -1850,7 +1854,7 @@ def show_asset_explorer():
             ticker_to_analyze = st.session_state.last_inspected_ticker
             st.session_state.last_inspected_ticker = None
             show_asset_analysis_dialog(ticker_to_analyze)
-       
+        
     
 
        

@@ -2496,9 +2496,6 @@ def strategy_creating_component(con, portfolio_id):
         
 
 def render_strategy_selector(con):
-    """
-    Renders the strategy selector and returns the selected strategy_id.
-    """
     u_id = int(st.session_state.get('user_id', 1))
     p_id = int(st.session_state.get('current_portfolio_id', 0))
 
@@ -2512,13 +2509,21 @@ def render_strategy_selector(con):
         return None
 
     strategy_map = {
-        f"{row['strategy_name']} (id={row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
+        f"{row['strategy_name']} ({row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
         for _, row in strategies_df.iterrows()
     }
 
-    selected_label = st.selectbox("Choose strategy", options=list(strategy_map.keys()))
-    return strategy_map[selected_label]
+    options = list(strategy_map.keys())
 
+    selected_label = st.selectbox(
+        "Choose strategy",
+        options=options,
+        key="strategy_selector_debug"
+    )
+
+    st.write("DEBUG selected:", selected_label)
+
+    return strategy_map[selected_label]
 
 
 def render_asset_finder(con):
@@ -2549,28 +2554,52 @@ def render_asset_finder(con):
     # UI CONTROLS (NEW)
     # ======================================================
 
-    col1, col2 , col3 , col4= st.columns([2,2,1,1])
+    col1, col2 , col3 , col4= st.columns([2,1,1,1])
     with col1:
         strategy_id = render_strategy_selector(con)
         
-        
+
     with col2:
-        all_sectors = sorted(df["sector"].dropna().unique().tolist())
-
-        selected_sectors = st.multiselect(
-            "Filter sectors (optional)",
-            options=all_sectors,
-            default=all_sectors
-        )
-
-    with col3:
         k_option = st.selectbox(
             "Show top assets",
             options=[20, 5, 10],
             index=1
         )
 
+        
+    with col3:
+        all_sectors = sorted(df["sector"].dropna().unique().tolist())
+        if "selected_sectors" not in st.session_state:
+            st.session_state.selected_sectors = all_sectors
 
+        # 1. The descriptive label stays fixed in its original position
+        st.markdown(
+            """
+            <div style="font-size:12px; line-height:1.1; margin-bottom: 2px;">
+                Select sectors to include in your investment universe
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # 2. The expander stays in the natural document flow
+        with st.popover("🎯 Filter sectors"):
+            
+            # 3. Use a container to force a 3-column layout inside the expanded area
+            # This keeps the checkboxes tidy and readable
+            cols = st.columns(3)
+            
+            new_selected = []
+            for i, sector in enumerate(all_sectors):
+                with cols[i % 3]:
+                    if st.checkbox(
+                        sector, 
+                        value=(sector in st.session_state.selected_sectors), 
+                        key=f"expander_sector_{sector}"
+                    ):
+                        new_selected.append(sector)
+            
+            st.session_state.selected_sectors = new_selected
         
     with col4:
         # ======================================================
@@ -2584,7 +2613,7 @@ def render_asset_finder(con):
             else:
                 st.error("Missing strategy or simulation date.")
         
-
+    st.divider()
     # ======================================================
     # APPLY FILTERS
     # ======================================================
@@ -2592,6 +2621,8 @@ def render_asset_finder(con):
     filtered_df = df.copy()
 
     # sector filter
+    selected_sectors = st.session_state.selected_sectors
+    
     if selected_sectors:
         filtered_df = filtered_df[filtered_df["sector"].isin(selected_sectors)]
 
@@ -2600,111 +2631,82 @@ def render_asset_finder(con):
     filtered_df = filtered_df.head(int(k_option))
 
     # ======================================================
+    # ASSET CARD
+    # ======================================================
+
+    def render_asset_card(row, rank):
+
+        st.html(f"""
+        <div style="line-height:1.2;">
+            <div style="font-size:18px; font-weight:600;">
+                #{rank} {row['name']}
+            </div>
+
+            <div style="
+                display:inline-block;
+                padding:2px 8px;
+                border-radius:12px;
+                background:rgba(76,175,80,0.15);
+                color:#4CAF50;
+                font-size:12px;
+                font-weight:600;
+                margin-top:4px;
+            ">
+                {row['sector']}
+            </div>
+
+            <div style="
+                font-size:12px;
+                opacity:0.65;
+                margin-top:4px;
+            ">
+                {row['ticker']} • distance {row['distance']:.2f}
+            </div>
+        </div>
+        """)
+
+        c1, c2 = st.columns([1, 1], gap="small")
+
+        with c1:
+            if st.button(
+                "🔍 Analyze",
+                key=f"analyze_{row['ticker']}",
+                use_container_width=True
+            ):
+                show_asset_analysis_dialog(row["ticker"])
+
+        with c2:
+            with st.popover("💼 Trade", use_container_width=True):
+                st.radio(
+                    "Direction",
+                    ["Buy", "Sell"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"side_{row['ticker']}"
+                )
+
+
+    # ======================================================
     # DISPLAY (2-COLUMN GRID)
     # ======================================================
 
     items = list(filtered_df.iterrows())
 
-    # pair items into chunks of 2
     for i in range(0, len(items), 2):
 
         col1, col2 = st.columns(2, gap="small")
 
-        # -------------------------
-        # LEFT ITEM
-        # -------------------------
         with col1:
             if i < len(items):
                 _, row = items[i]
+                render_asset_card(row, i + 1)
 
-                with st.container():
-
-                    rank = i + 1
-
-                    # ======================================================
-                    # ROW 1 (MAIN INFO - SINGLE LINE)
-                    # ======================================================
-                    st.markdown(
-                        f"""
-                        **#{rank} {row['ticker']}**  
-                        <span style="font-size:12px; opacity:0.6;">
-                        {row['name']} • {row['sector']} • distance {row['distance']:.2f}
-                        </span>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                    # ======================================================
-                    # ROW 2 (ACTIONS - COMPACT)
-                    # ======================================================
-                    c1, c2 = st.columns([1, 1], gap="small")
-
-                    with c1:
-                        if st.button(
-                            "🔍 Analyze",
-                            key=f"analyze_{row['ticker']}",
-                            use_container_width=True
-                        ):
-                            show_asset_analysis_dialog(row["ticker"])
-
-                    with c2:
-                        with st.popover("💼 Trade", use_container_width=True):
-                            st.radio(
-                                "Direction",
-                                ["Buy", "Sell"],
-                                horizontal=True,
-                                label_visibility="collapsed",
-                                key=f"side_{row['ticker']}"
-                            )
-
-        # -------------------------
-        # RIGHT ITEM
-        # -------------------------
         with col2:
             if i + 1 < len(items):
                 _, row = items[i + 1]
-
-                with st.container():
-
-                    rank = i + 2
-
-                    # ======================================================
-                    # ROW 1 (MAIN INFO - SINGLE LINE)
-                    # ======================================================
-                    st.markdown(
-                        f"""
-                        **#{rank} {row['ticker']}**  
-                        <span style="font-size:12px; opacity:0.6;">
-                        {row['name']} • {row['sector']} • distance {row['distance']:.2f}
-                        </span>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                    # ======================================================
-                    # ROW 2 (ACTIONS - COMPACT)
-                    # ======================================================
-                    c1, c2 = st.columns([1, 1], gap="small")
-
-                    with c1:
-                        if st.button(
-                            "🔍 Analyze",
-                            key=f"analyze_{row['ticker']}",
-                            use_container_width=True
-                        ):
-                            show_asset_analysis_dialog(row["ticker"])
-
-                    with c2:
-                        with st.popover("💼 Trade", use_container_width=True):
-                            st.radio(
-                                "Direction",
-                                ["Buy", "Sell"],
-                                horizontal=True,
-                                label_visibility="collapsed",
-                                key=f"side_{row['ticker']}"
-                            )
-        
-        
+                render_asset_card(row, i + 2)
+            
+            
 # for showing easily the factors of an asset
 def render_stock_factor_maps(con, ticker: str):
     """
