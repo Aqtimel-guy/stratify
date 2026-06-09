@@ -1698,115 +1698,159 @@ def dashboard_sidebar():
             
 def show_asset_explorer():
     dashboard_sidebar()
+    
+    # Header with a cleaner look
     st.title("🔍 Asset Explorer")
+    st.markdown("Explore market assets, analyze financial data, and find your next investment based on your strategy.")
     
-    # Initialize asset variable to avoid UnboundLocalError
-    asset = None 
+    st.markdown("""
+    <style>
+    div[data-testid="stContainer"] {
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
-    # Initialize database connection if not already exists
     if 'con' not in st.session_state:
         st.session_state.con = duckdb.connect(DB_PATH)
     con = st.session_state.con
     
-    # 1. Asset search component
-    asset_search_component(con)
-
-    # 2. Load asset data only if a ticker is selected
-    selected_ticker = st.session_state.get('selected_ticker_for_analysis')
+    # 1. Use Tabs to separate Main Search from Recommendations
+    tab1, tab2 = st.tabs(["🔎 Market Search", "🤖 AI Recommendations"])
     
-    if selected_ticker:
-        asset = get_asset_snapshot(
-            con, 
-            selected_ticker, 
-            st.session_state.current_sim_date
-        )
-        
-        # Ensure asset exists before rendering UI
-        if asset:
-            col_info, col_actions = st.columns([2, 1])
-            
-            with col_info:
-                display_asset_card(asset)
-            
-            with col_actions:
-                if asset['current_price']:
-                    show_buy_component(
-                        selected_ticker, 
-                        asset['current_price']
-                    )
-                    
-                    if st.button(
-                        f"🔍 Analyze {asset['ticker']}", 
-                        key=f"btn1_{asset['ticker']}", 
-                        use_container_width=True
-                    ): 
-                        st.session_state.last_inspected_ticker = asset['ticker']
-                        st.rerun()
-            
-           
-            
-            # ----------------------------------------------------
-            # Existing analysis dialog logic (unchanged)
-            # ----------------------------------------------------
-            
-            if st.session_state.get('last_inspected_ticker') == asset['ticker']:
-                st.session_state.last_inspected_ticker = None
-                show_asset_analysis_dialog(asset['ticker'])
-                
-        st.divider()
-        
-        
-        
-        
-        
-        #### in the future will be moved into an own componante.
-        
-        #### in the future will be moved into an own component.
+    
+    
+    with tab1:
 
-        u_id = int(st.session_state.get('user_id', 1))
-        p_id = int(st.session_state.get('current_portfolio_id', 0))
+        selected_ticker = st.session_state.get('selected_ticker_for_analysis')
 
-        # 1. Fetch strategies
-        strategies_df = con.execute("""
-            SELECT * 
-            FROM user_preferences_strategy 
-            WHERE user_id = ? AND portfolio_id = ?
-        """, [u_id, p_id]).df()
-
-        st.subheader("🎯 Strategy Selector")
-
-        # 2. Build mapping for selectbox
-        strategy_map = {
-            f"{row['strategy_name']} (id={row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
-            for _, row in strategies_df.iterrows()
-        }
-
-        selected_label = st.selectbox(
-            "Choose strategy",
-            options=list(strategy_map.keys())
-        )
-
-        selected_strategy_id = strategy_map[selected_label]
-        
-        sim_date = st.session_state["current_sim_date"]
-
-
-        # 3. Button to trigger computation
-        if st.button("🔍 Find closest assets", type="primary"):
-
-            results_df = get_closest_assets(
+        asset = None
+        if selected_ticker:
+            asset = get_asset_snapshot(
                 con,
-                selected_strategy_id,
-                sim_date,
-                k=10
+                selected_ticker,
+                st.session_state.current_sim_date
             )
 
-            st.session_state["closest_assets"] = results_df
+        search_col, asset_col, action_col = st.columns(
+            [1.8, 3.4, 1],
+            gap="small"
+        )
+
+        # ======================================================
+        # SEARCH
+        # ======================================================
+        with search_col:
+            asset_search_component(con)
+
+        # ======================================================
+        # ASSET (NO HTML AT ALL)
+        # ======================================================
+        with asset_col:
+
+            if asset:
+
+                col_a, col_b = st.columns([1, 1])
+
+                with col_a:
+                    st.caption("")
 
 
-        # 4. Display results (persisted)
-        if "closest_assets" in st.session_state:
-            st.write(st.session_state["closest_assets"])
+                display_asset_card(asset)
+
+            else:
+
+                st.info("Select an asset to view details")
+
+        # ======================================================
+        # ACTIONS
+        # ======================================================
+        with action_col:
+
+            st.markdown("### ⚡ Actions")
+
+            if asset and asset.get("current_price"):
+
+
+                show_buy_component(
+                    selected_ticker,
+                    asset["current_price"]
+                )
+
+
+                if st.button(
+                    "📊 Deep Analysis",
+                    key=f"btn1_{asset['ticker']}",
+                    type="secondary",
+                    use_container_width=True
+                ):
+                    st.session_state.last_inspected_ticker = asset["ticker"]
+                    st.rerun()
+
+            else:
+                st.caption("No asset selected")
+
+
+
+
+    with tab2:
+
+        # ======================================================
+        # HEADER (CLEAR INTENT)
+        # ======================================================
+        st.markdown(
+            """
+            <div style="
+                padding: 10px 0px 18px 0px;
+            ">
+                <div style="font-size: 20px; font-weight: 700;">
+                    Suggested Investments
+                </div>
+                <div style="font-size: 13px; opacity: 0.6;">
+                    Ranked by similarity to your strategy • filtered and customizable
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # ======================================================
+        # MAIN CONTENT WRAPPER (CENTERED + CLEAN)
+        # ======================================================
+        left, center, right = st.columns([0.1, 3.8, 0.1])
+
+        with center:
+
+            # Subtle container around the whole module
+            with st.container(border=True):
+
+                st.markdown(
+                    """
+                    <div style="
+                        padding: 10px 0px 5px 0px;
+                        font-weight: 600;
+                        font-size: 14px;
+                        opacity: 0.8;
+                    ">
+                        Recommendation Engine
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                render_asset_finder(con)
+
+        # ======================================================
+        # ANALYSIS MODAL (UNCHANGED LOGIC)
+        # ======================================================
+        if st.session_state.get('last_inspected_ticker'):
+            ticker_to_analyze = st.session_state.last_inspected_ticker
+            st.session_state.last_inspected_ticker = None
+            show_asset_analysis_dialog(ticker_to_analyze)
+       
     
 
        

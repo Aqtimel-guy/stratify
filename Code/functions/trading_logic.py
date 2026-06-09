@@ -436,15 +436,26 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
 
 
 # for getting recomendations to buy/sell
-def get_closest_assets(con, strategy_id: int, sim_date: str, k: int = 20):
-    # Retrieve the user strategy vector
-    strategy = con.sql(
-        f"""
+def get_closest_assets(con, strategy_id: int, sim_date: str):
+    """
+    Returns all assets ranked by similarity to the user strategy vector.
+
+    This function is PURE backend logic:
+    - Computes similarity
+    - Joins metadata
+    - Returns FULL sorted dataset
+
+    No filtering, no limits, no UI decisions.
+    """
+
+    # ======================================================
+    # 1. LOAD USER STRATEGY VECTOR
+    # ======================================================
+    strategy = con.sql(f"""
         SELECT *
         FROM user_preferences_strategy
         WHERE portfolio_strategy_id = {strategy_id}
-        """
-    ).df().iloc[0]
+    """).df().iloc[0]
 
     strategy_vector = np.array([
         strategy["momentum_preference"],
@@ -455,47 +466,63 @@ def get_closest_assets(con, strategy_id: int, sim_date: str, k: int = 20):
         strategy["size_preference"],
     ])
 
-    # Filter assets by the specific sim_date to avoid duplicates over time
+    # ======================================================
+    # 2. LOAD ASSET FACTORS FOR GIVEN DATE
+    # ======================================================
     assets_df = con.execute("""
-    SELECT
-        asset_id,
-        momentum_factor_market,
-        value_factor_market,
-        quality_factor_market,
-        growth_factor_market,
-        defensive_factor_market,
-        size_factor_market
-    FROM asset_factors_normalized_final
-    WHERE timestamp = (
-        SELECT MAX(timestamp) 
-        FROM asset_factors_normalized_final 
-        WHERE timestamp <= ?
-    )
-""", [sim_date]).df()
+        SELECT
+            asset_id,
+            momentum_factor_market,
+            value_factor_market,
+            quality_factor_market,
+            growth_factor_market,
+            defensive_factor_market,
+            size_factor_market
+        FROM asset_factors_normalized_final
+        WHERE timestamp = (
+            SELECT MAX(timestamp)
+            FROM asset_factors_normalized_final
+            WHERE timestamp <= ?
+        )
+    """, [sim_date]).df()
 
     if assets_df.empty:
         return assets_df
 
-    # Extract factor matrix for distance calculation
+    # ======================================================
+    # 3. COMPUTE EUCLIDEAN DISTANCE
+    # ======================================================
     asset_matrix = assets_df.iloc[:, 1:].to_numpy()
 
-    # Calculate Euclidean distance
-    distances = np.sum(
-        (asset_matrix - strategy_vector) ** 2,
-        axis=1
+    distances = np.sqrt(
+        np.sum(
+            (asset_matrix - strategy_vector) ** 2,
+            axis=1
+        )
     )
 
-    # Get the top k closest assets
-    top_k_idx = np.argpartition(
-        distances,
-        min(k, len(distances) - 1)
-    )[:k]
+    assets_df = assets_df.copy()
+    assets_df["distance"] = distances
 
-    return (
-        assets_df.iloc[top_k_idx]
-        .assign(distance=distances[top_k_idx])
-        .sort_values("distance")
+    # ======================================================
+    # 4. MERGE METADATA
+    # ======================================================
+    assets_meta = con.sql("""
+        SELECT asset_id, ticker, sector, industry, name
+        FROM assets
+    """).df()
+
+    merged_df = assets_df.merge(
+        assets_meta,
+        on="asset_id",
+        how="left"
     )
+
+    # ======================================================
+    # 5. RETURN FULL RANKED LIST (NO LIMIT)
+    # ======================================================
+    return merged_df.sort_values("distance").reset_index(drop=True)
+
 
 # for simulating time
 

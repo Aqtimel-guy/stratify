@@ -3,11 +3,12 @@ import duckdb
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-from .trading_logic import execute_asset_trade , execute_cash_transaction
+from .trading_logic import execute_asset_trade , execute_cash_transaction, get_closest_assets
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
 from Code.strategy_builder.user_prefrence import *
 from Code.strategy_builder.save_final_strategy import *
+
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -107,28 +108,45 @@ def show_cash_management_ui():
                     else:
                         st.warning("Please wait a moment between actions.")
 
-# עדכון קטן לפונקציית display_asset_card כדי לשמור על עקביות
+
+# for displaying assets data clearly and simply
 def display_asset_card(asset):
-    """מציגה את נתוני הנכס בצורה ויזואלית יפה עם בדיקת זמינות"""
+    """Displays the asset data in a clean, professional card format."""
+    
+
+    
+    # Handle assets not trading on simulation date
     if asset['current_price'] is None:
         first_date = asset['first_trade_date']
         date_str = first_date.strftime('%Y-%m-%d') if hasattr(first_date, 'strftime') else str(first_date)
         
-        st.warning(f"⚠️ המנייה **{asset['ticker']}** לא נסחרה בזמן זה.")
-        st.info(f"היא התחילה להיסחר בתאריך: **{date_str}**")
+        st.warning(f"⚠️ The stock **{asset['ticker']}** was not trading at this time.")
+        st.info(f"Trading started on: **{date_str}**")
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         return 
 
-    c1, c2 , c3= st.columns([1, 2 , 1])
+    # Asset Header Layout
+    c1, c2, c3 = st.columns([1, 2, 0.8])
+    
+    sim_date = st.session_state.get("current_sim_date").date()
+    
     with c1:
-        st.metric("Price", f"${asset['current_price']:,.2f}")
+        st.metric(label=f"price at {sim_date}", value=f"${asset['current_price']:,.2f}")
+
+    
     with c2:
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         st.caption(f"**Sector:** {asset['sector']} | **Industry:** {asset['industry']}")
+        
     with c3:
-        st.subheader("logo of the company")
-    # כפתור אנליזה - הוספנו שימוש ב-is_action_allowed גם כאן לביטחון
-    
+        # Using a simple icon/emoji if a real logo is missing to keep it clean
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("### 🏢") 
+
+    st.divider()
+
+
+
 
 # for showing purchese 
 def show_buy_component(ticker, asset_price):
@@ -618,17 +636,19 @@ def render_performance_chart(df, title="Portfolio Performance History"):
     )
 
 
-# for the assets serch component
 def asset_search_component(con):
-    """מנהלת את החיפוש ושומרת את הבחירה ב-State"""
-    
-    # טעינה ראשונית של הרשימה ל-Cache
-    if 'all_assets_list' not in st.session_state:
-        assets_df = con.execute("SELECT ticker, name FROM assets").df()
-        st.session_state.all_assets_list = [f"{row['ticker']} | {row['name']}" for _, row in assets_df.iterrows()]
+    """Handles asset search and stores selection in session state."""
 
-    st.subheader("Search by Ticker or Company Name")
-    
+    # Load and cache assets list
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("SELECT ticker, name FROM assets").df()
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    st.subheader("🔎Search by Ticker or Company Name")
+
     selected_option = st.selectbox(
         "",
         options=[""] + st.session_state.all_assets_list,
@@ -637,8 +657,15 @@ def asset_search_component(con):
         key="strategy_search_box"
     )
 
+    # Prevent unnecessary reruns by tracking last selection
     if selected_option:
-        st.session_state.selected_ticker_for_analysis = selected_option.split(" | ")[0]
+        ticker = selected_option.split(" | ")[0]
+
+        if st.session_state.get("selected_ticker_for_analysis") != ticker:
+            st.session_state.selected_ticker_for_analysis = ticker
+            st.session_state.last_selected_option = selected_option
+            st.rerun()
+
 
 # for analysing an asset (analysis diolog pop up)
 @st.dialog("Asset Analysis Deep-Dive", width="large")
@@ -2465,7 +2492,217 @@ def strategy_creating_component(con, portfolio_id):
         
      
         
+# for recomending assets based on strategy  
         
+
+def render_strategy_selector(con):
+    """
+    Renders the strategy selector and returns the selected strategy_id.
+    """
+    u_id = int(st.session_state.get('user_id', 1))
+    p_id = int(st.session_state.get('current_portfolio_id', 0))
+
+    strategies_df = con.execute("""
+        SELECT * FROM user_preferences_strategy 
+        WHERE user_id = ? AND portfolio_id = ?
+    """, [u_id, p_id]).df()
+
+    if strategies_df.empty:
+        st.warning("No strategies found for this portfolio.")
+        return None
+
+    strategy_map = {
+        f"{row['strategy_name']} (id={row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
+        for _, row in strategies_df.iterrows()
+    }
+
+    selected_label = st.selectbox("Choose strategy", options=list(strategy_map.keys()))
+    return strategy_map[selected_label]
+
+
+
+def render_asset_finder(con):
+    """
+    Asset finder UI with:
+    - K control (20 / 5 / 10)
+    - Sector filtering
+    - Clean ranked display
+    """
+
+
+    
+    sim_date = st.session_state.get("current_sim_date")
+
+
+
+    # ======================================================
+    # RESULTS
+    # ======================================================
+    if "closest_assets" not in st.session_state:
+        return
+
+    df = st.session_state["closest_assets"]
+
+    
+
+    # ======================================================
+    # UI CONTROLS (NEW)
+    # ======================================================
+
+    col1, col2 , col3 , col4= st.columns([2,2,1,1])
+    with col1:
+        strategy_id = render_strategy_selector(con)
+        
+        
+    with col2:
+        all_sectors = sorted(df["sector"].dropna().unique().tolist())
+
+        selected_sectors = st.multiselect(
+            "Filter sectors (optional)",
+            options=all_sectors,
+            default=all_sectors
+        )
+
+    with col3:
+        k_option = st.selectbox(
+            "Show top assets",
+            options=[20, 5, 10],
+            index=1
+        )
+
+
+        
+    with col4:
+        # ======================================================
+        # RUN RECOMMENDATION
+        # ======================================================
+        if st.button("🔍 Find closest assets", type="primary"):
+
+            if strategy_id and sim_date:
+                results = get_closest_assets(con, strategy_id, sim_date)
+                st.session_state["closest_assets"] = results
+            else:
+                st.error("Missing strategy or simulation date.")
+        
+
+    # ======================================================
+    # APPLY FILTERS
+    # ======================================================
+
+    filtered_df = df.copy()
+
+    # sector filter
+    if selected_sectors:
+        filtered_df = filtered_df[filtered_df["sector"].isin(selected_sectors)]
+
+    # K filter
+    
+    filtered_df = filtered_df.head(int(k_option))
+
+    # ======================================================
+    # DISPLAY (2-COLUMN GRID)
+    # ======================================================
+
+    items = list(filtered_df.iterrows())
+
+    # pair items into chunks of 2
+    for i in range(0, len(items), 2):
+
+        col1, col2 = st.columns(2, gap="small")
+
+        # -------------------------
+        # LEFT ITEM
+        # -------------------------
+        with col1:
+            if i < len(items):
+                _, row = items[i]
+
+                with st.container():
+
+                    rank = i + 1
+
+                    # ======================================================
+                    # ROW 1 (MAIN INFO - SINGLE LINE)
+                    # ======================================================
+                    st.markdown(
+                        f"""
+                        **#{rank} {row['ticker']}**  
+                        <span style="font-size:12px; opacity:0.6;">
+                        {row['name']} • {row['sector']} • distance {row['distance']:.2f}
+                        </span>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    # ======================================================
+                    # ROW 2 (ACTIONS - COMPACT)
+                    # ======================================================
+                    c1, c2 = st.columns([1, 1], gap="small")
+
+                    with c1:
+                        if st.button(
+                            "🔍 Analyze",
+                            key=f"analyze_{row['ticker']}",
+                            use_container_width=True
+                        ):
+                            show_asset_analysis_dialog(row["ticker"])
+
+                    with c2:
+                        with st.popover("💼 Trade", use_container_width=True):
+                            st.radio(
+                                "Direction",
+                                ["Buy", "Sell"],
+                                horizontal=True,
+                                label_visibility="collapsed",
+                                key=f"side_{row['ticker']}"
+                            )
+
+        # -------------------------
+        # RIGHT ITEM
+        # -------------------------
+        with col2:
+            if i + 1 < len(items):
+                _, row = items[i + 1]
+
+                with st.container():
+
+                    rank = i + 2
+
+                    # ======================================================
+                    # ROW 1 (MAIN INFO - SINGLE LINE)
+                    # ======================================================
+                    st.markdown(
+                        f"""
+                        **#{rank} {row['ticker']}**  
+                        <span style="font-size:12px; opacity:0.6;">
+                        {row['name']} • {row['sector']} • distance {row['distance']:.2f}
+                        </span>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    # ======================================================
+                    # ROW 2 (ACTIONS - COMPACT)
+                    # ======================================================
+                    c1, c2 = st.columns([1, 1], gap="small")
+
+                    with c1:
+                        if st.button(
+                            "🔍 Analyze",
+                            key=f"analyze_{row['ticker']}",
+                            use_container_width=True
+                        ):
+                            show_asset_analysis_dialog(row["ticker"])
+
+                    with c2:
+                        with st.popover("💼 Trade", use_container_width=True):
+                            st.radio(
+                                "Direction",
+                                ["Buy", "Sell"],
+                                horizontal=True,
+                                label_visibility="collapsed",
+                                key=f"side_{row['ticker']}"
+                            )
         
         
 # for showing easily the factors of an asset
