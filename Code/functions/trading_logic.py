@@ -1104,7 +1104,8 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         )
         
     buy_fee = context["meta"]["buy_fee"]
-    min_position_value = buy_fee * 50
+    sell_fee = context["meta"]["sell_fee"]
+    min_position_value = 50 * max(buy_fee , sell_fee)
     
     # ==========================
     # MIN POSITION VALUE FILTER
