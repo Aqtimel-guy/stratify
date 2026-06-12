@@ -1605,6 +1605,10 @@ def dashboard_sidebar():
             "🔍 Asset Explorer": "asset_explorer"
         }
         
+        if st.button("test page"):
+            st.session_state.page = "test_page"
+            st.rerun()
+        
         for label, page_val in nav_pages.items():
             is_current = st.session_state.get('page') == page_val
             # Setting a unique dynamic key prefix so the CSS can securely detect the active element
@@ -1945,3 +1949,111 @@ def show_strategy_builder():
     # Render main component
     # ---------------------------------------
     strategy_creating_component(con, portfolio_id)
+    
+    
+    
+    
+def test_page():
+    dashboard_sidebar()
+    st.write("**test page**")
+
+    with duckdb.connect(DB_PATH) as con:
+
+        portfolio_id = st.session_state.get("current_portfolio_id")
+        sim_date = st.session_state.get("current_sim_date")
+
+        strategy_context = build_strategy_context(
+            con,
+            portfolio_id,
+            sim_date
+        )
+
+        meta = strategy_context["meta"]
+
+        st.markdown("## 📦 Portfolio Overview")
+
+        st.write(f"💰 Total Cash: {meta['total_cash']:.2f}")
+        st.write(f"📥 Monthly Deposit: {meta['monthly_deposit']}")
+        st.write(f"💸 Buy Fee: {meta['buy_fee']}")
+        st.write(f"💸 Sell Fee: {meta['sell_fee']}")
+        st.write(f"🏦 Deposit Fee: {meta['deposit_fee']}")
+        st.write(f"🏦 Withdrawal Fee: {meta['withdrawal_fee']}")
+        st.write(f"📊 Preferred Sectors: {meta['preferred_sectors']}")
+        st.write(f"🚫 Excluded Sectors: {meta['excluded_sectors']}")
+
+        st.markdown("---")
+
+        # ======================================================
+        # STRATEGIES LOOP
+        # ======================================================
+
+        for strategy_id, ctx in strategy_context["strategies"].items():
+
+            st.markdown(f"## 🎯 Strategy {strategy_id}")
+            st.write(f"💰 Cash: {ctx['cash']:.2f}")
+
+            df = ctx["closest_assets"]
+
+            st.dataframe(df.head(20)[[
+                "asset_id",
+                "ticker",
+                "sector",
+                "price",
+                "distance",
+                "score",
+                "base_score"
+            ]])
+
+            st.markdown("### ⚙️ Diversification Comparison")
+
+            for div_level in [1, 2, 3]:
+
+                st.markdown(f"#### 📊 Diversification {div_level}")
+
+                context_copy = {
+                    "meta": {
+                        **strategy_context["meta"],
+                        "diversification": div_level
+                    },
+                    "strategies": strategy_context["strategies"]
+                }
+
+                holdings = build_allocation(
+                    strategy_id=strategy_id,
+                    context=context_copy,
+                    df=df,
+                    cash=ctx["cash"],
+                    current_step_holdings=None,
+                    max_assets=25
+                )
+
+                if not holdings:
+                    st.warning("No holdings")
+                    continue
+
+                result_rows = []
+
+                for asset_id, (weight, shares) in holdings.items():
+
+                    asset_row = df[df["asset_id"] == asset_id]
+                    if asset_row.empty:
+                        continue
+
+                    asset_row = asset_row.iloc[0]
+
+                    result_rows.append({
+                        "asset_id": asset_id,
+                        "ticker": asset_row["ticker"],
+                        "sector": asset_row["sector"],
+                        "price": asset_row["price"],
+                        "weight": weight,
+                        "shares": shares,
+                        "value": shares * asset_row["price"]
+                    })
+
+                result_df = pd.DataFrame(result_rows)
+
+                st.dataframe(result_df, use_container_width=True)
+
+                st.write("💼 Total invested:", result_df["value"].sum())
+                st.write("📊 Assets:", len(result_df))

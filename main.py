@@ -80,6 +80,8 @@ def main():
         
     elif st.session_state.page == "portfolio_performance_analysis":
         show_portfolio_performance_analysis()
+    elif st.session_state.page == "test_page":
+        test_page()
         
         
 if __name__ == "__main__":

@@ -146,8 +146,6 @@ def display_asset_card(asset):
     st.divider()
 
 
-
-
 # for showing purchese 
 def show_buy_component(ticker, asset_price):
     """
@@ -420,7 +418,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
                     trade_qty = st.number_input(
                         "Quantity to sell", 
                         min_value=1, 
-                        value=available_qty, 
+                        value=int(available_qty), 
                         step=1, 
                         key=f"t_input_sell_{ticker}",
                         label_visibility="collapsed"
@@ -986,12 +984,6 @@ def show_asset_analysis_dialog( asset_ticker):
 
             
 
-
-
-            
-
-
-
                         "quality":
 
 
@@ -1016,15 +1008,6 @@ def show_asset_analysis_dialog( asset_ticker):
 
 
 
-                    
-
-
-
-                    
-
-
-
-                    
 
 
 
@@ -1051,16 +1034,6 @@ def show_asset_analysis_dialog( asset_ticker):
                 "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
 
 
-
-                    
-
-
-
-                    
-
-
-
-                    
 
 
 
@@ -1092,18 +1065,6 @@ def show_asset_analysis_dialog( asset_ticker):
 
 
 
-                    
-
-
-
-                    
-
-
-
-                    
-
-
-
                         "size":
 
 
@@ -1112,31 +1073,19 @@ def show_asset_analysis_dialog( asset_ticker):
 
 
 
-                "Captures the 'Small-Cap Effect'—the tendency of smaller companies to outperform over time. Based on:\n\n"
+                "  **Market Capitalization:** Higher scores are assigned to companies with larger total market value.\n\n"
 
 
 
-                "  **Company Size:** Gives higher scores to companies with lower market capitalization.\n\n"
+                "  **Company Size:** Gives higher scores to companies with bigger market capitalization.\n\n"
 
 
 
-                "  **Liquidity Buffer:** Ensures the company has enough trading volume to be easily traded.\n\n"
+                "  **Liquidity Buffer:** Favors highly liquid stocks, ensuring ease of trading large positions without significant price impact.\n\n"
 
 
-
-                "  **Growth Potential:** Targets agile firms with more room for exponential expansion.",
-
-
-
-                    
-
-
-
-                    
-
-
-
-                    
+                "  **Market Dominance:** Targets industry leaders that often exhibit greater stability and institutional resilience."
+,
 
 
 
@@ -1751,7 +1700,7 @@ def strategy_creating_component(con, portfolio_id):
             "quality": "Prioritizes financially healthy businesses.",
             "growth": "Targets companies with rapid expansion.",
             "defensive": "Reduces risk and volatility.",
-            "size": "Focuses more on small-cap opportunities.",
+            "size": "Focuses more on big companies.",
             "liquidity": "Prioritizes easier buying and selling.",
         }
         
@@ -2112,7 +2061,7 @@ def strategy_creating_component(con, portfolio_id):
                 # Footer Summary
                 # =======================================
                 st.write("")
-                if abs(total_allocated - 100.0) < 0.1:
+                if abs(total_allocated - 100.0) < 0.2:
                     pass
                 else:
                     st.warning(f"⚠ Current allocation total: {total_allocated:.1f}%")
@@ -2127,12 +2076,25 @@ def strategy_creating_component(con, portfolio_id):
                         val = st.session_state.get(f"alloc_slider_{p_id}_{name}", 0)
                         if val > 0:
                             active_allocations.append({'id': s_id, 'pct': val})
+
+                    # 2. Adjust for minor rounding discrepancies (e.g., 99.9% -> 100%)
+                    if active_allocations:
+                        total_val = sum(item['pct'] for item in active_allocations)
+                        diff = 100.0 - total_val
+                        
+                        # If difference is significant but within the accepted threshold (0.2)
+                        if abs(diff) > 0.001:
+                            # Add the difference to the strategy with the largest allocation
+                            max_alloc = max(active_allocations, key=lambda x: x['pct'])
+                            max_alloc['pct'] += diff
+                            # Ensure the value is rounded to avoid floating point artifacts
+                            max_alloc['pct'] = round(max_alloc['pct'], 2)
                     
-                    # 2. Save to session_state instead of DB
+                    # 3. Save to session_state instead of DB
                     # This makes the data available for the next tab/final save
                     st.session_state['final_allocations'] = active_allocations
                     
-                    # 3. Move to next tab
+                    # 4. Move to next tab
                     st.session_state.active_tab = 3
                     st.rerun()
 
@@ -2343,22 +2305,22 @@ def strategy_creating_component(con, portfolio_id):
             st.session_state[div_key] = "Medium"
 
         div_options = {
-            "Low": {
-                "icon": "🎯",
-                "range": 'Maximum 10 different assets',
-                "desc": "Invests in fewer assets. Bigger gains possible, but also bigger risks."
-            },
-            "Medium": {
-                "icon": "⚖️",
-                "range": "10 - 20 different assets",
-                "desc": "Balanced mix of assets. Good balance between growth and stability."
-            },
-            "High": {
-                "icon": "🧱",
-                "range": "no limit on number of assets",
-                "desc": "Spreads money across many assets. Lower risk, but usually slower growth."
+                "Low": {
+                    "icon": "🎯",
+                    "range": "A small number of assets, big exposure to fewer sectors",
+                    "desc": "Focuses on fewer assets. The value may change more sharply over time - both upward and downward ."
+                },
+                "Medium": {
+                    "icon": "⚖️",
+                    "range": "A moderate number of assets , Exposure to a moderate number of sectors",
+                    "desc": "A balanced mix. Tries to combine steady behavior with noticeable growth, without strong swings in either direction."
+                },
+                "High": {
+                    "icon": "🧱",
+                    "range": "A wide spread of assets, Exposure across many different sectors",
+                    "desc": "Spreads across many assets. Changes tend to be smoother, hence safer but growth may feel slower."
+                }
             }
-        }
 
         # Callback function to handle the card selection cleanly
         def set_diversification(selected_option):
@@ -2481,8 +2443,10 @@ def strategy_creating_component(con, portfolio_id):
                 # 4. Execute save function
                 save_final_strategy(**params)
                 
-                st.write(
-                    con.execute("select * from multi_strategy order by multi_strategy_id limit 2 "))
+                
+                strategy_df = con.execute("select * from multi_strategy where portfolio_id = ? order by multi_strategy_id limit 1 " , [portfolio_id]).df()
+                
+                st.write(strategy_df)
                 
                 st.success("🎉 Portfolio configured successfully!")
                 
@@ -2491,10 +2455,9 @@ def strategy_creating_component(con, portfolio_id):
                 st.error(f"Error saving portfolio: {str(e)}")
         
      
-        
+    
 # for recomending assets based on strategy  
-        
-
+    
 def render_strategy_selector(con):
     u_id = int(st.session_state.get('user_id', 1))
     p_id = int(st.session_state.get('current_portfolio_id', 0))
@@ -2509,9 +2472,9 @@ def render_strategy_selector(con):
         return None
 
     strategy_map = {
-        f"{row['strategy_name']} ({row['portfolio_strategy_id']})": row["portfolio_strategy_id"]
-        for _, row in strategies_df.iterrows()
-    }
+    row["strategy_name"]: row["portfolio_strategy_id"]
+    for _, row in strategies_df.iterrows()
+}
 
     options = list(strategy_map.keys())
 
@@ -2520,6 +2483,8 @@ def render_strategy_selector(con):
         options=options,
         key="strategy_selector_debug"
     )
+
+    selected_strategy_id = strategy_map[selected_label]
 
 
     return strategy_map[selected_label]
@@ -2665,7 +2630,7 @@ def render_asset_finder(con):
                 opacity:0.65;
                 margin-top:4px;
             ">
-                {row['ticker']} • distance {row['distance']:.2f}
+                {row['ticker']} • Compatibility {100 - row['distance']:.2f} %
             </div>
         </div>
         """)
@@ -2680,15 +2645,19 @@ def render_asset_finder(con):
                 show_asset_analysis_dialog(row["ticker"])
 
         with c2:
-            with st.popover("💼 Trade"):
-                st.radio(
-                    "Direction",
-                    ["Buy", "Sell"],
-                    horizontal=True,
-                    label_visibility="collapsed",
-                    key=f"side_{row['ticker']}"
-                )
+            sim_date = st.session_state.get("current_sim_date")
+            portfolio_id = st.session_state.get("current_portfolio_id")
+            p_cash = st.session_state.get("current_available_cash")
 
+            # ======================================================
+            # BASIC GUARDS (no st.stop → avoids UI break)
+            # ======================================================
+            if not portfolio_id or not sim_date:
+                st.warning("Missing portfolio or simulation date.")
+            else:
+            
+                with st.popover("💼Trade"):
+                    open_trade_dialog(con , row , portfolio_id , sim_date , p_cash)
     # ======================================================
     # DISPLAY
     # ======================================================
@@ -2707,6 +2676,165 @@ def render_asset_finder(con):
             if i + 1 < len(items):
                 _, row = items[i + 1]
                 render_asset_card(row, i + 2)
+
+
+# for short buy\sell component
+def open_trade_dialog(con, row, portfolio_id, sim_date, p_cash):
+    
+    
+    uid = f"{row['asset_id']}" 
+
+    # ======================================================
+    # CURRENT PRICE
+    # ======================================================
+    result = con.execute("""
+        SELECT close 
+        FROM prices 
+        WHERE asset_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    """, [row["asset_id"], sim_date]).fetchone()
+
+    current_price = result[0] if result else None
+
+    if current_price is None:
+        st.warning("No price available for this asset at selected time.")
+        return
+
+    # ======================================================
+    # TRADE SIDE
+    # ======================================================
+    trade_side = st.radio(
+        "Direction",
+        ["Buy", "Sell"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"side_{uid}"
+    )
+
+    st.divider()
+
+    # ======================================================
+    # SELL FLOW
+    # ======================================================
+    if trade_side == "Sell":
+
+        result = con.execute("""
+            SELECT quantity
+            FROM holdings
+            WHERE portfolio_id = ? AND asset_id = ?
+        """, [portfolio_id, row["asset_id"]]).fetchone()
+
+        available_qty = result[0] if result else 0
+
+        if available_qty <= 0:
+            st.info("No shares available to sell.")
+            return
+
+        st.caption(f"Available: {available_qty:,} shares")
+
+        sell_qty = st.number_input(
+            "Quantity",
+            min_value=1,
+            max_value=int(available_qty),
+            value=int(available_qty),
+            step=1,
+            key=f"sell_qty_{uid}"
+        )
+
+        st.caption(f"Est. Credit: ${sell_qty * current_price:,.2f}")
+
+        if st.button(
+            "Confirm Sale",
+            key=f"sell_btn_{uid}",
+            type="primary",
+            use_container_width=True
+        ):
+
+            success, msg = execute_asset_trade(
+                con,
+                portfolio_id,
+                row["ticker"],
+                sim_date,
+                sell_qty,
+                side="sell"
+            )
+
+            if success:
+                st.session_state["refresh_needed"] = True
+
+                st.toast(
+                    f"📉 Sold {sell_qty:,} shares of {row['ticker']}",
+                    icon="✅"
+                )
+                st.session_state["current_available_cash"] += sell_qty * current_price
+
+                st.success(f"Order executed: SOLD {sell_qty:,} {row['ticker']}", icon="🎯")
+
+                st.rerun()
+            else:
+                st.error(msg)
+
+    # ======================================================
+    # BUY FLOW
+    # ======================================================
+    else:
+
+        if p_cash is None or p_cash <= 0:
+            st.info("No cash available.")
+            return
+
+        st.caption(f"Cash: ${p_cash:,.2f}")
+
+        max_affordable = int(p_cash // current_price) if current_price > 0 else 0
+
+        buy_qty = st.number_input(
+            "Quantity",
+            min_value=1,
+            max_value=max_affordable if max_affordable > 0 else 1,
+            value=1,
+            step=1,
+            key=f"buy_qty_{uid}"
+        )
+
+        est_cost = buy_qty * current_price
+
+        st.caption(f"Est. Cost: ${est_cost:,.2f} | Max: {max_affordable:,}")
+
+        if st.button(
+            "Confirm Purchase",
+            key=f"buy_btn_{uid}",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if est_cost > p_cash:
+                st.error("Insufficient cash.")
+            else:
+                success, msg = execute_asset_trade(
+                    con,
+                    portfolio_id,
+                    row["ticker"],
+                    sim_date,
+                    buy_qty,
+                    side="buy"
+                )
+
+                if success:
+                    st.session_state["refresh_needed"] = True
+
+                    st.toast(
+                        f"🚀 Bought {buy_qty:,} shares of {row['ticker']}",
+                        icon="✅"
+                    )
+                    st.session_state["current_available_cash"] -= est_cost
+
+                    st.success(f"Order executed: BOUGHT {buy_qty:,} {row['ticker']}", icon="🎯")
+
+                    st.rerun()
+                else:
+                    st.error(msg)
+
 
 # for showing easily the factors of an asset
 def render_stock_factor_maps(con, ticker: str):

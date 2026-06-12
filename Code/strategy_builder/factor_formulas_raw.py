@@ -659,8 +659,8 @@ def size_factor_raw_calculator(con, asset_id, w_mcap=0.7, w_liquidity=0.3):
     log_dollar_vol = np.log(df["dollar_volume"])
 
     # Size intuition:
-    # smaller market cap → higher score
-    size_score = -log_mcap
+    # Larger market cap -> Higher score
+    size_score = log_mcap 
 
     # Liquidity bonus:
     liquidity_score = log_dollar_vol
@@ -907,7 +907,7 @@ def update_asset_factors_raw_v1():
         'momentum_factor_raw': momentum_factor_raw_calculator,
         'value_factor_raw': value_factor_raw_calculator,
         'quality_factor_raw': quality_factor_raw_calculator,
-        'growth_factor_raw': growth_factor_raw_calculator,  # allowed to be NaN
+        'growth_factor_raw': growth_factor_raw_calculator, 
         'defensive_factor_raw': defensive_factor_raw_calculator,
         'size_factor_raw': size_factor_raw_calculator,
         'liquidity_factor_raw': liquidity_factor_raw_calculator,

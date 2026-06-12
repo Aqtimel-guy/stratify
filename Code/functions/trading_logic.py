@@ -5,6 +5,7 @@ import datetime
 import pandas as pd
 import math
 import numpy as np
+import math
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
@@ -136,9 +137,6 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
         logger.error(f"Trade failed: {e}")
         return False, str(e)
 
-
-
-
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
     """
@@ -170,7 +168,6 @@ def record_portfolio_snapshot(con, portfolio_id, timestamp):
     """, [portfolio_id, timestamp, total_value, cash_val])
     
     
-
 
 # for showing the history of transactions
 @st.cache_data(show_spinner=False)
@@ -433,99 +430,7 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
     return unified
 
 
-
-
-# for getting recomendations to buy/sell
-def get_closest_assets(con, strategy_id: int, sim_date: str):
-    """
-    Returns all assets ranked by similarity to the user strategy vector.
-
-    This function is PURE backend logic:
-    - Computes similarity
-    - Joins metadata
-    - Returns FULL sorted dataset
-
-    No filtering, no limits, no UI decisions.
-    """
-
-    # ======================================================
-    # 1. LOAD USER STRATEGY VECTOR
-    # ======================================================
-    strategy = con.sql(f"""
-        SELECT *
-        FROM user_preferences_strategy
-        WHERE portfolio_strategy_id = {strategy_id}
-    """).df().iloc[0]
-
-    strategy_vector = np.array([
-        strategy["momentum_preference"],
-        strategy["value_preference"],
-        strategy["quality_preference"],
-        strategy["growth_preference"],
-        strategy["defensive_preference"],
-        strategy["size_preference"],
-    ])
-
-    # ======================================================
-    # 2. LOAD ASSET FACTORS FOR GIVEN DATE
-    # ======================================================
-    assets_df = con.execute("""
-        SELECT
-            asset_id,
-            momentum_factor_market,
-            value_factor_market,
-            quality_factor_market,
-            growth_factor_market,
-            defensive_factor_market,
-            size_factor_market
-        FROM asset_factors_normalized_final
-        WHERE timestamp = (
-            SELECT MAX(timestamp)
-            FROM asset_factors_normalized_final
-            WHERE timestamp <= ?
-        )
-    """, [sim_date]).df()
-
-    if assets_df.empty:
-        return assets_df
-
-    # ======================================================
-    # 3. COMPUTE EUCLIDEAN DISTANCE
-    # ======================================================
-    asset_matrix = assets_df.iloc[:, 1:].to_numpy()
-
-    distances = np.sqrt(
-        np.sum(
-            (asset_matrix - strategy_vector) ** 2,
-            axis=1
-        )
-    )
-
-    assets_df = assets_df.copy()
-    assets_df["distance"] = distances
-
-    # ======================================================
-    # 4. MERGE METADATA
-    # ======================================================
-    assets_meta = con.sql("""
-        SELECT asset_id, ticker, sector, industry, name
-        FROM assets
-    """).df()
-
-    merged_df = assets_df.merge(
-        assets_meta,
-        on="asset_id",
-        how="left"
-    )
-
-    # ======================================================
-    # 5. RETURN FULL RANKED LIST (NO LIMIT)
-    # ======================================================
-    return merged_df.sort_values("distance").reset_index(drop=True)
-
-
 # for simulating time
-
 def handle_time_jump(new_date, p_id):
     # 1. חישוב תאריך גג (אתמול)
     yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
@@ -634,3 +539,643 @@ def handle_time_jump(new_date, p_id):
             con.close()
         st.error(f"Time Jump Failed: {e}")
         return False
+
+# for getting recomendations to buy
+def get_closest_assets(con, strategy_id: int, sim_date: str):
+    """
+    Returns all assets ranked by similarity to the user strategy vector.
+
+    This function is PURE backend logic:
+    - Computes similarity
+    - Joins metadata
+    - Returns FULL sorted dataset
+
+    No filtering, no limits, no UI decisions.
+    """
+
+    # ======================================================
+    # 1. LOAD USER STRATEGY VECTOR
+    # ======================================================
+    strategy = con.sql(f"""
+        SELECT *
+        FROM user_preferences_strategy
+        WHERE portfolio_strategy_id = {strategy_id}
+    """).df().iloc[0]
+
+    strategy_vector = np.array([
+        strategy["momentum_preference"],
+        strategy["value_preference"],
+        strategy["quality_preference"],
+        strategy["growth_preference"],
+        strategy["defensive_preference"],
+        strategy["size_preference"],
+    ])
+
+    # ======================================================
+    # 2. LOAD ASSET FACTORS FOR GIVEN DATE
+    # ======================================================
+    assets_df = con.execute("""
+        SELECT
+            asset_id,
+            momentum_factor_market,
+            value_factor_market,
+            quality_factor_market,
+            growth_factor_market,
+            defensive_factor_market,
+            size_factor_market
+        FROM asset_factors_normalized_final
+        WHERE timestamp = (
+            SELECT MAX(timestamp)
+            FROM asset_factors_normalized_final
+            WHERE timestamp <= ?
+        )
+    """, [sim_date]).df()
+
+    if assets_df.empty:
+        return assets_df
+
+    # ======================================================
+    # 3. COMPUTE EUCLIDEAN DISTANCE
+    # ======================================================
+    asset_matrix = assets_df.iloc[:, 1:].to_numpy()
+
+    distances = np.sqrt(
+        np.sum(
+            (asset_matrix - strategy_vector) ** 2,
+            axis=1
+        )
+    )
+
+    assets_df = assets_df.copy()
+    assets_df["distance"] = distances
+
+    # ======================================================
+    # 4. MERGE METADATA
+    # ======================================================
+    assets_meta = con.sql("""
+        SELECT asset_id, ticker, sector, industry, name
+        FROM assets
+    """).df()
+
+    merged_df = assets_df.merge(
+        assets_meta,
+        on="asset_id",
+        how="left"
+    )
+
+    # ======================================================
+    # 5. RETURN FULL RANKED LIST (NO LIMIT)
+    # ======================================================
+    return merged_df.sort_values("distance").reset_index(drop=True)
+
+
+# for getting compleate multi-strategy context
+def build_strategy_context(con, portfolio_id: int, sim_date: str):
+    """
+    Builds the execution context for a portfolio by allocating cash across strategies
+    and filtering candidate assets based on market data and user preferences.
+
+    Args:
+        con: Database connection object.
+        portfolio_id (int): The unique identifier for the portfolio.
+        sim_date (str): The date string used for market data lookup.
+
+    Returns:
+    dict: A dictionary containing:
+        - "meta": global portfolio-level parameters such as fees, deposits,
+          investment settings, sector preferences, and available cash.
+        - "strategies": a dictionary where keys are strategy IDs and values
+          contain:
+              - allocated cash for the strategy
+              - preference vector (as a dict for debugging clarity)
+              - filtered DataFrame of closest tradable assets after preference adjustments
+    """
+    # ======================================================
+    # A.1 LOAD RELEVANT DATA
+    # ======================================================
+
+    multi = con.sql(f"""
+        SELECT *
+        FROM multi_strategy
+        WHERE portfolio_id = {portfolio_id}
+        ORDER BY multi_strategy_id DESC
+        LIMIT 1
+    """).df().iloc[0]
+    
+    prices_df = con.execute("""
+        SELECT asset_id, close as price
+        FROM prices p
+        WHERE p.timestamp = (
+            SELECT MAX(p2.timestamp)
+            FROM prices p2
+            WHERE p2.asset_id = p.asset_id
+            AND p2.timestamp <= ?
+        )
+    """, [sim_date]).df()
+
+
+
+    strategies = [
+        (multi["strategy_1_id"], multi["strategy_1_pct"]),
+        (multi["strategy_2_id"], multi["strategy_2_pct"]),
+        (multi["strategy_3_id"], multi["strategy_3_pct"]),
+        (multi["strategy_4_id"], multi["strategy_4_pct"]),
+    ]
+
+    monthly_deposit = multi["monthly_deposit"]
+    initial_investment = multi["initial_investment"]
+    buy_fee = multi["buy_fee"]
+    sell_fee = multi["sell_fee"]
+    deposit_fee = multi["deposit_fee"]
+    withdrawal_fee = multi["withdrawal_fee"]
+    diversification = multi["diversification"]
+
+    # sector filters (clean handling)
+    preferred_sectors = multi["preferred_sectors"]
+    excluded_sectors = multi["excluded_sectors"]
+
+    # parse excluded sectors
+    if excluded_sectors:
+        excluded_sectors = [s.strip() for s in excluded_sectors.split(",")]
+    else:
+        excluded_sectors = []
+
+    # parse preferred sectors 
+    if preferred_sectors:
+        preferred_sectors = [s.strip() for s in preferred_sectors.split(",")]
+    else:
+        preferred_sectors = []
+
+    # ======================================================
+    # A.2 AVAILABLE CASH
+    # ======================================================
+
+    total_cash = st.session_state.get("current_available_cash")
+
+    if total_cash is None:
+        total_cash = con.execute(
+            "SELECT available_cash FROM portfolios WHERE portfolio_id = ?",
+            [portfolio_id]
+        ).fetchone()[0]
+        
+        
+    # ======================================================
+    # A.3 META DATA
+    # ======================================================
+        
+        
+    meta = {
+            "monthly_deposit": monthly_deposit,
+            "initial_investment": initial_investment,
+            "buy_fee": buy_fee,
+            "sell_fee": sell_fee,
+            "deposit_fee": deposit_fee,
+            "withdrawal_fee": withdrawal_fee,
+            "diversification": diversification,
+            "preferred_sectors": preferred_sectors,
+            "excluded_sectors": excluded_sectors,
+            "total_cash": total_cash
+        }
+
+    # ======================================================
+    # B. BUILD STRATEGY CONTEXT
+    # ======================================================
+
+    strategy_context = {}
+
+    for strategy_id, pct in strategies:
+
+        if strategy_id is None or pct == 0:
+            continue
+
+        # B.1 ALLOCATE CASH
+        cash = total_cash * (pct / 100)
+
+        # B.2 LOAD STRATEGY
+        strategy = con.sql(f"""
+            SELECT *
+            FROM user_preferences_strategy
+            WHERE portfolio_strategy_id = {strategy_id}
+        """).df().iloc[0]
+
+        # B.3 BUILD STRATEGY VECTOR
+        vector = np.array([
+            strategy["momentum_preference"],
+            strategy["value_preference"],
+            strategy["quality_preference"],
+            strategy["growth_preference"],
+            strategy["defensive_preference"],
+            strategy["size_preference"],
+        ])
+        
+        
+        
+        vector_as_dict = { ## for keeping track of order during development
+            "momentum": strategy["momentum_preference"],
+            "value": strategy["value_preference"],
+            "quality": strategy["quality_preference"],
+            "growth": strategy["growth_preference"],
+            "defensive": strategy["defensive_preference"],
+            "size": strategy["size_preference"],
+        }
+
+        # B.4 GET CLOSEST ASSETS
+        closest_assets = get_closest_assets(con, strategy_id, sim_date)
+
+        # sector filter
+        if excluded_sectors:
+            closest_assets = closest_assets[
+                ~closest_assets["sector"].isin(excluded_sectors)
+            ]
+            
+        closest_assets = closest_assets.merge(prices_df,on="asset_id",how="left")
+
+        # feasibility filter (price vs cash)
+        closest_assets = closest_assets[
+            closest_assets["price"] <= cash
+        ].reset_index(drop=True)
+        
+        # B.5 SCORE ASSETS
+        
+        closest_assets = closest_assets.reset_index(drop=True)
+        closest_assets["base_score"] = 1.0 / ((closest_assets.index) / 100 + 1)
+        closest_assets["score"] = closest_assets["base_score"]
+
+
+        if preferred_sectors:
+
+            mask = closest_assets["sector"].isin(preferred_sectors)
+
+            closest_assets.loc[mask, "score"] *= 1.05
+            
+        # B.6 RE ORDER TABLE BASED ON SCORE AN NOT DIST
+        
+        closest_assets = closest_assets.sort_values(
+                by="score",
+                ascending=False
+            ).reset_index(drop=True)
+
+
+        # B.7 STORE CONTEXT
+        strategy_context[strategy_id] = {
+            "cash": cash,
+            "vector": vector,  ### (need to change to vector, now vector_as_dict for development reasons)
+            "closest_assets": closest_assets ,
+        }
+    
+    
+
+    return  {"meta": meta, "strategies": strategy_context}
+
+
+
+
+# for dynamic re scoring of relevancy of assets depending on strategy and holdings
+def re_score_assets(context, strategy_id, current_step_holdings):
+    """
+    Re-ranks candidate assets based on current portfolio state.
+
+    This function implements a stateful re-scoring mechanism used inside a greedy
+    allocation loop. The goal is to dynamically adjust asset attractiveness based on:
+
+    1. Current asset-level exposure (to avoid over-concentration in single assets)
+    2. Current sector-level exposure (to enforce diversification constraints)
+    3. Strategy-level diversification settings
+    4. Preference bias from the initial context (e.g., preferred sectors)
+
+    The function is intended to be called iteratively during portfolio construction,
+    where `current_step_holdings` is updated after each allocation step.
+
+    Args:
+        context (dict):
+            Full strategy execution context containing:
+            - "meta": global portfolio configuration (fees, diversification level, etc.)
+            - "strategies": per-strategy asset universe and precomputed scores
+
+        strategy_id (int):
+            Identifier of the active strategy.
+
+        current_step_holdings (dict):
+            Dictionary mapping:
+                asset_id -> current portfolio weight (0..1 or normalized share)
+
+    Returns:
+        pd.DataFrame:
+            Re-ranked asset universe with updated "score" column.
+            Higher score indicates higher priority for allocation.
+    """
+
+    ctx = context["strategies"][strategy_id]
+    meta = context["meta"]
+
+    df = ctx["closest_assets"].copy().reset_index(drop=True).head(200)
+
+    diversification = meta["diversification"]
+
+    # ======================================================
+    # 1. DIVERSIFICATION POLICY PARAMETERS
+    # ======================================================
+
+    if diversification == 1:
+        max_assets = 10
+        a = 0.09
+        b = 0.06
+
+    elif diversification == 2:
+        max_assets = 25
+        a = 0.1
+        b = 0.08
+
+    elif diversification == 3:
+        max_assets = 40
+        a = 0.14
+        b = 0.10
+
+    else:
+        raise ValueError("Invalid diversification level")
+
+    # ======================================================
+    # 2. PORTFOLIO STATE ESTIMATION (FIXED)
+    # ======================================================
+
+    asset_exposure = {}
+    sector_exposure = {}
+
+    if current_step_holdings:
+
+        asset_to_sector = {
+            row["asset_id"]: row["sector"]
+            for _, row in df.iterrows()
+        }
+
+        for asset_id, shares in current_step_holdings.items():
+
+            if shares <= 0:
+                continue
+
+            asset_exposure[asset_id] = shares
+
+            sector = asset_to_sector.get(asset_id)
+
+            if sector is None:
+                continue
+
+            sector_exposure[sector] = sector_exposure.get(sector, 0) + shares
+
+    # ======================================================
+    # 3. PENALTY FUNCTIONS
+    # ======================================================
+
+    def asset_penalty(w):
+        return 1 / (1 + a * math.log(1 + w))
+
+    def sector_penalty(w):
+        return 1 / (1 + b * math.log(1 + w))
+
+    # ======================================================
+    # 4. BASE SCORING
+    # ======================================================
+
+    df["score"] = df["base_score"]
+
+    preferred_sectors = meta["preferred_sectors"]
+
+    if preferred_sectors:
+        mask = df["sector"].isin(preferred_sectors)
+        df.loc[mask, "score"] *= 1.05
+
+    # ======================================================
+    # 5. DYNAMIC RE-SCORING
+    # ======================================================
+
+    for i, row in df.iterrows():
+
+        asset_id = row["asset_id"]
+        sector = row["sector"]
+
+        w_asset = asset_exposure.get(asset_id, 0)
+        w_sector = sector_exposure.get(sector, 0)
+
+        penalty = asset_penalty(w_asset) * sector_penalty(w_sector)
+
+        df.loc[i, "score"] *= penalty
+        
+        
+    if len(current_step_holdings) >= max_assets:
+
+        held_assets = set(current_step_holdings.keys())
+
+        df = df[df["asset_id"].isin(held_assets)].reset_index(drop=True)
+
+    # ======================================================
+    # 6. FINAL SORTING
+    # ======================================================
+
+    df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+    return df
+
+
+       
+# for actual allocation building
+def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_assets=25):
+    """
+    Greedy portfolio construction engine.
+
+    This function iteratively builds a portfolio by:
+    1. Re-scoring candidate assets based on current holdings state
+    2. Selecting the best affordable asset
+    3. Adding one unit (share) of the selected asset
+    4. Updating remaining cash
+    5. Repeating until constraints are met
+
+    The process is stateful and dynamic:
+    - Each iteration updates holdings
+    - Each update triggers a re-scoring step
+    - The scoring function reflects diversification pressure and exposure penalties
+
+    Final weights are normalized only at the end of the process.
+
+    Args:
+        strategy_id (int):
+            Identifier of the active investment strategy.
+
+        context (dict):
+            Full execution context containing:
+            - meta configuration (diversification, preferences, etc.)
+            - strategy-specific asset universe and metadata
+
+        df (pd.DataFrame):
+            Candidate assets DataFrame. Must include:
+            - asset_id
+            - price
+            - score (precomputed base score)
+
+        cash (float):
+            Total available capital for allocation.
+
+        current_step_holdings (dict):
+            Dictionary mapping:
+                asset_id -> shares
+
+            where:
+                weight: current portfolio weight (0..1, recomputed at end)
+                shares: number of units held
+
+        max_assets (int):
+            Maximum number of distinct assets allowed in the portfolio.
+
+    Returns:
+        dict:
+            Updated holdings in the format:
+                asset_id -> (final_weight, shares)
+
+            where:
+                final_weight is normalized based on total invested capital.
+    """
+    
+
+    if current_step_holdings is None:
+        current_step_holdings = {}
+
+    remaining_cash = cash
+    price_map = dict(zip(df["asset_id"], df["price"]))
+
+    df = df.copy().reset_index(drop=True)
+
+    # initial scoring based on empty or partial state
+    df = re_score_assets(context, strategy_id, current_step_holdings)
+
+    while True:
+
+        df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+        bought = False
+
+        for _, row in df.iterrows():
+
+            asset_id = row["asset_id"]
+            price = row["price"]
+
+            # skip unaffordable assets
+            if price > remaining_cash:
+                continue
+
+            # ==========================
+            # UPDATE HOLDINGS (GREEDY STEP)
+            # ==========================
+
+            if asset_id in current_step_holdings:
+                current_step_holdings[asset_id] += 1
+            else:
+                current_step_holdings[asset_id] = 1
+
+            remaining_cash -= price
+
+            bought = True
+            break
+
+        # ==========================
+        # TERMINATION CONDITIONS
+        # ==========================
+
+        if not bought:
+            break
+
+        if remaining_cash <= df["price"].min():
+            break
+
+        # re-score after state update
+        df = re_score_assets(context, strategy_id, current_step_holdings)
+
+    # ==========================
+    # FINAL NORMALIZATION STEP
+    # ==========================
+
+    total_invested = cash - remaining_cash
+
+    for asset_id, shares in current_step_holdings.items():
+
+        price = price_map.get(asset_id)
+
+        current_step_holdings[asset_id] = (
+            (price * shares) / total_invested,
+            shares
+        )
+        
+    buy_fee = context["meta"]["buy_fee"]
+    min_position_value = buy_fee * 50
+    
+    # ==========================
+    # MIN POSITION VALUE FILTER
+    # ==========================
+    def min_position_filter(current_step_holdings):
+
+        while True:
+
+            # ==========================
+            # CALCULATE CURRENT VALUES
+            # ==========================
+
+            asset_values = {
+                asset_id: price_map[asset_id] * shares
+                for asset_id, (_, shares) in current_step_holdings.items()
+            }
+
+            violating_assets = [
+                aid for aid, val in asset_values.items()
+                if val < min_position_value
+            ]
+
+            if not violating_assets:
+                break
+
+            # ==========================
+            # COMPUTE FREED VALUE (BEFORE DELETION)
+            # ==========================
+
+            freed_value = sum(asset_values[aid] for aid in violating_assets)
+
+            # ==========================
+            # REMOVE VIOLATIONS
+            # ==========================
+
+            for aid in violating_assets:
+                del current_step_holdings[aid]
+
+            if not current_step_holdings:
+                break
+
+            # ==========================
+            # FIND WEAKEST REMAINING ASSET
+            # ==========================
+
+            asset_values = {
+                asset_id: price_map[asset_id] * shares
+                for asset_id, (_, shares) in current_step_holdings.items()
+            }
+
+            weakest_asset = min(asset_values, key=asset_values.get)
+
+            # ==========================
+            # REDISTRIBUTE FREED VALUE
+            # ==========================
+
+            price = price_map[weakest_asset]
+
+            extra_shares = int(freed_value // price)
+
+            if extra_shares > 0:
+                weight, shares = current_step_holdings[weakest_asset]
+
+                current_step_holdings[weakest_asset] = (
+                    weight,
+                    shares + extra_shares
+                )
+
+        return current_step_holdings
+        
+    
+    return min_position_filter(current_step_holdings)        
+            
+

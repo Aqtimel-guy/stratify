@@ -106,6 +106,7 @@ def delete_portfolio(portfolio_id):
         
         # Delete user preference strategy profiles associated with this portfolio
         con.execute("DELETE FROM user_preferences_strategy WHERE portfolio_id = ?", [portfolio_id])
+        con.execute("DELETE FROM multi_strategy WHERE portfolio_id = ?", [portfolio_id])
         
         # Delete current open positions/holdings
         con.execute("DELETE FROM holdings WHERE portfolio_id = ?", [portfolio_id])
@@ -113,6 +114,8 @@ def delete_portfolio(portfolio_id):
         # Delete all types of ledger transactions (Cash flow and Assets trades)
         con.execute("DELETE FROM cash_transactions WHERE portfolio_id = ?", [portfolio_id])
         con.execute("DELETE FROM assets_transactions WHERE portfolio_id = ?", [portfolio_id])
+        
+        
         
         # 3. Safely delete the main tracking row from parent portfolios table
         con.execute("DELETE FROM portfolios WHERE portfolio_id = ?", [portfolio_id])
