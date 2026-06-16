@@ -629,6 +629,7 @@ def get_closest_assets(con, strategy_id: int, sim_date: str):
     return merged_df.sort_values("distance").reset_index(drop=True)
 
 
+
 # for getting compleate multi-strategy context
 def build_strategy_context(con, portfolio_id: int, sim_date: str):
     """
@@ -768,16 +769,6 @@ def build_strategy_context(con, portfolio_id: int, sim_date: str):
             strategy["size_preference"],
         ])
         
-        
-        
-        vector_as_dict = { ## for keeping track of order during development
-            "momentum": strategy["momentum_preference"],
-            "value": strategy["value_preference"],
-            "quality": strategy["quality_preference"],
-            "growth": strategy["growth_preference"],
-            "defensive": strategy["defensive_preference"],
-            "size": strategy["size_preference"],
-        }
 
         # B.4 GET CLOSEST ASSETS
         closest_assets = get_closest_assets(con, strategy_id, sim_date)
@@ -806,7 +797,7 @@ def build_strategy_context(con, portfolio_id: int, sim_date: str):
 
             mask = closest_assets["sector"].isin(preferred_sectors)
 
-            closest_assets.loc[mask, "score"] *= 1.05
+            closest_assets.loc[mask, "score"] *= 1.1
             
         # B.6 RE ORDER TABLE BASED ON SCORE AN NOT DIST
         
@@ -819,7 +810,7 @@ def build_strategy_context(con, portfolio_id: int, sim_date: str):
         # B.7 STORE CONTEXT
         strategy_context[strategy_id] = {
             "cash": cash,
-            "vector": vector,  ### (need to change to vector, now vector_as_dict for development reasons)
+            "vector": vector, 
             "closest_assets": closest_assets ,
         }
     
@@ -865,62 +856,94 @@ def re_score_assets(context, strategy_id, current_step_holdings):
             Higher score indicates higher priority for allocation.
     """
 
+    # getting data
     ctx = context["strategies"][strategy_id]
     meta = context["meta"]
+    
+    # looking ony at what we hold + 200 top assets
+    
+    df = ctx["closest_assets"].copy().reset_index(drop=True)
+    held_assets = set(current_step_holdings.keys())
+    top_200 = df.head(200)
 
-    df = ctx["closest_assets"].copy().reset_index(drop=True).head(200)
+    extra_held = df[
+        (df["asset_id"].isin(held_assets))
+        & (~df["asset_id"].isin(top_200["asset_id"]))
+    ]
 
-    diversification = meta["diversification"]
+    df = pd.concat([top_200, extra_held], ignore_index=True)
+    
+    # creating a price map for calculations
+    price_map = dict(zip(df["asset_id"], df["price"]))
+
 
     # ======================================================
     # 1. DIVERSIFICATION POLICY PARAMETERS
     # ======================================================
+    
+    diversification = meta["diversification"]
 
     if diversification == 1:
-        max_assets = 10
+        max_assets = 8
         a = 0.09
         b = 0.06
 
     elif diversification == 2:
-        max_assets = 25
-        a = 0.1
+        max_assets = 20
+        a = 0.12
         b = 0.08
 
     elif diversification == 3:
-        max_assets = 40
-        a = 0.14
-        b = 0.10
+        max_assets = 30
+        a = 0.16
+        b = 0.13
 
     else:
         raise ValueError("Invalid diversification level")
 
     # ======================================================
-    # 2. PORTFOLIO STATE ESTIMATION (FIXED)
+    # 2. PORTFOLIO STATE  
     # ======================================================
 
-    asset_exposure = {}
-    sector_exposure = {}
+    asset_value = {}
 
-    if current_step_holdings:
+    for asset_id, shares in current_step_holdings.items():
 
-        asset_to_sector = {
-            row["asset_id"]: row["sector"]
-            for _, row in df.iterrows()
-        }
+        if shares <= 0:
+            continue
 
-        for asset_id, shares in current_step_holdings.items():
+        price = price_map.get(asset_id)
 
-            if shares <= 0:
-                continue
+        if price is None:
+            logging.warning(f"missing price for asset_id: {asset_id}")
+            continue
 
-            asset_exposure[asset_id] = shares
+        asset_value[asset_id] = shares * price
 
-            sector = asset_to_sector.get(asset_id)
+    total_value = sum(asset_value.values()) or 1
 
-            if sector is None:
-                continue
+    asset_weight = {
+        aid: val / total_value
+        for aid, val in asset_value.items()
+    }
 
-            sector_exposure[sector] = sector_exposure.get(sector, 0) + shares
+    sector_value = {}
+
+    for asset_id, value in asset_value.items():
+
+        sector = df.loc[df["asset_id"] == asset_id, "sector"]
+
+        if len(sector) == 0:
+            continue
+
+        sector = sector.iloc[0]
+
+        sector_value[sector] = sector_value.get(sector, 0) + value
+
+    sector_weight = {
+        s: v / total_value
+        for s, v in sector_value.items()
+    }
 
     # ======================================================
     # 3. PENALTY FUNCTIONS
@@ -953,8 +976,8 @@ def re_score_assets(context, strategy_id, current_step_holdings):
         asset_id = row["asset_id"]
         sector = row["sector"]
 
-        w_asset = asset_exposure.get(asset_id, 0)
-        w_sector = sector_exposure.get(sector, 0)
+        w_asset = asset_weight.get(asset_id, 0)
+        w_sector = sector_weight.get(sector, 0)
 
         penalty = asset_penalty(w_asset) * sector_penalty(w_sector)
 
@@ -1039,38 +1062,114 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         current_step_holdings = {}
 
     remaining_cash = cash
-    price_map = dict(zip(df["asset_id"], df["price"]))
 
     df = df.copy().reset_index(drop=True)
+    
+    diversification = context["meta"]["diversification"]
+
+    if diversification == 1:
+        max_assets = 8
+        max_asset_weight = 0.25
+        max_sector_weight = 0.5
+
+    elif diversification == 2:
+        max_assets = 20
+        max_asset_weight = 0.15
+        max_sector_weight = 0.35
+
+    elif diversification == 3:
+        max_assets = 30
+        max_asset_weight = 0.08
+        max_sector_weight = 0.20
+
+    else:
+        raise ValueError("Invalid diversification level")
 
     # initial scoring based on empty or partial state
     df = re_score_assets(context, strategy_id, current_step_holdings)
+    price_map = dict(zip(df["asset_id"], df["price"]))
 
     while True:
 
-        df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+        affordable_df = df[df["price"] <= remaining_cash].copy()
+
+        if affordable_df.empty:
+            break
 
         bought = False
+        
+        active_assets = [
+                aid for aid, shares in current_step_holdings.items()
+                if shares > 0]
 
-        for _, row in df.iterrows():
+        for _, row in affordable_df.iterrows():
 
             asset_id = row["asset_id"]
             price = row["price"]
+            sector = row["sector"]
+
+
+            ## applaying hard caps
+            invested_so_far = cash - remaining_cash
+
+            asset_current_value = current_step_holdings.get(asset_id, 0) * price
+
+            sector_current_value = 0
+
+            for held_asset_id, held_shares in current_step_holdings.items():
+                held_price = price_map.get(held_asset_id)
+
+                if held_price is None:
+                    continue
+
+                held_row = df[df["asset_id"] == held_asset_id]
+
+                if held_row.empty:
+                    continue
+
+                held_sector = held_row.iloc[0]["sector"]
+
+                if held_sector == sector:
+                    sector_current_value += held_price * held_shares
+            
+
+            if asset_id not in current_step_holdings and len(active_assets) >= max_assets:
+                continue
 
             # skip unaffordable assets
             if price > remaining_cash:
                 continue
 
             # ==========================
-            # UPDATE HOLDINGS (GREEDY STEP)
+            # UPDATE HOLDINGS (GREEDY STEP) (Improved for complexity reasons, every iteration we buy minimum 1% worth of our total cash)
             # ==========================
 
-            if asset_id in current_step_holdings:
-                current_step_holdings[asset_id] += 1
-            else:
-                current_step_holdings[asset_id] = 1
+            target_buy_value = cash * 0.01
 
-            remaining_cash -= price
+            shares_to_buy = max(1, int(target_buy_value // price))
+            shares_to_buy = min(shares_to_buy, int(remaining_cash // price))
+
+            max_asset_value_allowed = cash * max_asset_weight
+            max_sector_value_allowed = cash * max_sector_weight
+
+            asset_room_value = max_asset_value_allowed - asset_current_value
+            sector_room_value = max_sector_value_allowed - sector_current_value
+
+            allowed_buy_value = min(asset_room_value, sector_room_value, remaining_cash)
+
+            allowed_shares = int(allowed_buy_value // price)
+
+            shares_to_buy = min(shares_to_buy, allowed_shares)
+
+            if shares_to_buy <= 0:
+                continue
+
+            spent = shares_to_buy * price
+
+            current_step_holdings[asset_id] = current_step_holdings.get(asset_id, 0) + shares_to_buy
+
+            remaining_cash -= spent
 
             bought = True
             break
@@ -1087,40 +1186,19 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
 
         # re-score after state update
         df = re_score_assets(context, strategy_id, current_step_holdings)
-
-    # ==========================
-    # FINAL NORMALIZATION STEP
-    # ==========================
-
-    total_invested = cash - remaining_cash
-
-    for asset_id, shares in current_step_holdings.items():
-
-        price = price_map.get(asset_id)
-
-        current_step_holdings[asset_id] = (
-            (price * shares) / total_invested,
-            shares
-        )
         
-    buy_fee = context["meta"]["buy_fee"]
-    sell_fee = context["meta"]["sell_fee"]
-    min_position_value = 50 * max(buy_fee , sell_fee)
-    
+        
     # ==========================
     # MIN POSITION VALUE FILTER
     # ==========================
+    
     def min_position_filter(current_step_holdings):
 
         while True:
 
-            # ==========================
-            # CALCULATE CURRENT VALUES
-            # ==========================
-
             asset_values = {
                 asset_id: price_map[asset_id] * shares
-                for asset_id, (_, shares) in current_step_holdings.items()
+                for asset_id, shares in current_step_holdings.items()
             }
 
             violating_assets = [
@@ -1131,15 +1209,7 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
             if not violating_assets:
                 break
 
-            # ==========================
-            # COMPUTE FREED VALUE (BEFORE DELETION)
-            # ==========================
-
             freed_value = sum(asset_values[aid] for aid in violating_assets)
-
-            # ==========================
-            # REMOVE VIOLATIONS
-            # ==========================
 
             for aid in violating_assets:
                 del current_step_holdings[aid]
@@ -1147,36 +1217,109 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
             if not current_step_holdings:
                 break
 
-            # ==========================
-            # FIND WEAKEST REMAINING ASSET
-            # ==========================
+            # Try to redistribute freed value without breaking caps
+            remaining_freed_value = freed_value
 
-            asset_values = {
-                asset_id: price_map[asset_id] * shares
-                for asset_id, (_, shares) in current_step_holdings.items()
-            }
+            while remaining_freed_value > 0:
 
-            weakest_asset = min(asset_values, key=asset_values.get)
+                asset_values = {
+                    asset_id: price_map[asset_id] * shares
+                    for asset_id, shares in current_step_holdings.items()
+                }
 
-            # ==========================
-            # REDISTRIBUTE FREED VALUE
-            # ==========================
+                # choose smallest current position that still has room
+                candidates = []
 
-            price = price_map[weakest_asset]
+                for aid, current_value in asset_values.items():
 
-            extra_shares = int(freed_value // price)
+                    price = price_map[aid]
+                    sector = df.loc[df["asset_id"] == aid, "sector"]
 
-            if extra_shares > 0:
-                weight, shares = current_step_holdings[weakest_asset]
+                    if sector.empty:
+                        continue
 
-                current_step_holdings[weakest_asset] = (
-                    weight,
-                    shares + extra_shares
+                    sector = sector.iloc[0]
+
+                    sector_value = 0
+
+                    for held_aid, held_shares in current_step_holdings.items():
+                        held_price = price_map[held_aid]
+                        held_sector_row = df.loc[df["asset_id"] == held_aid, "sector"]
+
+                        if held_sector_row.empty:
+                            continue
+
+                        held_sector = held_sector_row.iloc[0]
+
+                        if held_sector == sector:
+                            sector_value += held_price * held_shares
+
+                    max_asset_value_allowed = cash * max_asset_weight
+                    max_sector_value_allowed = cash * max_sector_weight
+
+                    asset_room = max_asset_value_allowed - current_value
+                    sector_room = max_sector_value_allowed - sector_value
+
+                    allowed_value = min(
+                        asset_room,
+                        sector_room,
+                        remaining_freed_value
+                    )
+
+                    allowed_shares = int(allowed_value // price)
+
+                    if allowed_shares > 0:
+                        candidates.append({
+                            "asset_id": aid,
+                            "current_value": current_value,
+                            "allowed_shares": allowed_shares,
+                            "price": price
+                        })
+
+                if not candidates:
+                    break
+
+                weakest_candidate = min(
+                    candidates,
+                    key=lambda x: x["current_value"]
                 )
+
+                aid = weakest_candidate["asset_id"]
+                shares_to_add = weakest_candidate["allowed_shares"]
+                price = weakest_candidate["price"]
+
+                current_step_holdings[aid] += shares_to_add
+                remaining_freed_value -= shares_to_add * price
 
         return current_step_holdings
         
+        
+    buy_fee = context["meta"]["buy_fee"]
+    sell_fee = context["meta"]["sell_fee"]
+    min_position_value = 50 * max(buy_fee , sell_fee)
     
-    return min_position_filter(current_step_holdings)        
+    current_step_holdings = min_position_filter(current_step_holdings)
+    # ==========================
+    # FINAL NORMALIZATION STEP
+    # ==========================
+
+    total_invested = sum(
+        price_map[asset_id] * shares
+        for asset_id, shares in current_step_holdings.items()
+    )
+
+    if total_invested <= 0:
+        return {}
+
+    for asset_id, shares in list(current_step_holdings.items()):
+
+        price = price_map[asset_id]
+
+        current_step_holdings[asset_id] = (
+            (price * shares) / total_invested,
+            shares
+        )
+
+    return current_step_holdings    
             
 

@@ -80,6 +80,10 @@ def main():
         
     elif st.session_state.page == "portfolio_performance_analysis":
         show_portfolio_performance_analysis()
+        
+    elif st.session_state.page == "strategy_managment":
+        show_strategy_manager()
+        
     elif st.session_state.page == "test_page":
         test_page()
         

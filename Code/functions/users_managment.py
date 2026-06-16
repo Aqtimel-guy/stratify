@@ -152,3 +152,16 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
     con.close()
     return True
     
+# for fixing allocation bug in strategy (not used yet)
+def normalize_allocations(strategy_names, p_id):
+    keys = [f"alloc_slider_{p_id}_{name}" for name in strategy_names]
+
+    values = [st.session_state[k] for k in keys]
+    total = sum(values)
+
+    if total == 0:
+        return
+
+    # normalize to 100%
+    for k in keys:
+        st.session_state[k] = round((st.session_state[k] / total) * 100, 1)

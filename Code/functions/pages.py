@@ -4,7 +4,7 @@ from .users_managment import *
 from .portfolio_managment import *
 from .UI_components import *
 from .trading_logic import *
-
+import plotly.express as px
 
 
 def go_to(page_name):
@@ -865,7 +865,14 @@ def show_portfolios_page():
                             st.session_state.current_portfolio_name = p_name
                             st.session_state.current_sim_date = row["current_sim_date"]
                             st.session_state.current_portfolio_starting_at = row["starting_at"]
-                            go_to("dashboard_home")
+                            
+                            
+                            if float(p_value) == 0.0:
+                                st.session_state.active_tab = 0 # making sure they statrt with the questioaner
+
+                                go_to("strategy_builder")
+                            else:
+                                go_to("dashboard_home")
                             
                     with btn_col_right:
                         # FIX 1: Explicit key bound to p_id forces delete popover to auto-close on deletion
@@ -1019,184 +1026,288 @@ def show_dashboard_home():
     # ==========================================
     dashboard_sidebar() # Render navigation structure panel
 
-    st.markdown(
-    """
-    <style>
+    st.markdown("""
+<style>
 
-    /* =========================================
-       COMPACT METRIC CARDS
-    ========================================= */
+/* ==================================================
+   GLOBAL DASHBOARD LOOK
+================================================== */
 
-    div[data-testid="stMetric"] {
-        background: #FFFFFF !important;
-        border: 1px solid #E2E8F0 !important;
-        border-radius: 10px !important;
-        padding: 8px 14px !important;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02) !important;
-    }
+.main .block-container {
+    padding-top: 1.2rem;
+}
 
-    div[data-testid="stMetric"] label [data-testid="stMetricLabel"] {
-        font-size: 0.8rem !important;
-        color: #64748B !important;
-        font-weight: 500 !important;
-    }
+/* ==================================================
+   METRICS
+================================================== */
 
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        font-size: 1.4rem !important;
-        font-weight: 700 !important;
-        letter-spacing: -0.5px !important;
-        line-height: 1.2 !important;
-    }
+div[data-testid="stMetric"] {
+    background: white !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 14px !important;
+    padding: 12px 16px !important;
+    box-shadow: 0 4px 12px rgba(15,23,42,0.04) !important;
+}
 
-    div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
-        font-size: 0.75rem !important;
-    }
+div[data-testid="stMetricValue"] {
+    font-weight: 700 !important;
+}
 
+/* ==================================================
+   DASHBOARD CARDS
+================================================== */
 
-    /* =========================================
-       HEADER / TIMELINE FIX
-    ========================================= */
+.dashboard-card {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
 
-    .timeline-wrapper {
-        width: 200%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-    }
+/* ==================================================
+   PORTFOLIO TITLE
+================================================== */
 
-    .timeline-card {
-        background: #E0F2FE;
-        border: 1px solid #BAE6FD;
-        border-radius: 10px;
+.dashboard-title {
+    font-size: 2rem;
+    font-weight: 800;
+    color: #0F172A;
+    margin: 0;
+    padding-top: 8px;
+}
 
-        padding: 120px 160px;
+/* ==================================================
+   TIMELINE CARD
+================================================== */
 
-        display: inline-flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+.timeline-card {
+    background: linear-gradient(
+        135deg,
+        #EFF6FF 0%,
+        #F8FAFC 100%
+    );
 
-        min-width: 170px;
-        max-width: 320px;
+    border: 1px solid #DBEAFE;
+    border-radius: 18px;
 
-        box-sizing: border-box;
-    }
+    padding: 20px;
 
-    .timeline-title {
-        font-size: 11px;
-        color: #0369A1;
-        font-weight: 700;
+    text-align: center;
 
-        text-transform: uppercase;
-        letter-spacing: 0.6px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
 
-        text-align: center;
-        line-height: 1;
-    }
+.timeline-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748B;
+}
 
-    .timeline-date {
-        font-size: 15px;
-        color: #0C4A6E;
-        font-weight: 700;
+.timeline-date {
+    margin-top: 8px;
+    font-size: 22px;
+    font-weight: 700;
+    color: #0F172A;
+}
 
-        margin-top: 6px;
+/* ==================================================
+   TIME MACHINE PANEL
+================================================== */
 
-        text-align: center;
-        direction: ltr;
-        line-height: 1.2;
-    }
+.time-machine-card {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
 
+.time-machine-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748B;
+    margin-bottom: 12px;
+}
 
-    /* =========================================
-       BUTTONS & POPOVERS
-    ========================================= */
+/* ==================================================
+   BUTTONS
+================================================== */
 
-    div[data-testid="stForm"] button[kind="primaryFormSubmit"] {
-        transition: all 0.2s ease-in-out !important;
-        border-radius: 8px !important;
-        font-weight: 600 !important;
-        padding: 0.35rem 0.75rem !important;
-        font-size: 13px !important;
-    }
+.stButton > button {
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    transition: all .15s ease !important;
+}
 
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button {
-        background-color: #22C55E !important;
-        color: white !important;
-        border-color: #22C55E !important;
-    }
+.stButton > button:hover {
+    transform: translateY(-1px);
+}
 
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button:hover {
-        background-color: #16A34A !important;
-        border-color: #16A34A !important;
-    }
+/* ==================================================
+   DATE INPUT
+================================================== */
 
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button {
-        background-color: #EF4444 !important;
-        color: white !important;
-        border-color: #EF4444 !important;
-    }
+div[data-baseweb="input"] {
+    border-radius: 10px !important;
+}
 
-    div[data-testid="stPopover"] 
-    div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button:hover {
-        background-color: #DC2626 !important;
-        border-color: #DC2626 !important;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
+</style>
+""", unsafe_allow_html=True)
+    
+    
+    
     # Dynamic Dashboard Header Layout
-    header_col1, header_col2 , header_col3 = st.columns([2, 3 , 1.6])
+    header_col1, header_col2, header_col3 = st.columns([2, 2, 2])
+    
     with header_col1:
-        st.markdown(f"<h1 style='margin:0; padding:0; color:#1E293B;'>📊 {p_name}</h1>", unsafe_allow_html=True)
-    with header_col2:
-       st.markdown(
-        f"""
-        <div style="display: flex; justify-content: center; align-items: center; width: 80%;">
-            <div style='
-                background: #E0F2FE; 
-                border: 1px solid #BAE6FD; 
-                border-radius: 8px; 
-                padding: 12px 8px; 
-                text-align: center;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                width: 480px; /* Locked precise gadget width */
-            '>
-                <span style='
-                    font-size: 18px; 
-                    color: #0369A1; 
-                    font-weight: bold; 
-                    display: block; 
-                    text-transform: uppercase; 
-                    letter-spacing: 0.5px;
-                    text-align: center;
-                    width: 100%;
-                '>Engine Timeline</span>
-                <span style='
-                    font-size: 16px; 
-                    color: #0C4A6E; 
-                    font-weight: bold; 
-                    display: block; 
-                    margin-top: 2px;
-                    text-align: center;
-                    direction: ltr;
-                    width: 100%;
-                '>⏳ {st.session_state.current_sim_date_display}</span>
+        st.markdown(
+            f"""
+            <div class="dashboard-card" style="padding:32px 20px;">
+                <div class="dashboard-title">
+                    📊 {p_name}
+                </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+            """,
+            unsafe_allow_html=True
+        )
+   
+   
+    with header_col2:
+        sim_date_display = str(st.session_state.current_sim_date_display)
+
+        html = f"""
+        <div style="
+            background: linear-gradient(135deg,#EFF6FF 0%,#F8FAFC 100%);
+            border:1px solid #DBEAFE;
+            border-radius:12px;
+            padding:18px;
+            text-align:center;
+            box-shadow:0 4px 12px rgba(15,230,42,0.04);
+        ">
+            <div style="
+                font-size:11px;
+                font-weight:700;
+                text-transform:uppercase;
+                letter-spacing:1px;
+                color:#64748B;
+                margin-bottom:6px;
+            ">
+                Engine Timeline
+            </div>
+
+        <div style="
+            background: linear-gradient(135deg,#EFF6FF 0%,#F8FAFC 100%);
+            border:0px solid #DBEAFE;
+            border-radius:0px;
+            padding:12px;
+            text-align:center;
+        ">
+            <div style="
+                font-size:24px;
+                font-weight:800;
+                letter-spacing:2px;
+                color:#64748B;
+                margin-bottom:2px;
+            ">
+                {sim_date_display}
+            </div>
+        """
+
+        st.markdown(html, unsafe_allow_html=True)
+    
+    
+    
+    
     with header_col3:
-            st.write("to be filled later with a task progress to teach the users")
+
+        # =========================
+        # TITLE
+        # =========================
+        st.markdown(
+            """
+            <div style="
+                font-size:11px;
+                color:#64748B;
+                font-weight:700;
+                text-transform:uppercase;
+                letter-spacing:1px;
+                margin-bottom:10px;
+            ">
+                ⏳ Time Machine
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        p_id = st.session_state.get("portfolio_id")
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday_dt = datetime.datetime.combine(yesterday.date(), datetime.time.min)
+        current_dt = st.session_state.get('current_sim_date')
+
+        def safe_jump(new_d):
+            target = min(new_d, yesterday_dt)
+            if handle_time_jump(target, portfolio_id):
+                st.rerun()
+
+        # =========================
+        # QUICK JUMP BUTTONS CARD
+        # =========================
+
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("＋1D", use_container_width=True, key="tm_jump_1d_1"):
+                safe_jump(current_dt + datetime.timedelta(days=1))
+                st.rerun()
+
+        with col2:
+            if st.button("＋1M", use_container_width=True, key="tm_jump_1m_1"):
+                safe_jump(current_dt + datetime.timedelta(days=30))
+                st.rerun()
+
+        with col3:
+            if st.button("＋1Y", use_container_width=True, key="tm_jump_1y_1"):
+                safe_jump(current_dt + datetime.timedelta(days=365))
+                st.rerun()
+
+
+        # =========================
+        # DATE PICKER CARD
+        # =========================
+        min_d = current_dt.date() if hasattr(current_dt, 'date') else current_dt
+
+
+
+        picked_date = st.date_input(
+            "📅 choose a date to jump to",
+            value=None,
+            min_value=min_d,
+            max_value=yesterday.date(),
+            key="sb_date_picker_1",
+            label_visibility="visible"
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # =========================
+        # EXECUTE BUTTON
+        # =========================
+        if picked_date is not None:
+            picked_dt = datetime.datetime.combine(picked_date, datetime.time.min)
+
+            if picked_dt > current_dt:
+                if st.button("🚀 Execute Time Travel", use_container_width=True, key="tm_execute_travel_1"):
+                    if handle_time_jump(picked_dt, p_id):
+                        st.rerun()
+
+
+
 
     st.write("") # Layout spacer
     
@@ -1601,7 +1712,7 @@ def dashboard_sidebar():
         nav_pages = {
             "🏠 Dashboard Home": "dashboard_home",
             "📈 Performance Analysis": "portfolio_performance_analysis",
-            "🛠️ Strategy Builder": "strategy_builder",
+            "🛠️ Strategy Manager": "strategy_managment",
             "🔍 Asset Explorer": "asset_explorer"
         }
         
@@ -1616,6 +1727,8 @@ def dashboard_sidebar():
             
             if st.button(label, use_container_width=True, key=btn_key):
                 st.session_state.page = page_val
+                st.session_state.active_tab = 1 # making sure to skip quesiotn part if they already have a strategy
+
                 st.rerun()
         
         st.write("") 
@@ -1723,7 +1836,7 @@ def show_asset_explorer():
     con = st.session_state.con
     
     # 1. Use Tabs to separate Main Search from Recommendations
-    tab1, tab2 = st.tabs(["🔎 Market Search", "🤖 AI Recommendations"])
+    tab1, tab2 , tab3= st.tabs(["🔎 Market Search", "🤖 AI Recommendations" ,"👾Full Portfolio allocation" ])
     
     
     
@@ -1857,9 +1970,355 @@ def show_asset_explorer():
             st.session_state.last_inspected_ticker = None
             show_asset_analysis_dialog(ticker_to_analyze)
         
-    
+        
+    with tab3:
 
-       
+        st.markdown("## 👾 Full Portfolio Allocation")
+        st.caption("Recommended allocation based on your active strategy mix.")
+
+        portfolio_id = st.session_state.get("current_portfolio_id")
+        sim_date = st.session_state.get("current_sim_date")
+
+        if not portfolio_id or not sim_date:
+            st.warning("Missing portfolio context (portfolio_id / sim_date)")
+            st.stop()
+
+        try:
+            con = st.session_state.con
+
+            strategy_context = build_strategy_context(
+                con=con,
+                portfolio_id=portfolio_id,
+                sim_date=sim_date
+            )
+
+        except Exception as e:
+            st.error(f"Failed to build strategy context: {e}")
+            st.stop()
+
+        meta = strategy_context.get("meta", {})
+        strategies = strategy_context.get("strategies", {})
+
+        if not strategies:
+            st.warning("No active strategies available.")
+            st.stop()
+
+        # ======================================================
+        # PORTFOLIO SUMMARY
+        # ======================================================
+        total_cash = meta.get("total_cash", 0)
+        diversification_value = meta.get("diversification")
+
+        diversification_labels = {
+            1: "Low",
+            2: "Medium",
+            3: "High"
+        }
+
+        summary_cols = st.columns(4)
+
+        with summary_cols[0]:
+            st.metric("Total Cash", f"{total_cash:,.0f}")
+
+        with summary_cols[1]:
+            st.metric("Strategies", len(strategies))
+
+        with summary_cols[2]:
+            st.metric(
+                "Diversification",
+                diversification_labels.get(diversification_value, diversification_value)
+            )
+
+        with summary_cols[3]:
+            st.metric("Buy Fee", meta.get("buy_fee", "-"))
+
+        with st.expander("📦 Portfolio Context", expanded=False):
+            st.write(f"📥 Monthly Deposit: {meta.get('monthly_deposit')}")
+            st.write(f"💸 Fees: buy {meta.get('buy_fee')} | sell {meta.get('sell_fee')}")
+            st.write(f"🏦 Deposit/Withdraw: {meta.get('deposit_fee')} | {meta.get('withdrawal_fee')}")
+            st.write(f"📊 Preferred Sectors: {meta.get('preferred_sectors')}")
+            st.write(f"🚫 Excluded Sectors: {meta.get('excluded_sectors')}")
+
+        st.divider()
+
+        # ======================================================
+        # STRATEGY ITEMS
+        # ======================================================
+        strategy_items = list(strategies.items())
+
+        # ======================================================
+        # LOAD STRATEGY NAMES
+        # ======================================================
+        strategy_ids = [int(strategy_id) for strategy_id, _ in strategy_items]
+
+        placeholders = ",".join(["?"] * len(strategy_ids))
+
+        strategy_names_df = con.execute(f"""
+            SELECT 
+                portfolio_strategy_id,
+                strategy_name
+            FROM user_preferences_strategy
+            WHERE portfolio_strategy_id IN ({placeholders})
+        """, strategy_ids).df()
+
+        strategy_name_map = dict(
+            zip(
+                strategy_names_df["portfolio_strategy_id"],
+                strategy_names_df["strategy_name"]
+            )
+        )
+
+        # ======================================================
+        # CREATE TABS
+        # ======================================================
+        strategy_tabs = st.tabs(
+            ["🌍 Total Portfolio"] +
+            [
+                strategy_name_map.get(int(strategy_id), f"Strategy {strategy_id}")
+                for strategy_id, _ in strategy_items
+            ]
+        )
+
+        all_allocation_rows = []
+
+        # ======================================================
+        # STRATEGY ALLOCATION TABS
+        # ======================================================
+        for strategy_tab, (strategy_id, ctx) in zip(strategy_tabs[1:], strategy_items):
+
+            with strategy_tab:
+
+                strategy_name = strategy_name_map.get(
+                    int(strategy_id),
+                    f"Strategy {strategy_id}"
+                )
+
+                st.markdown(f"### 🎯 {strategy_name}")
+                st.caption(f"Strategy ID: {strategy_id}")
+
+                cash = ctx.get("cash", 0)
+                df = ctx.get("closest_assets")
+
+                if df is None or df.empty:
+                    st.warning("No assets available for this strategy.")
+                    continue
+
+                required_cols = ["asset_id", "ticker", "sector", "price", "distance", "score"]
+                missing_cols = [c for c in required_cols if c not in df.columns]
+
+                if missing_cols:
+                    st.error(f"Missing columns: {missing_cols}")
+                    continue
+
+                st.write(f"💰 Strategy Cash: **{cash:,.2f}**")
+
+                # ======================================================
+                # BUILD ALLOCATION
+                # ======================================================
+                try:
+                    allocation = build_allocation(
+                        strategy_id=strategy_id,
+                        context=strategy_context,
+                        df=df,
+                        cash=cash,
+                        current_step_holdings={}
+                    )
+
+                except Exception as e:
+                    st.error(f"Allocation error: {e}")
+                    continue
+
+                if not allocation:
+                    st.info("No allocation was created.")
+                    continue
+
+                # ======================================================
+                # CONVERT ALLOCATION TO TABLE ROWS
+                # allocation format:
+                # {
+                #     asset_id: (weight, shares)
+                # }
+                # ======================================================
+                rows = []
+
+                for asset_id, allocation_data in allocation.items():
+
+                    asset_match = df[df["asset_id"] == asset_id]
+
+                    if asset_match.empty:
+                        continue
+
+                    asset_row = asset_match.iloc[0]
+
+                    weight, shares = allocation_data
+                    price = asset_row["price"]
+                    value = shares * price
+
+                    rows.append({
+                        "asset_id": asset_id,
+                        "ticker": asset_row["ticker"],
+                        "sector": asset_row["sector"],
+                        "price": price,
+                        "shares": shares,
+                        "value": value,
+                        "weight": weight
+                    })
+
+                if not rows:
+                    st.info("Allocation exists, but no display rows could be created.")
+                    continue
+
+                result_df = pd.DataFrame(rows)
+
+                # Save rows for total portfolio tab
+                all_allocation_rows.extend(rows)
+
+                result_df = result_df.sort_values(
+                    "value",
+                    ascending=False
+                ).reset_index(drop=True)
+
+                invested_value = result_df["value"].sum()
+                leftover_cash = cash - invested_value
+
+                metric_cols = st.columns(3)
+
+                with metric_cols[0]:
+                    st.metric("Invested", f"{invested_value:,.2f}")
+
+                with metric_cols[1]:
+                    st.metric("Leftover Cash", f"{leftover_cash:,.2f}")
+
+                with metric_cols[2]:
+                    st.metric("Assets", len(result_df))
+
+                display_df = result_df.copy()
+
+                display_df["price"] = display_df["price"].round(2)
+                display_df["value"] = display_df["value"].round(2)
+                display_df["weight"] = (display_df["weight"] * 100).round(2)
+
+                display_df = display_df.rename(columns={
+                    "ticker": "Ticker",
+                    "sector": "Sector",
+                    "price": "Price",
+                    "shares": "Shares",
+                    "value": "Value",
+                    "weight": "Weight %"
+                })
+
+                st.dataframe(
+                    display_df[
+                        ["Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                    ],
+                    use_container_width=True,
+                    height=420
+                )
+
+        # ======================================================
+        # TOTAL PORTFOLIO TAB
+        # Must be AFTER the strategy loop
+        # ======================================================
+        with strategy_tabs[0]:
+            col_left , col_right = st.columns(2)
+            
+            with col_left:
+
+                st.markdown("### 🌍 Total Portfolio Allocation")
+                st.caption("Combined recommendation across all active strategies.")
+
+                if not all_allocation_rows:
+                    st.info("No allocation results available.")
+
+                else:
+                    total_df = pd.DataFrame(all_allocation_rows)
+
+                    total_df = (
+                        total_df
+                        .groupby(["asset_id", "ticker", "sector", "price"], as_index=False)
+                        .agg({
+                            "shares": "sum",
+                            "value": "sum"
+                        })
+                    )
+
+                    total_invested = total_df["value"].sum()
+                    leftover_cash = total_cash - total_invested
+
+                    if total_invested > 0:
+                        total_df["weight"] = total_df["value"] / total_invested
+                    else:
+                        total_df["weight"] = 0
+
+                    total_df = total_df.sort_values(
+                        "value",
+                        ascending=False
+                    ).reset_index(drop=True)
+
+                    metric_cols = st.columns(4)
+
+                    with metric_cols[0]:
+                        st.metric("Total Invested", f"{round(total_invested / 1000 , 2)} K")
+
+                    with metric_cols[1]:
+                        st.metric("Leftover Cash", f"{leftover_cash:,.2f}")
+
+                    with metric_cols[2]:
+                        st.metric("Assets", len(total_df))
+
+                    with metric_cols[3]:
+                        st.metric("Total Cash" , f"{round(total_cash / 1000 , 2)} K")
+
+                    display_total_df = total_df.copy()
+
+                    display_total_df["price"] = display_total_df["price"].round(2)
+                    display_total_df["value"] = display_total_df["value"].round(2)
+                    display_total_df["weight"] = (display_total_df["weight"] * 100).round(2)
+
+                    display_total_df = display_total_df.rename(columns={
+                        "ticker": "Ticker",
+                        "sector": "Sector",
+                        "price": "Price",
+                        "shares": "Shares",
+                        "value": "Value",
+                        "weight": "Weight %"
+                    })
+
+                    st.dataframe(
+                        display_total_df[
+                            ["Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                        ],
+                        use_container_width=True,
+                        height=500)
+                    
+            with col_right:
+                    
+                # ======================================================
+                # SECTOR ALLOCATION PIE CHART
+                # ======================================================
+                sector_df = (
+                    total_df
+                    .groupby("sector", as_index=False)
+                    .agg({
+                        "value": "sum"
+                    })
+                )
+
+                sector_df["weight"] = sector_df["value"] / total_invested
+
+                fig = px.pie(
+                    sector_df,
+                    names="sector",
+                    values="value",
+                    title="Sector Allocation"
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True
+                )
+
+
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
     
@@ -1924,7 +2383,44 @@ def show_portfolio_performance_analysis():
     
     
 def show_strategy_builder():
+    with st.sidebar:
+        st.write("first configure your strategy")
+        if st.button("back to portfolios"):
+            st.session_state.page = "portfolios"
+            st.rerun()
 
+    st.title("🛠️ Strategy Builder")
+
+    # ---------------------------------------
+    # Get required state
+    # ---------------------------------------
+    con = st.session_state.get("con")
+    if con == None:
+        st.session_state.con = duckdb.connect(DB_PATH)
+        con = st.session_state.get("con")
+    portfolio_id = st.session_state.get('current_portfolio_id')
+
+    # ---------------------------------------
+    # Validations
+    # ---------------------------------------
+    if con is None:
+        st.error("Database connection is missing.")
+        return
+
+    if portfolio_id is None:
+        st.warning("Please select a portfolio first.")
+        return
+
+    # ---------------------------------------
+    # Render main component
+    # ---------------------------------------
+    strategy_creating_component(con, portfolio_id)
+    
+    
+    
+    
+
+def show_strategy_manager():
     dashboard_sidebar()
     st.title("🛠️ Strategy Builder")
 
@@ -1951,6 +2447,8 @@ def show_strategy_builder():
     strategy_creating_component(con, portfolio_id)
     
     
+ 
+ 
     
     
 def test_page():
@@ -1962,6 +2460,10 @@ def test_page():
         portfolio_id = st.session_state.get("current_portfolio_id")
         sim_date = st.session_state.get("current_sim_date")
 
+        if portfolio_id is None or sim_date is None:
+            st.error("Missing portfolio_id or sim_date")
+            return
+
         strategy_context = build_strategy_context(
             con,
             portfolio_id,
@@ -1969,6 +2471,10 @@ def test_page():
         )
 
         meta = strategy_context["meta"]
+
+        # ======================================================
+        # PORTFOLIO OVERVIEW
+        # ======================================================
 
         st.markdown("## 📦 Portfolio Overview")
 
@@ -1987,73 +2493,103 @@ def test_page():
         # STRATEGIES LOOP
         # ======================================================
 
-        for strategy_id, ctx in strategy_context["strategies"].items():
+        strategies = strategy_context.get("strategies", {})
+
+        if not strategies:
+            st.warning("No active strategies found.")
+            return
+
+        for strategy_id, ctx in strategies.items():
 
             st.markdown(f"## 🎯 Strategy {strategy_id}")
-            st.write(f"💰 Cash: {ctx['cash']:.2f}")
 
-            df = ctx["closest_assets"]
+            strategy_cash = ctx.get("cash", 0)
+            st.write(f"💰 Strategy Cash: {strategy_cash:.2f}")
 
-            st.dataframe(df.head(20)[[
-                "asset_id",
-                "ticker",
-                "sector",
-                "price",
-                "distance",
-                "score",
-                "base_score"
-            ]])
+            df = ctx.get("closest_assets")
+
+            if df is None or df.empty:
+                st.warning("No candidate assets for this strategy.")
+                continue
+
+            # ======================================================
+            # CANDIDATE ASSETS PREVIEW
+            # ======================================================
+
+            st.markdown("### 🔎 Top Candidate Assets")
+
+            preview_cols = [
+                "asset_id", "ticker", "sector", "price", "distance", "score", "base_score"
+            ]
+
+            available_preview_cols = [col for col in preview_cols if col in df.columns]
+
+            st.dataframe(
+                df.head(20)[available_preview_cols],
+                use_container_width=True
+            )
 
             st.markdown("### ⚙️ Diversification Comparison")
 
-            for div_level in [1, 2, 3]:
+            # ======================================================
+            # DIVERSIFICATION COMPARISON (COLUMNS)
+            # ======================================================
+            cols = st.columns(3)
 
-                st.markdown(f"#### 📊 Diversification {div_level}")
+            for i, div_level in enumerate([1, 2, 3]):
+                with cols[i]:
+                    st.markdown(f"#### 📊 Diversification {div_level}")
 
-                context_copy = {
-                    "meta": {
-                        **strategy_context["meta"],
-                        "diversification": div_level
-                    },
-                    "strategies": strategy_context["strategies"]
-                }
+                    context_copy = {
+                        "meta": {
+                            **strategy_context["meta"],
+                            "diversification": div_level
+                        },
+                        "strategies": strategy_context["strategies"]
+                    }
 
-                holdings = build_allocation(
-                    strategy_id=strategy_id,
-                    context=context_copy,
-                    df=df,
-                    cash=ctx["cash"],
-                    current_step_holdings=None,
-                    max_assets=25
-                )
+                    holdings = build_allocation(
+                        strategy_id=strategy_id,
+                        context=context_copy,
+                        df=df,
+                        cash=strategy_cash,
+                        current_step_holdings=None,
+                        max_assets=25
+                    )
 
-                if not holdings:
-                    st.warning("No holdings")
-                    continue
-
-                result_rows = []
-
-                for asset_id, (weight, shares) in holdings.items():
-
-                    asset_row = df[df["asset_id"] == asset_id]
-                    if asset_row.empty:
+                    if not holdings:
+                        st.warning("No holdings generated.")
                         continue
 
-                    asset_row = asset_row.iloc[0]
+                    assets_df = context_copy["strategies"][strategy_id]["closest_assets"]
+                    result_rows = []
 
-                    result_rows.append({
-                        "asset_id": asset_id,
-                        "ticker": asset_row["ticker"],
-                        "sector": asset_row["sector"],
-                        "price": asset_row["price"],
-                        "weight": weight,
-                        "shares": shares,
-                        "value": shares * asset_row["price"]
-                    })
+                    for asset_id, holding_data in holdings.items():
+                        if not isinstance(holding_data, tuple) or len(holding_data) != 2:
+                            continue
 
-                result_df = pd.DataFrame(result_rows)
+                        weight, shares = holding_data
+                        asset_row = assets_df[assets_df["asset_id"] == asset_id]
+                        if asset_row.empty:
+                            continue
 
-                st.dataframe(result_df, use_container_width=True)
+                        asset_row = asset_row.iloc[0]
+                        price = asset_row["price"]
+                        value = shares * price
 
-                st.write("💼 Total invested:", result_df["value"].sum())
-                st.write("📊 Assets:", len(result_df))
+                        result_rows.append({
+                            "ticker": asset_row.get("ticker", ""),
+                            "value": value,
+                            "weight_pct": weight * 100
+                        })
+
+                    if not result_rows:
+                        continue
+
+                    result_df = pd.DataFrame(result_rows).sort_values(by="value", ascending=False)
+
+                    st.dataframe(result_df, use_container_width=True)
+                    st.write(f"💼 Total: {result_df['value'].sum():.2f}")
+                    st.write(f"📊 Assets: {len(result_df)}")
+            
+            st.markdown("---")

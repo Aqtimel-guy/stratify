@@ -1,13 +1,14 @@
 import streamlit as st
 import duckdb
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta 
 import plotly.graph_objects as go
 from .trading_logic import execute_asset_trade , execute_cash_transaction, get_closest_assets
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
 from Code.strategy_builder.user_prefrence import *
 from Code.strategy_builder.save_final_strategy import *
+
 
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
@@ -1222,6 +1223,23 @@ def strategy_creating_component(con, portfolio_id):
         "size",
     ]
 
+
+    # =======================================
+    # Fixing diffrence between building and managing
+    # =======================================
+    
+    page = st.session_state.page
+    builder_mode = True
+    
+    if page == "strategy_managment":
+        builder_mode = False
+    # if managing and no building, skipping tab 0
+    if builder_mode == False:
+        i = 1
+    else:
+        i = 0
+
+
     # =======================================
     # SESSION STATE INITIALIZATION
     # =======================================
@@ -1259,17 +1277,21 @@ def strategy_creating_component(con, portfolio_id):
         st.session_state.show_save_box = False
         
     if "active_tab" not in st.session_state:
-        st.session_state.active_tab = 0
+        st.session_state.active_tab = i
+        
 
     # =======================================
     # TAB CONFIG
     # =======================================
+
+        
     tab_options = [
-        "🧠 Questionnaire",
-        "⚙️ Strategies Settings",
-        "📊 Multi-Strategy Allocation",
-        "🏆 Final Step",
-    ]
+            "🧠 Questionnaire",
+            "⚙️ Strategies Settings",
+            "📊 Multi-Strategy Allocation",
+            "🏆 Final Step"
+        ]
+
 
     # =======================================
     # STATE INIT
@@ -1292,9 +1314,13 @@ def strategy_creating_component(con, portfolio_id):
         st.session_state.active_tab = new_index
         st.rerun()
 
+
+
+    
     # =======================================
     # STEP 1 — QUESTIONNAIRE
     # =======================================
+    
     if st.session_state.active_tab == 0:
 
         st.markdown(
@@ -1423,9 +1449,11 @@ def strategy_creating_component(con, portfolio_id):
                         st.session_state.active_tab = 1
 
                         st.rerun()
+    
     # =======================================
     # STEP 2 — STRATEGY SETTINGS AND SAVING
     # =======================================
+    
     if st.session_state.active_tab == 1:
         
         # Modern global UI styling for main container action buttons
@@ -1762,7 +1790,7 @@ def strategy_creating_component(con, portfolio_id):
     # =======================================
 
     if st.session_state.active_tab == 2:
-
+        
             # =======================================
             # Modern Styling
             # =======================================
@@ -1843,6 +1871,7 @@ def strategy_creating_component(con, portfolio_id):
             u_id = int(st.session_state.get("user_id", 0))
             p_id = int(portfolio_id)
 
+
             saved_strategies = con.execute(
                 """
                 SELECT strategy_name, portfolio_strategy_id
@@ -1888,7 +1917,9 @@ def strategy_creating_component(con, portfolio_id):
                 # Slider Sync Logic
                 # =======================================
                 def sync_sliders(changed_strategy):
+
                     new_val = st.session_state[f"alloc_slider_{p_id}_{changed_strategy}"]
+
                     visible_strategies = [
                         s for s in strategy_names
                         if s not in st.session_state.hidden_strategies
@@ -1899,8 +1930,13 @@ def strategy_creating_component(con, portfolio_id):
                         return
 
                     remaining_pool = 100.0 - new_val
+
                     other_strategies = [name for name in visible_strategies if name != changed_strategy]
-                    current_other_total = sum(st.session_state[f"alloc_slider_{p_id}_{name}"] for name in other_strategies)
+
+                    current_other_total = sum(
+                        st.session_state[f"alloc_slider_{p_id}_{name}"]
+                        for name in other_strategies
+                    )
 
                     if current_other_total > 0:
                         for name in other_strategies:
@@ -1912,6 +1948,8 @@ def strategy_creating_component(con, portfolio_id):
                         for name in other_strategies:
                             st.session_state[f"alloc_slider_{p_id}_{name}"] = round(even_share, 1)
 
+
+                    
                 # =======================================
                 # Layout Setup
                 # =======================================
@@ -2103,6 +2141,7 @@ def strategy_creating_component(con, portfolio_id):
     # =======================================
     # STEP 4 - FINAL PORTFOLIO CONFIG
     # =======================================
+   
     if st.session_state.active_tab == 3:
 
         p_id = int(portfolio_id)
@@ -2443,18 +2482,21 @@ def strategy_creating_component(con, portfolio_id):
                 # 4. Execute save function
                 save_final_strategy(**params)
                 
-                
-                strategy_df = con.execute("select * from multi_strategy where portfolio_id = ? order by multi_strategy_id limit 1 " , [portfolio_id]).df()
-                
-                st.write(strategy_df)
-                
+                execute_cash_transaction(con , p_id , st.session_state.get(f"lump_{p_id}", 0) , 'deposit' , st.session_state.get('current_sim_date') , "Initil investment")
+                                
                 st.success("🎉 Portfolio configured successfully!")
+                
+                st.session_state.page = "dashboard_home"
+                
+                st.rerun()
                 
                 
             except Exception as e:
                 st.error(f"Error saving portfolio: {str(e)}")
         
      
+    
+    
     
 # for recomending assets based on strategy  
     
