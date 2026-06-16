@@ -2,7 +2,6 @@ import duckdb
 import streamlit as st
 import logging
 import time
-from .trading_logic import *
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -185,7 +184,7 @@ def portfolio_value_calculator(portfolio_id , timestamp , con=None):
     
      # connecting to DB and loggin
     if con is None:
-        con = duckdb.connect('C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb')
+        con = st.session_state.con
         should_close = True
     else:
         should_close = False
@@ -251,70 +250,6 @@ def is_action_allowed(wait_time=2):
     
     st.session_state.last_action_time = now
     return True   
-
-# for quickly getting recommendations
-@st.cache_data(show_spinner=False)
-def cached_build_full_allocation(portfolio_id, sim_date, cache_version):
-    con = st.session_state.con
-
-    strategy_context = build_strategy_context(
-        con=con,
-        portfolio_id=portfolio_id,
-        sim_date=sim_date
-    )
-
-    meta = strategy_context.get("meta", {})
-    strategies = strategy_context.get("strategies", {})
-
-    all_rows = []
-    strategy_results = {}
-
-    for strategy_id, ctx in strategies.items():
-        cash = ctx.get("cash", 0)
-        df = ctx.get("closest_assets")
-
-        if df is None or df.empty:
-            continue
-
-        allocation = build_allocation(
-            strategy_id=strategy_id,
-            context=strategy_context,
-            df=df,
-            cash=cash,
-            current_step_holdings={}
-        )
-
-        rows = []
-
-        for asset_id, allocation_data in allocation.items():
-            asset_match = df[df["asset_id"] == asset_id]
-
-            if asset_match.empty:
-                continue
-
-            asset_row = asset_match.iloc[0]
-
-            weight, shares = allocation_data
-            price = asset_row["price"]
-            value = shares * price
-
-            row = {
-                "strategy_id": strategy_id,
-                "asset_id": asset_id,
-                "ticker": asset_row["ticker"],
-                "sector": asset_row["sector"],
-                "price": price,
-                "shares": shares,
-                "value": value,
-                "weight": weight
-            }
-
-            rows.append(row)
-            all_rows.append(row)
-
-        strategy_results[strategy_id] = rows
-
-    return meta, strategies, strategy_results, all_rows
 
 
 

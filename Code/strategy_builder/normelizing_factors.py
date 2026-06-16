@@ -317,11 +317,12 @@ def update_factors_percentile():
                 SELECT * FROM temp_percentile
             """)
 
-            print(f"\nCross-sectional percentile update complete. Rows: {len(final_insert_df)}")
+            logger.log(f"\nCross-sectional percentile update complete. Rows: {len(final_insert_df)}")
 
         except Exception as e:
             logger.error(f"Percentile pipeline failed: {e}")
             raise
+        
         
 def update_asset_factors_normelized_final(w1=0.7, w2=0.3):
     """

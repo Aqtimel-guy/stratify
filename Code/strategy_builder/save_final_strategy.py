@@ -12,11 +12,6 @@ def save_final_strategy(con, user_id, portfolio_id, strategy1_id, strategy1_pct=
     # 1. Validation: Ensure total allocation is 100%
     total_pct = strategy1_pct + strategy2_pct + strategy3_pct + strategy4_pct
     if not (99.9 <= total_pct <= 100.1):
-        with st.container(border=True):
-            st.write("Go back to Multi-Strategy Allocation tab to confirm your allocation")
-            if st.button("go back to Allocation"):
-                st.session_state.active_tab = 2
-                st.rerun()
             
         raise ValueError(f"Total allocation percentage must be 100%. Current sum: {total_pct}%")
 

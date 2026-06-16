@@ -356,8 +356,8 @@ con.execute("""
         growth_preference DOUBLE DEFAULT 50,
         defensive_preference DOUBLE DEFAULT 50,
         size_preference DOUBLE DEFAULT 50,
-        liquidity_preference DOUBLE DEFAULT 50,
-        diversification_preference DOUBLE DEFAULT 50,
+        liquidity_preference DOUBLE DEFAULT 50, -- not in use, ignore
+        diversification_preference DOUBLE DEFAULT 50, -- not in use, ignore
         FOREIGN KEY (user_id) REFERENCES users(user_id),
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id)
     );

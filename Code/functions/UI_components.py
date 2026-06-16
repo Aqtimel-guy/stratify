@@ -3,7 +3,7 @@ import duckdb
 import pandas as pd
 from datetime import datetime, timedelta 
 import plotly.graph_objects as go
-from .trading_logic import execute_asset_trade , execute_cash_transaction, get_closest_assets
+from .trading_logic import execute_asset_trade , execute_cash_transaction, get_closest_assets , execute_portfolio_buy_orders
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
 from Code.strategy_builder.user_prefrence import *
@@ -2496,7 +2496,7 @@ def strategy_creating_component(con, portfolio_id):
         
      
     
-    
+
     
 # for recomending assets based on strategy  
     
@@ -3068,3 +3068,333 @@ def render_stock_factor_maps(con, ticker: str):
             ),
             use_container_width=True
         )
+        
+        
+# for executing total allocation trade
+def asset_search_for_execution(con):
+    """Searches assets and returns selected ticker."""
+
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("""
+            SELECT ticker, name
+            FROM assets
+            ORDER BY ticker
+        """).df()
+
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    selected_option = st.selectbox(
+        "🔎 Add another stock",
+        options=[""] + st.session_state.all_assets_list,
+        format_func=lambda x: "Type to search..." if x == "" else x,
+        index=0,
+        key="execution_asset_search_box"
+    )
+
+    if not selected_option:
+        return None
+
+    return selected_option.split(" | ")[0]
+
+
+@st.dialog("Review Portfolio Execution", width="large")
+def open_execution_review_dialog(con, total_df, total_cash, buy_fee):
+    """
+    Lets the user review, edit, add, remove, and confirm portfolio execution orders.
+
+    The recommendation engine is not rerun here.
+    This dialog only edits the final execution list before real trades are submitted.
+    """
+
+    sim_date = st.session_state.get("current_sim_date")
+
+    if sim_date is None:
+        st.error("Missing simulation date.")
+        return
+
+    # ======================================================
+    # EDITOR STATE
+    # ======================================================
+    if "execution_editor_version" not in st.session_state:
+        st.session_state.execution_editor_version = 0
+
+    # ======================================================
+    # INIT CUSTOM ADDED ASSETS
+    # ======================================================
+    if "execution_custom_rows" not in st.session_state:
+        st.session_state.execution_custom_rows = []
+
+    st.markdown("### 🛒 Review execution list")
+    st.caption("You can remove stocks, change share amounts, or add new stocks before executing.")
+
+    # ======================================================
+    # ADD NEW ASSET BEFORE BUILDING THE EDITOR
+    # This must happen before data_editor so the new row appears immediately.
+    # ======================================================
+    selected_ticker = asset_search_for_execution(con)
+
+    col_reset, col_add = st.columns(2)
+
+    with col_reset:
+        if st.button("🔄 Reset to Recommendation", use_container_width=True):
+            st.session_state.execution_custom_rows = []
+            st.session_state.execution_editor_version += 1
+            st.rerun()
+
+    with col_add:
+        if not selected_ticker:
+            st.button(
+                "➕ Add selected stock",
+                disabled=True,
+                use_container_width=True,
+                key="execution_add_disabled"
+            )
+
+        else:
+            if st.button("➕ Add selected stock", use_container_width=True, key="execution_add_selected"):
+                asset_row = con.execute("""
+                    SELECT 
+                        a.asset_id,
+                        a.ticker,
+                        a.name,
+                        a.sector,
+                        p.close AS price
+                    FROM assets a
+                    LEFT JOIN prices p
+                        ON a.asset_id = p.asset_id
+                       AND p.timestamp = (
+                            SELECT MAX(p2.timestamp)
+                            FROM prices p2
+                            WHERE p2.asset_id = a.asset_id
+                              AND p2.timestamp <= ?
+                       )
+                    WHERE a.ticker = ?
+                """, [sim_date, selected_ticker]).df()
+
+                if asset_row.empty or pd.isna(asset_row.iloc[0]["price"]):
+                    st.warning("No price available for this asset.")
+                else:
+                    row = asset_row.iloc[0]
+
+                    new_row = {
+                        "asset_id": int(row["asset_id"]),
+                        "ticker": row["ticker"],
+                        "name": row["name"],
+                        "sector": row["sector"],
+                        "price": float(row["price"]),
+                        "shares": 1,
+                        "value": float(row["price"]),
+                        "weight": 0.0,
+                        "selected": True
+                    }
+
+                    already_added = any(
+                        item["asset_id"] == new_row["asset_id"]
+                        for item in st.session_state.execution_custom_rows
+                    )
+
+                    already_in_recommendation = new_row["asset_id"] in total_df["asset_id"].values
+
+                    if already_added or already_in_recommendation:
+                        st.info(f"{row['ticker']} is already in the execution list.")
+                    else:
+                        st.session_state.execution_custom_rows.append(new_row)
+                        st.session_state.execution_editor_version += 1
+                        st.success(f"{row['ticker']} added to execution list.")
+
+    st.divider()
+
+    # ======================================================
+    # BUILD EDITABLE EXECUTION DATAFRAME
+    # Custom user-added assets appear first.
+    # ======================================================
+    custom_rows_df = pd.DataFrame(st.session_state.execution_custom_rows)
+
+    editable_df = pd.concat(
+        [
+            custom_rows_df,
+            total_df.copy()
+        ],
+        ignore_index=True
+    )
+
+    if editable_df.empty:
+        st.info("No assets available for execution.")
+        return
+
+    editable_df["shares"] = editable_df["shares"].fillna(0).astype(int)
+
+    if "selected" not in editable_df.columns:
+        editable_df["selected"] = True
+    else:
+        editable_df["selected"] = editable_df["selected"].fillna(True).astype(bool)
+
+    editable_df["value"] = editable_df["price"] * editable_df["shares"]
+
+    # ======================================================
+    # GROUP DUPLICATES SAFELY
+    # Preserve manual assets at the top.
+    # ======================================================
+    editable_df["manual_order"] = range(len(editable_df))
+
+    editable_df = (
+        editable_df
+        .groupby(["asset_id", "ticker", "name", "sector", "price"], as_index=False)
+        .agg({
+            "shares": "sum",
+            "value": "sum",
+            "weight": "sum",
+            "selected": "max",
+            "manual_order": "min"
+        })
+    )
+
+    editable_df = (
+        editable_df
+        .sort_values("manual_order")
+        .drop(columns=["manual_order"])
+        .reset_index(drop=True)
+    )
+
+    # ======================================================
+    # USER EDITOR
+    # Only shares and selected are editable.
+    # ======================================================
+    edited_df = st.data_editor(
+        editable_df,
+        use_container_width=True,
+        hide_index=True,
+        key=f"execution_review_editor_{st.session_state.execution_editor_version}",
+        column_config={
+            "shares": st.column_config.NumberColumn(
+                "Shares",
+                min_value=0,
+                step=1
+            ),
+            "selected": st.column_config.CheckboxColumn(
+                "Include"
+            )
+        },
+        disabled=[
+            "asset_id",
+            "ticker",
+            "name",
+            "sector",
+            "price",
+            "value",
+            "weight"
+        ]
+    )
+
+    # ======================================================
+    # FINAL EXECUTION DATA
+    # Recalculate everything after user edits the table.
+    # ======================================================
+    execution_df = edited_df[
+        (edited_df["selected"] == True) &
+        (edited_df["shares"] > 0)
+    ].copy()
+
+    execution_df["shares"] = execution_df["shares"].astype(int)
+    execution_df["value"] = execution_df["price"] * execution_df["shares"]
+
+    total_value = execution_df["value"].sum()
+
+    if total_value > 0:
+        execution_df["weight"] = execution_df["value"] / total_value
+    else:
+        execution_df["weight"] = 0.0
+
+    total_fees = buy_fee * len(execution_df)
+    total_required_cash = total_value + total_fees
+    leftover_cash = total_cash - total_required_cash
+
+    # ======================================================
+    # UPDATED EXECUTION PREVIEW
+    # This table reflects the latest user edits.
+    # ======================================================
+    if not execution_df.empty:
+        preview_df = execution_df.copy()
+
+        preview_df["price"] = preview_df["price"].round(2)
+        preview_df["value"] = preview_df["value"].round(2)
+        preview_df["weight"] = (preview_df["weight"] * 100).round(2)
+
+        preview_df = preview_df.rename(columns={
+            "name": "Company",
+            "ticker": "Ticker",
+            "sector": "Sector",
+            "price": "Price",
+            "shares": "Shares",
+            "value": "Value",
+            "weight": "Weight %"
+        })
+
+        st.markdown("#### Updated execution preview")
+
+        st.dataframe(
+            preview_df[
+                ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.divider()
+
+    # ======================================================
+    # EXECUTION METRICS
+    # ======================================================
+    metric_cols = st.columns(4)
+
+    with metric_cols[0]:
+        st.metric("Positions Value", f"{total_value:,.2f} $")
+
+    with metric_cols[1]:
+        st.metric("Estimated Buy Fees", f"{total_fees:,.2f} $")
+
+    with metric_cols[2]:
+        st.metric("Required Cash", f"{total_required_cash:,.2f} $")
+
+    with metric_cols[3]:
+        st.metric("Leftover Cash", f"{leftover_cash:,.2f} $")
+
+    # ======================================================
+    # VALIDATION
+    # ======================================================
+    if execution_df.empty:
+        st.warning("No assets selected for execution.")
+        return
+
+    if total_required_cash > total_cash:
+        st.error("Not enough cash to execute these trades.")
+        return
+
+    # ======================================================
+    # CONFIRM EXECUTION
+    # ======================================================
+    if st.button("✅ Confirm execution", type="primary", use_container_width=True):
+        success, message = execute_portfolio_buy_orders(
+        con=con,
+        portfolio_id=st.session_state.get("current_portfolio_id"),
+        execution_df=execution_df,
+        timestamp=sim_date,
+        buy_fee=buy_fee
+    )
+
+    if success:
+        st.success(message)
+
+        st.session_state["current_available_cash"] = total_cash - total_required_cash
+        st.session_state["allocation_cache_version"] = (
+            st.session_state.get("allocation_cache_version", 0) + 1
+        )
+
+    else:
+        st.error(message)
+        
+        
+        

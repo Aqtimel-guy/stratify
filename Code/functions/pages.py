@@ -1813,6 +1813,91 @@ def dashboard_sidebar():
             
             
             
+# for quickly getting recommendations at asset explorer page
+@st.cache_data(show_spinner=False)
+def cached_build_full_allocation(portfolio_id, sim_date, cache_version):
+
+    con = st.session_state.con
+
+    strategy_context = build_strategy_context(
+        con=con,
+        portfolio_id=portfolio_id,
+        sim_date=sim_date
+    )
+
+    meta = strategy_context.get("meta", {})
+    strategies = strategy_context.get("strategies", {})
+
+    all_rows = []
+    strategy_results = {}
+
+    for strategy_id, ctx in strategies.items():
+
+        cash = ctx.get("cash", 0)
+        df = ctx.get("closest_assets")
+
+        if df is None or df.empty:
+            strategy_results[strategy_id] = []
+            continue
+
+        allocation = build_allocation(
+            strategy_id=strategy_id,
+            context=strategy_context,
+            df=df,
+            cash=cash,
+            current_step_holdings={}
+        )
+
+        rows = []
+        
+        asset_names_df = con.execute("""
+            SELECT
+                asset_id,
+                name
+            FROM assets
+        """).df()
+
+        asset_name_map = dict(
+            zip(
+                asset_names_df["asset_id"],
+                asset_names_df["name"]
+            )
+        )
+
+        for asset_id, allocation_data in allocation.items():
+
+            asset_match = df[df["asset_id"] == asset_id]
+
+            if asset_match.empty:
+                continue
+
+            asset_row = asset_match.iloc[0]
+
+            weight, shares = allocation_data
+            price = asset_row["price"]
+            value = shares * price
+
+            row = {
+                "strategy_id": strategy_id,
+                "asset_id": asset_id,
+                "ticker": asset_row["ticker"],
+                "name": asset_name_map.get(int(asset_id), asset_row["ticker"]),
+                "sector": asset_row["sector"],
+                "price": price,
+                "shares": shares,
+                "value": value,
+                "weight": weight
+            }
+
+            rows.append(row)
+            all_rows.append(row)
+
+        strategy_results[strategy_id] = rows
+
+    return meta, strategies, strategy_results, all_rows  
+  
+  
+            
 def show_asset_explorer():
     dashboard_sidebar()
     
@@ -1910,9 +1995,6 @@ def show_asset_explorer():
             else:
                 st.caption("No asset selected")
 
-
-
-
     with tab2:
 
         # ======================================================
@@ -1969,8 +2051,7 @@ def show_asset_explorer():
             ticker_to_analyze = st.session_state.last_inspected_ticker
             st.session_state.last_inspected_ticker = None
             show_asset_analysis_dialog(ticker_to_analyze)
-        
-        
+            
     with tab3:
 
         st.markdown("## 👾 Full Portfolio Allocation")
@@ -1986,18 +2067,17 @@ def show_asset_explorer():
         try:
             con = st.session_state.con
 
-            strategy_context = build_strategy_context(
-                con=con,
-                portfolio_id=portfolio_id,
-                sim_date=sim_date
+            cache_version = st.session_state.get("allocation_cache_version", 0)
+
+            meta, strategies, strategy_results, all_allocation_rows = cached_build_full_allocation(
+                portfolio_id,
+                sim_date,
+                cache_version
             )
 
         except Exception as e:
-            st.error(f"Failed to build strategy context: {e}")
+            st.error(f"Failed to build allocation: {e}")
             st.stop()
-
-        meta = strategy_context.get("meta", {})
-        strategies = strategy_context.get("strategies", {})
 
         if not strategies:
             st.warning("No active strategies available.")
@@ -2018,7 +2098,7 @@ def show_asset_explorer():
         summary_cols = st.columns(4)
 
         with summary_cols[0]:
-            st.metric("Total Cash", f"{total_cash:,.0f}")
+            st.metric("Total Cash", f"{total_cash:,.0f} $")
 
         with summary_cols[1]:
             st.metric("Strategies", len(strategies))
@@ -2030,7 +2110,11 @@ def show_asset_explorer():
             )
 
         with summary_cols[3]:
-            st.metric("Buy Fee", meta.get("buy_fee", "-"))
+            col1 , col2 = st.columns(2)
+            with col1:
+                st.metric("Buy Fee", str(meta.get("buy_fee", "-")) + "$")
+            with col2:
+                st.metric("Sell Fee", str(meta.get("sell_fee", "-")) + "$")
 
         with st.expander("📦 Portfolio Context", expanded=False):
             st.write(f"📥 Monthly Deposit: {meta.get('monthly_deposit')}")
@@ -2039,6 +2123,13 @@ def show_asset_explorer():
             st.write(f"📊 Preferred Sectors: {meta.get('preferred_sectors')}")
             st.write(f"🚫 Excluded Sectors: {meta.get('excluded_sectors')}")
 
+        
+        if st.button("🔄 Recalculate recommendation", use_container_width=True):
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+            st.rerun()
+            
         st.divider()
 
         # ======================================================
@@ -2068,6 +2159,7 @@ def show_asset_explorer():
             )
         )
 
+
         # ======================================================
         # CREATE TABS
         # ======================================================
@@ -2079,7 +2171,6 @@ def show_asset_explorer():
             ]
         )
 
-        all_allocation_rows = []
 
         # ======================================================
         # STRATEGY ALLOCATION TABS
@@ -2115,54 +2206,11 @@ def show_asset_explorer():
                 # ======================================================
                 # BUILD ALLOCATION
                 # ======================================================
-                try:
-                    allocation = build_allocation(
-                        strategy_id=strategy_id,
-                        context=strategy_context,
-                        df=df,
-                        cash=cash,
-                        current_step_holdings={}
-                    )
+                rows = strategy_results.get(strategy_id, [])
 
-                except Exception as e:
-                    st.error(f"Allocation error: {e}")
-                    continue
-
-                if not allocation:
+                if not rows:
                     st.info("No allocation was created.")
                     continue
-
-                # ======================================================
-                # CONVERT ALLOCATION TO TABLE ROWS
-                # allocation format:
-                # {
-                #     asset_id: (weight, shares)
-                # }
-                # ======================================================
-                rows = []
-
-                for asset_id, allocation_data in allocation.items():
-
-                    asset_match = df[df["asset_id"] == asset_id]
-
-                    if asset_match.empty:
-                        continue
-
-                    asset_row = asset_match.iloc[0]
-
-                    weight, shares = allocation_data
-                    price = asset_row["price"]
-                    value = shares * price
-
-                    rows.append({
-                        "asset_id": asset_id,
-                        "ticker": asset_row["ticker"],
-                        "sector": asset_row["sector"],
-                        "price": price,
-                        "shares": shares,
-                        "value": value,
-                        "weight": weight
-                    })
 
                 if not rows:
                     st.info("Allocation exists, but no display rows could be created.")
@@ -2170,8 +2218,7 @@ def show_asset_explorer():
 
                 result_df = pd.DataFrame(rows)
 
-                # Save rows for total portfolio tab
-                all_allocation_rows.extend(rows)
+
 
                 result_df = result_df.sort_values(
                     "value",
@@ -2184,7 +2231,7 @@ def show_asset_explorer():
                 metric_cols = st.columns(3)
 
                 with metric_cols[0]:
-                    st.metric("Invested", f"{invested_value:,.2f}")
+                    st.metric("Invested", f"{round(invested_value):,.2f}")
 
                 with metric_cols[1]:
                     st.metric("Leftover Cash", f"{leftover_cash:,.2f}")
@@ -2199,6 +2246,7 @@ def show_asset_explorer():
                 display_df["weight"] = (display_df["weight"] * 100).round(2)
 
                 display_df = display_df.rename(columns={
+                    "name": "Company",
                     "ticker": "Ticker",
                     "sector": "Sector",
                     "price": "Price",
@@ -2209,7 +2257,7 @@ def show_asset_explorer():
 
                 st.dataframe(
                     display_df[
-                        ["Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                        ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
                     ],
                     use_container_width=True,
                     height=420
@@ -2217,58 +2265,62 @@ def show_asset_explorer():
 
         # ======================================================
         # TOTAL PORTFOLIO TAB
-        # Must be AFTER the strategy loop
         # ======================================================
         with strategy_tabs[0]:
-            col_left , col_right = st.columns(2)
-            
-            with col_left:
 
-                st.markdown("### 🌍 Total Portfolio Allocation")
-                st.caption("Combined recommendation across all active strategies.")
+            st.markdown("### 🌍 Total Portfolio Allocation")
+            st.caption("Combined recommendation across all active strategies.")
 
-                if not all_allocation_rows:
-                    st.info("No allocation results available.")
+            if not all_allocation_rows:
+                st.info("No allocation results available.")
 
+            else:
+                total_df = pd.DataFrame(all_allocation_rows)
+
+                total_df = (
+                    total_df
+                    .groupby(["asset_id", "ticker", "name", "sector", "price"], as_index=False)
+                    .agg({
+                        "shares": "sum",
+                        "value": "sum"
+                    })
+                )
+
+                total_invested = total_df["value"].sum()
+                leftover_cash = total_cash - total_invested
+
+                if total_invested > 0:
+                    total_df["weight"] = total_df["value"] / total_invested
                 else:
-                    total_df = pd.DataFrame(all_allocation_rows)
+                    total_df["weight"] = 0
 
-                    total_df = (
-                        total_df
-                        .groupby(["asset_id", "ticker", "sector", "price"], as_index=False)
-                        .agg({
-                            "shares": "sum",
-                            "value": "sum"
-                        })
-                    )
+                total_df = total_df.sort_values(
+                    "value",
+                    ascending=False
+                ).reset_index(drop=True)
 
-                    total_invested = total_df["value"].sum()
-                    leftover_cash = total_cash - total_invested
-
-                    if total_invested > 0:
-                        total_df["weight"] = total_df["value"] / total_invested
-                    else:
-                        total_df["weight"] = 0
-
-                    total_df = total_df.sort_values(
-                        "value",
-                        ascending=False
-                    ).reset_index(drop=True)
-
+                # ======================================================
+                # METRICS
+                # ======================================================
+                col_left , col_right = st.columns([3,2])
+                with col_left:
                     metric_cols = st.columns(4)
 
                     with metric_cols[0]:
-                        st.metric("Total Invested", f"{round(total_invested / 1000 , 2)} K")
+                        st.metric("Total Invested", f"{round(total_invested / 1000,2)} K")
 
                     with metric_cols[1]:
-                        st.metric("Leftover Cash", f"{leftover_cash:,.2f}")
+                        st.metric("Leftover Cash", f"{round(leftover_cash , 2)} $")
 
                     with metric_cols[2]:
                         st.metric("Assets", len(total_df))
 
                     with metric_cols[3]:
-                        st.metric("Total Cash" , f"{round(total_cash / 1000 , 2)} K")
-
+                        st.metric("Total Cash", f"{round(total_cash / 1000 , 2)} K")
+                        
+                    # ======================================================
+                    # DISPLAY TABLE
+                    # ======================================================
                     display_total_df = total_df.copy()
 
                     display_total_df["price"] = display_total_df["price"].round(2)
@@ -2276,6 +2328,7 @@ def show_asset_explorer():
                     display_total_df["weight"] = (display_total_df["weight"] * 100).round(2)
 
                     display_total_df = display_total_df.rename(columns={
+                        "name": "Company",
                         "ticker": "Ticker",
                         "sector": "Sector",
                         "price": "Price",
@@ -2286,37 +2339,54 @@ def show_asset_explorer():
 
                     st.dataframe(
                         display_total_df[
-                            ["Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                            ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
                         ],
                         use_container_width=True,
-                        height=500)
+                        height=500 ,
+                        hide_index=True
+
+                    )
                     
-            with col_right:
+                with col_right:
+                    # ======================================================
+                    # SECTOR PIE CHART
+                    # ======================================================
+                    sector_df = (
+                        total_df
+                        .groupby("sector", as_index=False)
+                        .agg({
+                            "value": "sum"
+                        })
+                    )
+
+                    sector_df["weight"] = sector_df["value"] / total_invested
+
+                    fig_sector = px.pie(
+                        sector_df,
+                        names="sector",
+                        values="value",
+                        title="Sector Allocation"
+                    )
                     
-                # ======================================================
-                # SECTOR ALLOCATION PIE CHART
-                # ======================================================
-                sector_df = (
-                    total_df
-                    .groupby("sector", as_index=False)
-                    .agg({
-                        "value": "sum"
-                    })
-                )
+                    fig_sector.update_layout(
+                        title_x=0.3
+                    )
 
-                sector_df["weight"] = sector_df["value"] / total_invested
+                    st.plotly_chart(
+                        fig_sector,
+                        use_container_width=True
+                    )
+        if st.button("🛒 Review and execute trades", type="primary", use_container_width=True):
+            open_execution_review_dialog(
+                con ,
+                total_df=total_df,
+                total_cash=total_cash,
+                buy_fee=meta.get("buy_fee", 0)
+            )
 
-                fig = px.pie(
-                    sector_df,
-                    names="sector",
-                    values="value",
-                    title="Sector Allocation"
-                )
 
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True
-                )
+
+
 
 
 def show_portfolio_performance_analysis():

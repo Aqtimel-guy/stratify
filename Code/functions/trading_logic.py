@@ -65,7 +65,7 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
         return False, str(e)
 
 # for executing a trade
-def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy'):
+def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy' , fee=0):
     logger = logging.getLogger(__name__)
     
     # --- Step 1: Query relevant data ---
@@ -137,6 +137,170 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
         logger.error(f"Trade failed: {e}")
         return False, str(e)
 
+# for executing multiple trades simutaisly
+def execute_portfolio_buy_orders(con, portfolio_id, execution_df, timestamp, buy_fee=0):
+    """
+    Executes multiple buy orders for a portfolio in one database transaction.
+
+    Expected execution_df columns:
+    - asset_id
+    - ticker
+    - price
+    - shares
+
+    This function:
+    - validates all orders before execution
+    - checks available cash including buy fees
+    - inserts all transactions
+    - updates holdings
+    - updates portfolio cash once
+    - records one portfolio snapshot
+    """
+
+    logger = logging.getLogger(__name__)
+
+    if execution_df is None or execution_df.empty:
+        return False, "No buy orders to execute."
+
+    required_cols = ["asset_id", "ticker", "price", "shares"]
+    missing_cols = [col for col in required_cols if col not in execution_df.columns]
+
+    if missing_cols:
+        return False, f"Missing required columns: {missing_cols}"
+
+    orders_df = execution_df.copy()
+
+    orders_df["asset_id"] = orders_df["asset_id"].astype(int)
+    orders_df["shares"] = orders_df["shares"].astype(int)
+    orders_df["price"] = orders_df["price"].astype(float)
+
+    orders_df = orders_df[orders_df["shares"] > 0].copy()
+
+    if orders_df.empty:
+        return False, "No valid buy orders after filtering."
+
+    orders_df["total_value"] = orders_df["shares"] * orders_df["price"]
+
+    total_positions_value = orders_df["total_value"].sum()
+    total_fees = buy_fee * len(orders_df)
+    total_required_cash = total_positions_value + total_fees
+
+    portfolio_row = con.execute("""
+        SELECT available_cash
+        FROM portfolios
+        WHERE portfolio_id = ?
+    """, [portfolio_id]).fetchone()
+
+    if not portfolio_row:
+        return False, f"Portfolio {portfolio_id} not found."
+
+    available_cash = float(portfolio_row[0])
+
+    if available_cash < total_required_cash:
+        return False, (
+            f"Insufficient funds. "
+            f"Required: {total_required_cash:.2f}, "
+            f"Available: {available_cash:.2f}"
+        )
+
+    try:
+        con.execute("BEGIN TRANSACTION")
+
+        # ======================================================
+        # INSERT TRANSACTIONS
+        # Each row includes the position value only.
+        # Fees are handled in the portfolio cash update.
+        # ======================================================
+        transaction_rows = [
+            (
+                int(row["asset_id"]),
+                portfolio_id,
+                timestamp,
+                int(row["shares"]),
+                float(row["price"]),
+                float(row["total_value"]),
+                "buy"
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            INSERT INTO assets_transactions (
+                asset_id,
+                portfolio_id,
+                timestamp,
+                quantity,
+                price_per_share,
+                total_value,
+                side
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, transaction_rows)
+
+        # ======================================================
+        # UPDATE HOLDINGS
+        # ======================================================
+        holding_rows = [
+            (
+                portfolio_id,
+                int(row["asset_id"]),
+                int(row["shares"])
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            INSERT INTO holdings (
+                portfolio_id,
+                asset_id,
+                quantity
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT (portfolio_id, asset_id)
+            DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity
+        """, holding_rows)
+
+        # ======================================================
+        # UPDATE AVAILABLE CASH ONCE
+        # ======================================================
+        cash_change = -float(total_required_cash)
+
+        con.execute("""
+            UPDATE portfolios
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [cash_change, portfolio_id])
+
+        # ======================================================
+        # CLEAN ZERO / NEGATIVE HOLDINGS
+        # Mostly defensive; should not happen for buy-only flow.
+        # ======================================================
+        con.execute("""
+            DELETE FROM holdings
+            WHERE portfolio_id = ?
+              AND quantity <= 0
+        """, [portfolio_id])
+
+        # ======================================================
+        # RECORD SNAPSHOT ONCE
+        # ======================================================
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+
+        con.execute("COMMIT")
+
+        return True, (
+            f"Successfully executed {len(orders_df)} buy orders. "
+            f"Positions: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Total: {total_required_cash:.2f}"
+        )
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        logger.error(f"Portfolio buy execution failed: {e}")
+        return False, str(e)
+
+
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
     """
@@ -166,7 +330,6 @@ def record_portfolio_snapshot(con, portfolio_id, timestamp):
         INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
         VALUES (?, ?, ?, ?)
     """, [portfolio_id, timestamp, total_value, cash_val])
-    
     
 
 # for showing the history of transactions
@@ -1062,7 +1225,8 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         current_step_holdings = {}
 
     remaining_cash = cash
-
+    buy_fee = context["meta"].get("buy_fee", 0)
+    
     df = df.copy().reset_index(drop=True)
     
     diversification = context["meta"]["diversification"]
@@ -1091,8 +1255,19 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
 
     while True:
 
+        active_assets = [
+            aid for aid, shares in current_step_holdings.items()
+            if shares > 0
+        ]
 
-        affordable_df = df[df["price"] <= remaining_cash].copy()
+        invested_so_far = cash - remaining_cash
+        current_fee_reserve = buy_fee * len(active_assets)
+        cash_available_after_fees = cash - invested_so_far - current_fee_reserve
+
+        if cash_available_after_fees <= 0:
+            break
+
+        affordable_df = df[df["price"] <= cash_available_after_fees].copy()
 
         if affordable_df.empty:
             break
@@ -1102,6 +1277,13 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         active_assets = [
                 aid for aid, shares in current_step_holdings.items()
                 if shares > 0]
+        
+        invested_so_far = cash - remaining_cash
+        current_fee_reserve = buy_fee * len(active_assets)
+        cash_available_after_fees = cash - invested_so_far - current_fee_reserve
+
+        if cash_available_after_fees <= 0:
+            break
 
         for _, row in affordable_df.iterrows():
 
@@ -1137,8 +1319,12 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
             if asset_id not in current_step_holdings and len(active_assets) >= max_assets:
                 continue
 
-            # skip unaffordable assets
-            if price > remaining_cash:
+            # Fee-aware affordability check
+            extra_fee_needed = 0 if asset_id in current_step_holdings else buy_fee
+
+            cash_available_for_this_asset = cash_available_after_fees - extra_fee_needed
+
+            if price > cash_available_for_this_asset:
                 continue
 
             # ==========================
@@ -1148,7 +1334,7 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
             target_buy_value = cash * 0.01
 
             shares_to_buy = max(1, int(target_buy_value // price))
-            shares_to_buy = min(shares_to_buy, int(remaining_cash // price))
+            shares_to_buy = min(shares_to_buy, int(cash_available_for_this_asset // price))
 
             max_asset_value_allowed = cash * max_asset_weight
             max_sector_value_allowed = cash * max_sector_weight
@@ -1156,7 +1342,7 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
             asset_room_value = max_asset_value_allowed - asset_current_value
             sector_room_value = max_sector_value_allowed - sector_current_value
 
-            allowed_buy_value = min(asset_room_value, sector_room_value, remaining_cash)
+            allowed_buy_value = min( asset_room_value, sector_room_value, cash_available_for_this_asset)
 
             allowed_shares = int(allowed_buy_value // price)
 
@@ -1294,9 +1480,8 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         return current_step_holdings
         
         
-    buy_fee = context["meta"]["buy_fee"]
-    sell_fee = context["meta"]["sell_fee"]
-    min_position_value = 50 * max(buy_fee , sell_fee)
+    sell_fee = context["meta"].get("sell_fee", 0) 
+    min_position_value = 50 * max(buy_fee, sell_fee)
     
     current_step_holdings = min_position_filter(current_step_holdings)
     # ==========================
@@ -1307,6 +1492,11 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
         price_map[asset_id] * shares
         for asset_id, shares in current_step_holdings.items()
     )
+    
+    total_buy_fees = buy_fee * len(current_step_holdings)
+
+    if total_invested + total_buy_fees > cash:
+        return {}
 
     if total_invested <= 0:
         return {}
@@ -1322,4 +1512,5 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
 
     return current_step_holdings    
             
+
 
