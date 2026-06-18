@@ -919,7 +919,7 @@ def update_asset_factors_raw_v1():
     # -------------------------
     # OPEN CONNECTION (SAFE)
     # -------------------------
-    con = duckdb.connect(DB_PATH)
+    con = st.session_state.con
 
     try:
         asset_ids = [
@@ -1097,12 +1097,6 @@ def update_asset_factors_raw_v1():
             con.execute("ROLLBACK")
         except:
             pass
-
-    finally:
-        # -------------------------
-        # ALWAYS CLOSE CONNECTION
-        # -------------------------
-        con.close()
 
 
 

@@ -4,6 +4,7 @@ import logging
 import streamlit as st
 import pandas as pd
 from .db_manager import capture_portfolio_snapshot , get_data
+import traceback
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
@@ -14,7 +15,18 @@ def create_portfolio(user_id ,portfolio_name ,starting_at):
     
     """
     logger = logging.getLogger(__name__)
-    con = duckdb.connect(DB_PATH)
+# connection check
+    if 'con' not in st.session_state or st.session_state.con is None:
+        logger.error("Connection lost! Attempting to reconnect...")
+        # try opening new connection if it is failed
+        try:
+            st.session_state.con = duckdb.connect(DB_PATH)
+        except Exception as e:
+            return False, "Database connection error. Please refresh the page."
+            
+            
+
+    con = st.session_state.con
     today = datetime.date.today() 
     today_datetime = datetime.datetime.combine(today, datetime.time.min)
        
@@ -24,25 +36,21 @@ def create_portfolio(user_id ,portfolio_name ,starting_at):
         user_exists = con.execute("SELECT 1 FROM users WHERE user_id = ?", [user_id]).fetchone()
         if not user_exists:
             logger.warning(f"Validation Failed: User ID {user_id} does not exist.")
-            con.close()
             return False, "User not found."
         # each user is limited fo 10 portoflios max
         portfolio_count = con.execute("SELECT COUNT(*) FROM portfolios WHERE user_id = ?", [user_id]).fetchone()[0]
         if portfolio_count > 9:
             logger.warning(f"Validation Failed: User {user_id} reached portfolio limit (10).")
-            con.close()
             return False, "You have reached the maximum limit of 10 portfolios."
         # Validating dates
         if starting_at > today:
             logger.warning(f"Validation Failed: Starting date {starting_at} is in the future.")
-            con.close()
             return False, "Starting date cannot be in the future."
 
         # the same user cannot have 2 portfolios with the same name
         name_exists = con.execute("SELECT 1 FROM portfolios WHERE user_id = ? AND portfolio_name = ?", 
                                      [user_id, portfolio_name]).fetchone()
         if name_exists:
-            con.close()
             return False, f"You already have a portfolio named '{portfolio_name}'."
         
     # creating portfolio in DB
@@ -56,7 +64,7 @@ def create_portfolio(user_id ,portfolio_name ,starting_at):
                 portfolio_id, 
                 user_id, 
                 portfolio_name, 
-                today_datetime,          # created_at תמיד היום
+                today_datetime,          
                 starting_at, 
                 0, 
                 0 ,
@@ -65,14 +73,12 @@ def create_portfolio(user_id ,portfolio_name ,starting_at):
             
         logger.info(f"Portfolio '{portfolio_name}' created successfully for user {user_id}.")
         capture_portfolio_snapshot(con , portfolio_id , starting_at)
-        con.close()
         return True, "Portfolio created successfully!"
 
     except Exception as e:
+        error_details = traceback.format_exc()
         logger.error(f"Database error during portfolio creation: {e}")
-        con.close()
-        return False, "An internal error occurred. Please try again."
-    
+        return False, "An internal error occurred. Please try again.  "
 # for deleting a portfolio 
 def delete_portfolio(portfolio_id):
     """
@@ -80,7 +86,7 @@ def delete_portfolio(portfolio_id):
     All comments are translated to English.
     """
     logger = logging.getLogger(__name__)
-    con = duckdb.connect(DB_PATH)
+    con = st.session_state.con
     
     try:
         # 1. Verify if the target portfolio exists before attempting deletion
@@ -91,7 +97,6 @@ def delete_portfolio(portfolio_id):
         
         if not portfolio_exists:
             logger.warning(f"Delete Failed: Portfolio ID {portfolio_id} does not exist.")
-            con.close()
             return False, "Portfolio not found."
         
         p_name = portfolio_exists[0]
@@ -130,23 +135,19 @@ def delete_portfolio(portfolio_id):
             if 'current_available_cash' in st.session_state:
                 st.session_state.current_available_cash = 0.0
 
-        con.close()
         return True, f"Portfolio '{p_name}' deleted successfully!"
     
     except Exception as e:
         logger.error(f"Database error during portfolio deletion: {e}")
-        if con:
-            con.close()
         return False, f"Error deleting portfolio: {str(e)}"
 
 # for going forward in time of the simulation
 def move_time_forward(portfolio_id, amount_of_time="1d"):
-    con = duckdb.connect(DB_PATH)
+    con = st.session_state.con
     
     # 1. שליפת התאריך הנוכחי
     current_data = get_data("SELECT current_sim_date FROM portfolios WHERE portfolio_id = ?", [portfolio_id])
     if current_data.empty:
-        con.close()
         return False, "Portfolio not found"
     
     current_sim_date = current_data.iloc[0]['current_sim_date']
@@ -174,7 +175,6 @@ def move_time_forward(portfolio_id, amount_of_time="1d"):
     # עדכון ה-session_state כדי שה-UI יתעדכן מיד
     st.session_state.current_current_sim_date = new_sim_date
     
-    con.close()
     return True, new_sim_date  
     
 # for FIFO tracking 

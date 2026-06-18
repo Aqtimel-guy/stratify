@@ -10,18 +10,10 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 # for easy querying 
 def get_data(query, params=None):
     # 1. בדיקה אם קיים חיבור פעיל בסטייט
-    if 'con' in st.session_state:
-        con = st.session_state.con
-        if params:
-            return con.execute(query, params).df()
-        return con.execute(query).df()
-    
-    # 2. fallback למקרה שאין חיבור (למשל בהרצה ראשונית)
-    # שים לב: הורדנו את ה-read_only=True כדי למנוע התנגשויות קונפיגורציה
-    with duckdb.connect(DB_PATH) as con:
-        if params:
-            return con.execute(query, params).df()
-        return con.execute(query).df()
+    con = st.session_state.con
+    if params:
+        return con.execute(query, params).df()
+    return con.execute(query).df()
     
 # for getting assets details 
 def get_asset_snapshot(con, ticker, sim_date):
@@ -170,7 +162,7 @@ def search_assets(con, search_term):
 
 
 # for calculating portfolio's Value at a given time 
-def portfolio_value_calculator(portfolio_id , timestamp , con=None):
+def portfolio_value_calculator(portfolio_id , timestamp , con=st.session_state.con):
     
     """
     this function will calculate the value of a portfolio
@@ -181,13 +173,6 @@ def portfolio_value_calculator(portfolio_id , timestamp , con=None):
     3. prices
     
     """
-    
-     # connecting to DB and loggin
-    if con is None:
-        con = st.session_state.con
-        should_close = True
-    else:
-        should_close = False
         
     logger = logging.getLogger(__name__)
     
@@ -233,8 +218,6 @@ def portfolio_value_calculator(portfolio_id , timestamp , con=None):
     logger.info(f"Portfolio {portfolio_id} valuation at {timestamp}: "
                 f"Cash: {portfolio_cash:.2f}, Assets: {total_market_value:.2f}, Total: {total_portfolio_value:.2f}")
 
-    if should_close:
-        con.close()
     
     return round(total_portfolio_value , 2)
     

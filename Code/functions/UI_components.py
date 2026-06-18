@@ -21,6 +21,7 @@ def go_to(page_name):
     
 # for showing cash management 
 def show_cash_management_ui():
+    con = st.session_state.con
     st.subheader("💰 Cash Management")
     col1, col2 = st.columns(2)
     
@@ -35,35 +36,31 @@ def show_cash_management_ui():
             if confirm_dep:
                 if st.button("🚀 Execute Deposit", use_container_width=True):
                     if is_action_allowed(wait_time=2):
-                        with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_cash_transaction(
-                                con, 
-                                st.session_state.current_portfolio_id, 
-                                dep_amount, 
-                                'deposit', 
-                                st.session_state.current_sim_date
-                            )
-                            if success:
-                                st.success(msg)
+                        success, msg = execute_cash_transaction(
+                            con, 
+                            st.session_state.current_portfolio_id, 
+                            dep_amount, 
+                            'deposit', 
+                            st.session_state.current_sim_date
+                        )
+                        if success:
+                            st.success(msg)
+                            
+                            # ניקוי המפתחות מה-Session State כדי לאפס את הווידג'טים
+                            # משתמשים ברשימה של מפתחות שרוצים לנקות
+                            keys_to_reset = ["dep_val", "conf_dep_check", "with_val", "conf_with_check"]
+                            
+                            for key in keys_to_reset:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            
+                            # השהיה קלה לסגירת הדיאלוג/פופאוובר
+                            time.sleep(0.5)
+                            
                                 
-                                # ניקוי המפתחות מה-Session State כדי לאפס את הווידג'טים
-                                # משתמשים ברשימה של מפתחות שרוצים לנקות
-                                keys_to_reset = ["dep_val", "conf_dep_check", "with_val", "conf_with_check"]
-                                
-                                for key in keys_to_reset:
-                                    if key in st.session_state:
-                                        del st.session_state[key]
-                                
-                                # השהיה קלה לסגירת הדיאלוג/פופאוובר
-                                time.sleep(0.5)
-                                
-                                # סגירת חיבור לפני ריענון
-                                if 'con' in locals():
-                                    con.close()
-                                    
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Please wait a moment between actions.")
 
@@ -73,39 +70,36 @@ def show_cash_management_ui():
             with_amount = st.number_input("Amount to Withdraw", min_value=1, step=100, key="with_val")
             
             confirm_with = st.checkbox(f"I confirm withdrawing ${with_amount:,.2f}", key="conf_with_check")
-            
+
             if confirm_with:
                 if st.button("💸 Execute Withdrawal", use_container_width=True):
                     if is_action_allowed(wait_time=2):
-                        with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_cash_transaction(
-                                con, 
-                                st.session_state.current_portfolio_id, 
-                                with_amount, 
-                                'withdrawal', 
-                                st.session_state.current_sim_date
-                            )
-                            if success:
-                                st.success(msg)
+                        success, msg = execute_cash_transaction(
+                            con, 
+                            st.session_state.current_portfolio_id, 
+                            with_amount, 
+                            'withdrawal', 
+                            st.session_state.current_sim_date
+                        )
+                        if success:
+                            st.success(msg)
+                            
+                            # במקום השמה (=), אנחנו משתמשים ב-del כדי למחוק את המפתח מה-Session State.
+                            # זה מונע את שגיאת ה-StreamlitAPIException.
+                            if "with_val" in st.session_state:
+                                del st.session_state["with_val"]
                                 
-                                # במקום השמה (=), אנחנו משתמשים ב-del כדי למחוק את המפתח מה-Session State.
-                                # זה מונע את שגיאת ה-StreamlitAPIException.
-                                if "with_val" in st.session_state:
-                                    del st.session_state["with_val"]
-                                    
-                                if "conf_with_check" in st.session_state:
-                                    del st.session_state["conf_with_check"]
-                                
-                                # השהיה קלה כדי שהמשתמש יספיק לראות את הודעת ההצלחה
-                                time.sleep(0.5)
-                                
-                                # חשוב: לסגור את החיבור לפני הריצה מחדש
-                                con.close()
-                                
-                                # קריאה לריצה מחדש - כעת הווידג'טים ייווצרו מחדש עם ערכי ברירת המחדל שלהם
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            if "conf_with_check" in st.session_state:
+                                del st.session_state["conf_with_check"]
+                            
+                            # השהיה קלה כדי שהמשתמש יספיק לראות את הודעת ההצלחה
+                            time.sleep(0.5)
+                        
+                            
+                            # קריאה לריצה מחדש - כעת הווידג'טים ייווצרו מחדש עם ערכי ברירת המחדל שלהם
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Please wait a moment between actions.")
 
@@ -155,6 +149,8 @@ def show_buy_component(ticker, asset_price):
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date')
     
+    con = st.session_state.con
+    
     # 1. שימוש במזומן מה-State (חוסך פנייה מיותרת ל-DB עד רגע הקנייה)
     current_cash = st.session_state.get('current_available_cash', 0.0)
 
@@ -200,20 +196,18 @@ def show_buy_component(ticker, asset_price):
                 if st.button("✅ Confirm", type="primary", use_container_width=True):
                     # בדיקת מחסום זמן (2 שניות)
                     if is_action_allowed(wait_time=2):
-                        with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_asset_trade(con, portfolio_id, ticker, sim_date, qty, side='buy')
+                        success, msg = execute_asset_trade(con, portfolio_id, ticker, sim_date, qty, side='buy')
+                        
+                        if success:
+                            st.session_state[confirm_key] = False
+                            # עדכון ה-State המקומי כדי שהדף הבא יראה את המזומן המעודכן מיד
+                            st.session_state.current_available_cash -= total_cost
+                            st.session_state.page = "dashboard_home"
+                            st.toast(msg)
                             
-                            if success:
-                                st.session_state[confirm_key] = False
-                                # עדכון ה-State המקומי כדי שהדף הבא יראה את המזומן המעודכן מיד
-                                st.session_state.current_available_cash -= total_cost
-                                st.session_state.page = "dashboard_home"
-                                st.toast(msg)
-                                con.close()
-                                
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Slow down...")
 
@@ -1515,6 +1509,11 @@ def strategy_creating_component(con, portfolio_id):
                 # Initialize a revision counter for the popover to force close it when needed
                 if f"pop_rev_{portfolio_id}" not in st.session_state:
                     st.session_state[f"pop_rev_{portfolio_id}"] = 0
+                    
+                    
+                if st.button("🚀 Advance to Multi strategy allocation", key="advance_to_multi"):
+                    st.session_state.active_tab = 2
+                    st.rerun()
 
                 # Render popover with a dynamic key configuration
                 with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", use_container_width=True):
@@ -1784,6 +1783,8 @@ def strategy_creating_component(con, portfolio_id):
                             label_visibility="collapsed" 
                         )
                         st.write("") # Spacer padding below each individual pair block
+        # advance button
+
 
     # =======================================
     # STEP 3 — MULTI-STRATEGY ALLOCATION AND VISUAL SYNCHRONIZATION
@@ -2486,13 +2487,16 @@ def strategy_creating_component(con, portfolio_id):
                                 
                 st.success("🎉 Portfolio configured successfully!")
                 
-                st.session_state.page = "dashboard_home"
+                st.session_state.page = "asset_purchsing" 
                 
                 st.rerun()
                 
                 
             except Exception as e:
                 st.error(f"Error saving portfolio: {str(e)}")
+                st.session_state.active_tab = 2
+                st.rerun()
+                
         
      
     
@@ -3385,16 +3389,18 @@ def open_execution_review_dialog(con, total_df, total_cash, buy_fee):
         buy_fee=buy_fee
     )
 
-    if success:
-        st.success(message)
+        if success:
+            st.success(message)
 
-        st.session_state["current_available_cash"] = total_cash - total_required_cash
-        st.session_state["allocation_cache_version"] = (
-            st.session_state.get("allocation_cache_version", 0) + 1
-        )
-
-    else:
-        st.error(message)
+            st.session_state["current_available_cash"] = total_cash - total_required_cash
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+            st.session_state.page = "dashboard_home"
+            st.rerun()
+            
+        else:
+            st.error(message)
         
         
         

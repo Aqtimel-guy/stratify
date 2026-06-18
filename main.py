@@ -14,15 +14,14 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 # python -m streamlit run  "C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\main.py"
 
 
-
-
-
-
 def main():
     # setting initial states
     init_session_state()
     
-    
+    # Maintain global system database state context safely
+    st.session_state.con = duckdb.connect(DB_PATH)
+
+
     ###########################################
     ###                                     ###
     ###     DB querying and setting args    ###
@@ -45,8 +44,6 @@ def main():
     if "page" not in st.session_state:
         st.error("oops, somthing went wrong. please log in again") 
         st.session_state.page = "login_page"
-        
-        
         
     ###########################################
     ###                                     ###
@@ -72,8 +69,8 @@ def main():
     elif st.session_state.page =="dashboard_home":
         show_dashboard_home()
     
-    elif st.session_state.page == "asset_explorer":
-        show_asset_explorer()
+    elif st.session_state.page == "asset_purchsing":
+        show_asset_purchsing()
     
     elif st.session_state.page == "strategy_builder":
         show_strategy_builder()
@@ -87,6 +84,7 @@ def main():
     elif st.session_state.page == "test_page":
         test_page()
         
+
         
 if __name__ == "__main__":
     main()

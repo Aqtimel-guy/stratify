@@ -4,7 +4,9 @@ from .users_managment import *
 from .portfolio_managment import *
 from .UI_components import *
 from .trading_logic import *
+from .selling_logic import *
 import plotly.express as px
+import logging
 
 
 def go_to(page_name):
@@ -596,7 +598,18 @@ def show_portfolios_page():
     # This prevents the creation popover from staying open post-rerun
     if "portfolio_create_version" not in st.session_state:
         st.session_state.portfolio_create_version = 0
+        
+    if 'con' not in st.session_state or st.session_state.con is None:
+        logging.error("Connection lost! Attempting to reconnect...")
+        # try opening new connection if it is failed
+        try:
+            st.session_state.con = duckdb.connect(DB_PATH)
+        except Exception as e:
+            return False, "Database connection error. Please refresh the page."
+            
+            
 
+    con = st.session_state.con
     # ==========================================
     # SYSTEM INJECTION: UNIFIED ADVANCED UX & SIDEBAR STYLES
     # ==========================================
@@ -840,7 +853,7 @@ def show_portfolios_page():
 
                     # Calculate live portfolio value
                     try:
-                        p_value = portfolio_value_calculator(p_id, row["current_sim_date"])
+                        p_value = portfolio_value_calculator(p_id, row["current_sim_date"], st.session_state.con)
                         val_str = f"${p_value:,.2f}"
                     except Exception:
                         val_str = "Error calculating"
@@ -968,9 +981,6 @@ def show_dashboard_home():
     user_id = int(raw_u_id)
     portfolio_id = int(raw_p_id)
 
-    # Maintain global system database state context safely
-    if 'con' not in st.session_state:
-        st.session_state.con = duckdb.connect(DB_PATH)
     
     con = st.session_state.con
 
@@ -1713,7 +1723,7 @@ def dashboard_sidebar():
             "🏠 Dashboard Home": "dashboard_home",
             "📈 Performance Analysis": "portfolio_performance_analysis",
             "🛠️ Strategy Manager": "strategy_managment",
-            "🔍 Asset Explorer": "asset_explorer"
+            "🔍 Asset Purchasing": "asset_purchsing"
         }
         
         if st.button("test page"):
@@ -1898,7 +1908,7 @@ def cached_build_full_allocation(portfolio_id, sim_date, cache_version):
   
   
             
-def show_asset_explorer():
+def show_asset_purchsing():
     dashboard_sidebar()
     
     # Header with a cleaner look
@@ -1916,8 +1926,6 @@ def show_asset_explorer():
     </style>
     """, unsafe_allow_html=True)
     
-    if 'con' not in st.session_state:
-        st.session_state.con = duckdb.connect(DB_PATH)
     con = st.session_state.con
     
     # 1. Use Tabs to separate Main Search from Recommendations
@@ -2098,7 +2106,7 @@ def show_asset_explorer():
         summary_cols = st.columns(4)
 
         with summary_cols[0]:
-            st.metric("Total Cash", f"{total_cash:,.0f} $")
+            st.metric("Total Availble Cash", f"{total_cash:,.0f} $")
 
         with summary_cols[1]:
             st.metric("Strategies", len(strategies))
@@ -2392,8 +2400,6 @@ def show_asset_explorer():
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
     
-
-    
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date') # תיקון שם המשתנה מ-current_current...
 
@@ -2401,44 +2407,44 @@ def show_portfolio_performance_analysis():
         st.error("Please select a portfolio first.")
         return
 
+    con = st.session_state.con
+        
     # --- מנגנון מטמון חכם (Cache) ---
     # בודקים אם יש לנו כבר נתונים ב-State ואם הם שייכים לפורטפוליו הנוכחי
     if ('perf_data' not in st.session_state or 
         st.session_state.get('perf_portfolio_id') != portfolio_id):
-        
+
         # שליפה מלאה רק כשצריך (בכניסה ראשונה או החלפת תיק)
-        with duckdb.connect(DB_PATH) as con:
-            query = """
-            SELECT timestamp, portfolio_value as value
-            FROM portfolio_history
-            WHERE portfolio_id = ? AND timestamp <= ?
-            ORDER BY timestamp
-            """
-            st.session_state.perf_data = con.execute(query, [portfolio_id, sim_date]).df()
-            st.session_state.perf_portfolio_id = portfolio_id
-            st.session_state.last_perf_update = sim_date
+        query = """
+        SELECT timestamp, portfolio_value as value
+        FROM portfolio_history
+        WHERE portfolio_id = ? AND timestamp <= ?
+        ORDER BY timestamp
+        """
+        st.session_state.perf_data = con.execute(query, [portfolio_id, sim_date]).df()
+        st.session_state.perf_portfolio_id = portfolio_id
+        st.session_state.last_perf_update = sim_date
 
     # --- עדכון אופטימי (Delta Update) ---
     # אם התאריך בסימולציה התקדם מאז השליפה האחרונה, נשלוף רק את הפער
     elif sim_date > st.session_state.last_perf_update:
-        with duckdb.connect(DB_PATH) as con:
-            delta_query = """
-            SELECT timestamp, portfolio_value as value
-            FROM portfolio_history
-            WHERE portfolio_id = ? AND timestamp > ? AND timestamp <= ?
-            ORDER BY timestamp
-            """
-            new_rows = con.execute(delta_query, [
-                portfolio_id, 
-                st.session_state.last_perf_update, 
-                sim_date
-            ]).df()
+        delta_query = """
+        SELECT timestamp, portfolio_value as value
+        FROM portfolio_history
+        WHERE portfolio_id = ? AND timestamp > ? AND timestamp <= ?
+        ORDER BY timestamp
+        """
+        new_rows = con.execute(delta_query, [
+            portfolio_id, 
+            st.session_state.last_perf_update, 
+            sim_date
+        ]).df()
             
-            if not new_rows.empty:
-                # משרשרים את הנקודות החדשות ל-DataFrame הקיים ב-State
-                import pandas as pd
-                st.session_state.perf_data = pd.concat([st.session_state.perf_data, new_rows]).drop_duplicates()
-                st.session_state.last_perf_update = sim_date
+        if not new_rows.empty:
+            # משרשרים את הנקודות החדשות ל-DataFrame הקיים ב-State
+            import pandas as pd
+            st.session_state.perf_data = pd.concat([st.session_state.perf_data, new_rows]).drop_duplicates()
+            st.session_state.last_perf_update = sim_date
 
     # --- תצוגה ---
     if not st.session_state.perf_data.empty:
@@ -2464,10 +2470,7 @@ def show_strategy_builder():
     # ---------------------------------------
     # Get required state
     # ---------------------------------------
-    con = st.session_state.get("con")
-    if con == None:
-        st.session_state.con = duckdb.connect(DB_PATH)
-        con = st.session_state.get("con")
+    con = st.session_state.con
     portfolio_id = st.session_state.get('current_portfolio_id')
 
     # ---------------------------------------
@@ -2523,143 +2526,89 @@ def show_strategy_manager():
     
 def test_page():
     dashboard_sidebar()
-    st.write("**test page**")
+    st.write("## 🧪 Sell Engine Testing")
 
-    with duckdb.connect(DB_PATH) as con:
+    con = st.session_state.con
+    portfolio_id = st.session_state.get("current_portfolio_id")
+    sim_date = st.session_state.get("current_sim_date")
 
-        portfolio_id = st.session_state.get("current_portfolio_id")
-        sim_date = st.session_state.get("current_sim_date")
+    # ======================================================
+    # CURRENT HOLDINGS
+    # ======================================================
+    holdings_df = get_current_holdings_with_prices(
+        con,
+        portfolio_id,
+        sim_date
+    )
 
-        if portfolio_id is None or sim_date is None:
-            st.error("Missing portfolio_id or sim_date")
-            return
+    st.markdown("### 📦 Current Portfolio Holdings")
 
-        strategy_context = build_strategy_context(
-            con,
-            portfolio_id,
-            sim_date
-        )
+    st.dataframe(
+        holdings_df,
+        use_container_width=True,
+        hide_index=True
+    )
 
-        meta = strategy_context["meta"]
 
-        # ======================================================
-        # PORTFOLIO OVERVIEW
-        # ======================================================
+    # ======================================================
+    # STRATEGY CONTEXT
+    # ======================================================
+    context = build_strategy_context(
+        con,
+        portfolio_id,
+        sim_date
+    )
 
-        st.markdown("## 📦 Portfolio Overview")
+    strategy_ids = list(context["strategies"].keys())
 
-        st.write(f"💰 Total Cash: {meta['total_cash']:.2f}")
-        st.write(f"📥 Monthly Deposit: {meta['monthly_deposit']}")
-        st.write(f"💸 Buy Fee: {meta['buy_fee']}")
-        st.write(f"💸 Sell Fee: {meta['sell_fee']}")
-        st.write(f"🏦 Deposit Fee: {meta['deposit_fee']}")
-        st.write(f"🏦 Withdrawal Fee: {meta['withdrawal_fee']}")
-        st.write(f"📊 Preferred Sectors: {meta['preferred_sectors']}")
-        st.write(f"🚫 Excluded Sectors: {meta['excluded_sectors']}")
 
-        st.markdown("---")
 
-        # ======================================================
-        # STRATEGIES LOOP
-        # ======================================================
+    st.divider()
 
-        strategies = strategy_context.get("strategies", {})
+    # ======================================================
+    # RELEVANCE EVALUATION
+    # ======================================================
+    st.markdown("### 🔍 Holdings Relevance Evaluation")
 
-        if not strategies:
-            st.warning("No active strategies found.")
-            return
+    cols = st.columns(len(strategy_ids))
 
-        for strategy_id, ctx in strategies.items():
+    for col, strategy_id in zip(cols, strategy_ids):
 
-            st.markdown(f"## 🎯 Strategy {strategy_id}")
+        with col:
 
-            strategy_cash = ctx.get("cash", 0)
-            st.write(f"💰 Strategy Cash: {strategy_cash:.2f}")
+            st.markdown(f"#### Strategy {strategy_id}")
 
-            df = ctx.get("closest_assets")
-
-            if df is None or df.empty:
-                st.warning("No candidate assets for this strategy.")
-                continue
-
-            # ======================================================
-            # CANDIDATE ASSETS PREVIEW
-            # ======================================================
-
-            st.markdown("### 🔎 Top Candidate Assets")
-
-            preview_cols = [
-                "asset_id", "ticker", "sector", "price", "distance", "score", "base_score"
-            ]
-
-            available_preview_cols = [col for col in preview_cols if col in df.columns]
-
-            st.dataframe(
-                df.head(20)[available_preview_cols],
-                use_container_width=True
+            evaluation_df = evaluate_current_holdings(
+                con,
+                context,
+                strategy_id,
+                holdings_df,
+                sim_date
             )
 
-            st.markdown("### ⚙️ Diversification Comparison")
-
-            # ======================================================
-            # DIVERSIFICATION COMPARISON (COLUMNS)
-            # ======================================================
-            cols = st.columns(3)
-
-            for i, div_level in enumerate([1, 2, 3]):
-                with cols[i]:
-                    st.markdown(f"#### 📊 Diversification {div_level}")
-
-                    context_copy = {
-                        "meta": {
-                            **strategy_context["meta"],
-                            "diversification": div_level
-                        },
-                        "strategies": strategy_context["strategies"]
-                    }
-
-                    holdings = build_allocation(
-                        strategy_id=strategy_id,
-                        context=context_copy,
-                        df=df,
-                        cash=strategy_cash,
-                        current_step_holdings=None,
-                        max_assets=25
-                    )
-
-                    if not holdings:
-                        st.warning("No holdings generated.")
-                        continue
-
-                    assets_df = context_copy["strategies"][strategy_id]["closest_assets"]
-                    result_rows = []
-
-                    for asset_id, holding_data in holdings.items():
-                        if not isinstance(holding_data, tuple) or len(holding_data) != 2:
-                            continue
-
-                        weight, shares = holding_data
-                        asset_row = assets_df[assets_df["asset_id"] == asset_id]
-                        if asset_row.empty:
-                            continue
-
-                        asset_row = asset_row.iloc[0]
-                        price = asset_row["price"]
-                        value = shares * price
-
-                        result_rows.append({
-                            "ticker": asset_row.get("ticker", ""),
-                            "value": value,
-                            "weight_pct": weight * 100
-                        })
-
-                    if not result_rows:
-                        continue
-
-                    result_df = pd.DataFrame(result_rows).sort_values(by="value", ascending=False)
-
-                    st.dataframe(result_df, use_container_width=True)
-                    st.write(f"💼 Total: {result_df['value'].sum():.2f}")
-                    st.write(f"📊 Assets: {len(result_df)}")
+            st.dataframe(
+                evaluation_df,
+                use_container_width=True,
+                hide_index=True
+            )
             
-            st.markdown("---")
+    st.divider()
+    st.markdown("### 📦 Current Portfolio SEll Suggestions")
+    strategy_evaluations = {}
+
+    for strategy_id in context["strategies"].keys():
+
+        eval_df = evaluate_current_holdings(
+            con=con,
+            context=context,
+            strategy_id=strategy_id,
+            holdings_df=holdings_df,
+            sim_date=sim_date
+        )
+
+        strategy_evaluations[strategy_id] = eval_df
+
+    sell_candidates_df = find_portfolio_sell_candidates(strategy_evaluations)
+
+    st.write("Portfolio-level sell candidates")
+    st.dataframe(sell_candidates_df)

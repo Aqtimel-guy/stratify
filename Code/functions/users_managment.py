@@ -113,7 +113,7 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
     hashed_password = bcrypt.hashpw(raw_password.encode('utf-8'), salt).decode('utf-8')
 
     #### if everything passed ####
-    con = duckdb.connect(DB_PATH)
+    con = st.session_state.con
     
     # check if Email is available
     df_email = con.execute("""
@@ -123,7 +123,6 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
                            """ ,[email]).df()
     if not df_email.empty:
         logger.warning("Email is already has an account")
-        con.close()
         return False
         
     # creating a new user in the DB
@@ -144,12 +143,10 @@ def registration_func(email, first_name, middle_name, last_name, date_of_birth, 
                     """, [email, first_name, middle_name, last_name, date_of_birth, hashed_password])
     except Exception as e:
         logger.error(f"DB Error {e}")
-        con.close()
         return False
 
     # logging and closing connection
     logger.info("new user have been registerd successfuly")
-    con.close()
     return True
     
 # for fixing allocation bug in strategy (not used yet)

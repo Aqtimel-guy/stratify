@@ -603,9 +603,8 @@ def handle_time_jump(new_date, p_id):
         st.error(f"Cannot travel to the future!")
         return False
 
-    con = None
+    con = st.session_state.con
     try:
-        con = duckdb.connect(DB_PATH)
         
         # שליפת התאריך הנוכחי
         res = con.execute("SELECT current_sim_date FROM portfolios WHERE portfolio_id = ?", [p_id]).fetchone()
@@ -683,7 +682,6 @@ def handle_time_jump(new_date, p_id):
         con.execute("UPDATE portfolios SET current_sim_date = ? WHERE portfolio_id = ?", [new_date, p_id])
         
         con.execute("COMMIT")
-        con.close()
 
         # עדכון State
         st.session_state.current_sim_date = new_date
@@ -694,12 +692,10 @@ def handle_time_jump(new_date, p_id):
         return True
 
     except Exception as e:
-        if con:
-            try:
-                con.execute("ROLLBACK")
-            except:
-                pass # אם הטרנזקציה כבר נסגרה
-            con.close()
+        try:
+            con.execute("ROLLBACK")
+        except:
+            pass # אם הטרנזקציה כבר נסגרה
         st.error(f"Time Jump Failed: {e}")
         return False
 
@@ -948,6 +944,7 @@ def build_strategy_context(con, portfolio_id: int, sim_date: str):
         closest_assets = closest_assets[
             closest_assets["price"] <= cash
         ].reset_index(drop=True)
+        
         
         # B.5 SCORE ASSETS
         
@@ -1377,113 +1374,117 @@ def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_
     # ==========================
     # MIN POSITION VALUE FILTER
     # ==========================
-    
+
     def min_position_filter(current_step_holdings):
+        """
+        Removes positions that are too small compared to fees.
+
+        Logic:
+        - Find the smallest position below min_position_value.
+        - Remove it and recycle its value.
+        - Use recycled cash to buy more shares of assets we already hold.
+        - Do not open new positions.
+        - Repeat until no small positions remain or no progress can be made.
+        """
+
+        recycled_cash = 0
 
         while True:
 
+            # ==========================
+            # CALCULATE CURRENT VALUES
+            # ==========================
             asset_values = {
                 asset_id: price_map[asset_id] * shares
                 for asset_id, shares in current_step_holdings.items()
+                if shares > 0 and asset_id in price_map
             }
 
-            violating_assets = [
-                aid for aid, val in asset_values.items()
-                if val < min_position_value
-            ]
+            if not asset_values:
+                break
+
+            # ==========================
+            # FIND SMALLEST VIOLATING POSITION
+            # ==========================
+            violating_assets = {
+                asset_id: value
+                for asset_id, value in asset_values.items()
+                if value < min_position_value
+            }
 
             if not violating_assets:
                 break
 
-            freed_value = sum(asset_values[aid] for aid in violating_assets)
+            asset_to_remove = min(
+                violating_assets,
+                key=violating_assets.get
+            )
 
-            for aid in violating_assets:
-                del current_step_holdings[aid]
+            recycled_cash += asset_values[asset_to_remove]
+
+            del current_step_holdings[asset_to_remove]
 
             if not current_step_holdings:
                 break
 
-            # Try to redistribute freed value without breaking caps
-            remaining_freed_value = freed_value
+            # ==========================
+            # TRY TO REINVEST INTO EXISTING HOLDINGS
+            # ==========================
+            made_purchase = True
 
-            while remaining_freed_value > 0:
+            while made_purchase:
+                made_purchase = False
 
                 asset_values = {
                     asset_id: price_map[asset_id] * shares
                     for asset_id, shares in current_step_holdings.items()
+                    if shares > 0 and asset_id in price_map
                 }
 
-                # choose smallest current position that still has room
-                candidates = []
-
-                for aid, current_value in asset_values.items():
-
-                    price = price_map[aid]
-                    sector = df.loc[df["asset_id"] == aid, "sector"]
-
-                    if sector.empty:
-                        continue
-
-                    sector = sector.iloc[0]
-
-                    sector_value = 0
-
-                    for held_aid, held_shares in current_step_holdings.items():
-                        held_price = price_map[held_aid]
-                        held_sector_row = df.loc[df["asset_id"] == held_aid, "sector"]
-
-                        if held_sector_row.empty:
-                            continue
-
-                        held_sector = held_sector_row.iloc[0]
-
-                        if held_sector == sector:
-                            sector_value += held_price * held_shares
-
-                    max_asset_value_allowed = cash * max_asset_weight
-                    max_sector_value_allowed = cash * max_sector_weight
-
-                    asset_room = max_asset_value_allowed - current_value
-                    sector_room = max_sector_value_allowed - sector_value
-
-                    allowed_value = min(
-                        asset_room,
-                        sector_room,
-                        remaining_freed_value
-                    )
-
-                    allowed_shares = int(allowed_value // price)
-
-                    if allowed_shares > 0:
-                        candidates.append({
-                            "asset_id": aid,
-                            "current_value": current_value,
-                            "allowed_shares": allowed_shares,
-                            "price": price
-                        })
-
-                if not candidates:
+                if not asset_values:
                     break
 
-                weakest_candidate = min(
-                    candidates,
-                    key=lambda x: x["current_value"]
+                # Try to strengthen the smallest remaining position first
+                sorted_existing_assets = sorted(
+                    asset_values.items(),
+                    key=lambda x: x[1]
                 )
 
-                aid = weakest_candidate["asset_id"]
-                shares_to_add = weakest_candidate["allowed_shares"]
-                price = weakest_candidate["price"]
+                for asset_id, current_value in sorted_existing_assets:
 
-                current_step_holdings[aid] += shares_to_add
-                remaining_freed_value -= shares_to_add * price
+                    price = price_map.get(asset_id)
+
+                    if price is None or price <= 0:
+                        continue
+
+                    if price > recycled_cash:
+                        continue
+
+                    shares_to_add = int(recycled_cash // price)
+
+                    if shares_to_add <= 0:
+                        continue
+
+                    current_step_holdings[asset_id] += shares_to_add
+                    recycled_cash -= shares_to_add * price
+                    made_purchase = True
+
+                    # After adding to the smallest possible asset, recalculate
+                    break
 
         return current_step_holdings
-        
-        
-    sell_fee = context["meta"].get("sell_fee", 0) 
+
+    sell_fee = context["meta"].get("sell_fee", 0)
+
     min_position_value = 50 * max(buy_fee, sell_fee)
-    
+
+    holdings_before_min_filter = current_step_holdings.copy()
+
     current_step_holdings = min_position_filter(current_step_holdings)
+
+    if not current_step_holdings:
+        current_step_holdings = holdings_before_min_filter
+   
     # ==========================
     # FINAL NORMALIZATION STEP
     # ==========================
