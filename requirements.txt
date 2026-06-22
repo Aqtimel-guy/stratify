@@ -5,3 +5,6 @@ numpy
 matplotlib
 bcrypt
 plotly
+supabase
+requests
+pyarrow

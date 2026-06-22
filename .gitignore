@@ -1,19 +1,67 @@
-# Database
+# ============================================================
+# Secrets / environment variables
+# ============================================================
+
+.env
+.env.*
+!.env.example
+
+.streamlit/secrets.toml
+secrets.toml
+
+
+# ============================================================
+# Local databases / DuckDB files
+# ============================================================
+
 *.duckdb
 *.duckdb.wal
+*.duckdb.bak
+*.bak
 
-# Python
+stratify.duckdb
+
+
+# ============================================================
+# Local data / backups / generated exports
+# ============================================================
+
+Data_Storage/
+Backups/
+temp_parquet_outputs/
+
+
+# ============================================================
+# Python cache / virtual environments
+# ============================================================
+
 __pycache__/
-*.pyc
-.venv/
-env/
+*.py[cod]
+*$py.class
 
-# IDEs
+.venv/
+venv/
+env/
+ENV/
+
+
+# ============================================================
+# Logs / temporary files
+# ============================================================
+
+*.log
+*.tmp
+*.temp
+
+
+# ============================================================
+# IDE / editor / OS files
+# ============================================================
+
 .vscode/
 .idea/
+.devcontainer/
 
-# Environment variables
-.env
-
-# Logs
-*.log
+.DS_Store
+Thumbs.db
+desktop.ini

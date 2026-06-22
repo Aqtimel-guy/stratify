@@ -106,8 +106,6 @@ def show_login_page():
             if st.button("Forgot password?", use_container_width=True):
                 go_to("password_recovery_page")
         
-  
-        
 
 
 def show_registration_page():
@@ -2495,7 +2493,7 @@ def show_strategy_builder():
 
 def show_strategy_manager():
     dashboard_sidebar()
-    st.title("🛠️ Strategy Builder")
+    st.title("🛠️ Strategy Manager")
 
     # ---------------------------------------
     # Get required state
@@ -2526,14 +2524,24 @@ def show_strategy_manager():
     
 def test_page():
     dashboard_sidebar()
-    st.write("## 🧪 Sell Engine Testing")
+
+    st.title("🧪 Sell Engine")
+    st.caption("Review current holdings, strategy relevance, and recommended sell orders.")
 
     con = st.session_state.con
     portfolio_id = st.session_state.get("current_portfolio_id")
     sim_date = st.session_state.get("current_sim_date")
 
+    if portfolio_id is None:
+        st.error("No active portfolio selected.")
+        return
+
+    if sim_date is None:
+        st.error("No simulation date selected.")
+        return
+
     # ======================================================
-    # CURRENT HOLDINGS
+    # LOAD CURRENT HOLDINGS
     # ======================================================
     holdings_df = get_current_holdings_with_prices(
         con,
@@ -2541,17 +2549,12 @@ def test_page():
         sim_date
     )
 
-    st.markdown("### 📦 Current Portfolio Holdings")
-
-    st.dataframe(
-        holdings_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
+    if holdings_df is None or holdings_df.empty:
+        st.info("This portfolio has no current holdings.")
+        return
 
     # ======================================================
-    # STRATEGY CONTEXT
+    # LOAD STRATEGY CONTEXT
     # ======================================================
     context = build_strategy_context(
         con,
@@ -2559,56 +2562,316 @@ def test_page():
         sim_date
     )
 
-    strategy_ids = list(context["strategies"].keys())
+    strategy_ids = sorted(list(context["strategies"].keys()))
+
+    if not strategy_ids:
+        st.warning("No active strategies found for this portfolio.")
+        return
+
+    sell_fee = context["meta"].get("sell_fee", 0)
+
+    # ======================================================
+    # TOP SUMMARY
+    # ======================================================
+    total_market_value = holdings_df["market_value"].sum()
+    number_of_positions = holdings_df["asset_id"].nunique()
+    avg_pnl = holdings_df["pnl_pct"].mean() if "pnl_pct" in holdings_df.columns else 0
+
+    st.markdown("### 📌 Portfolio Overview")
+
+    metric_col2, metric_col3, metric_col4 = st.columns(3)
 
 
+    with metric_col2:
+        st.metric("Positions", number_of_positions)
+
+    with metric_col3:
+        st.metric("Market Value", f"{total_market_value:,.2f}")
+
+    with metric_col4:
+        st.metric("Sell Fee", f"{sell_fee:,.2f} $")
+        
+    
 
     st.divider()
 
     # ======================================================
-    # RELEVANCE EVALUATION
+    # CURRENT HOLDINGS
     # ======================================================
-    st.markdown("### 🔍 Holdings Relevance Evaluation")
+    col_left , col_right = st.columns(2)
+    with col_left:
+        
+        st.markdown("### 📦 Current Portfolio Holdings")
 
-    cols = st.columns(len(strategy_ids))
+        holdings_display_cols = [
+            col for col in [
+                "ticker",
+                "name",
+                "sector",
+                "shares",
+                "avg_buy_price",
+                "current_price",
+                "market_value",
+                "pnl_pct",
+                "portfolio_weight"
+            ]
+            if col in holdings_df.columns
+        ]
 
-    for col, strategy_id in zip(cols, strategy_ids):
-
-        with col:
-
-            st.markdown(f"#### Strategy {strategy_id}")
-
-            evaluation_df = evaluate_current_holdings(
-                con,
-                context,
-                strategy_id,
-                holdings_df,
-                sim_date
-            )
-
+        with st.expander("Show current holdings", expanded=False):
             st.dataframe(
-                evaluation_df,
+                holdings_df[holdings_display_cols],
                 use_container_width=True,
                 hide_index=True
             )
-            
+
+
+    with col_right:
+        st.markdown("### 🔍 Holdings Relevance by Strategy")
+
+        with st.expander("Holdings Relevance by Strategy", expanded=False):
+            # ======================================================
+            # STRATEGY RELEVANCE EVALUATION
+            # ======================================================
+
+            strategy_evaluations = {}
+
+            strategy_tabs = st.tabs([
+                f"Strategy {strategy_id}"
+                for strategy_id in strategy_ids
+            ])
+
+            for tab, strategy_id in zip(strategy_tabs, strategy_ids):
+
+                with tab:
+                    evaluation_df = evaluate_current_holdings(
+                        con=con,
+                        context=context,
+                        strategy_id=strategy_id,
+                        holdings_df=holdings_df,
+                        sim_date=sim_date
+                    )
+
+                    strategy_evaluations[strategy_id] = evaluation_df
+
+                    if evaluation_df is None or evaluation_df.empty:
+                        st.info(f"No evaluation available for strategy {strategy_id}.")
+                        continue
+
+                    status_counts = (
+                        evaluation_df["relevance_status"]
+                        .value_counts()
+                        .to_dict()
+                        if "relevance_status" in evaluation_df.columns
+                        else {}
+                    )
+
+                    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+
+                    with stat_col1:
+                        st.metric("Strong / Hold", status_counts.get("strong_hold", 0) + status_counts.get("hold", 0))
+
+                    with stat_col2:
+                        st.metric("Watch", status_counts.get("watch", 0))
+
+                    with stat_col3:
+                        st.metric("Consider Out", status_counts.get("consider_out", 0))
+
+                    with stat_col4:
+                        st.metric("Weak Hold", status_counts.get("weak_hold", 0))
+
+                    evaluation_display_cols = [
+                        col for col in [
+                            "ticker",
+                            "name",
+                            "sector",
+                            "shares",
+                            "market_value",
+                            "portfolio_weight",
+                            "strategy_rank",
+                            "rank_percentile",
+                            "relevance_status",
+                            "relevance_score"
+                        ]
+                        if col in evaluation_df.columns
+                    ]
+
+                    st.dataframe(
+                        evaluation_df[evaluation_display_cols],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
     st.divider()
-    st.markdown("### 📦 Current Portfolio SEll Suggestions")
-    strategy_evaluations = {}
+    
+    # ======================================================
+    # PORTFOLIO-LEVEL SELL SUGGESTIONS
+    # ======================================================
+    
+    
+    col_left , col_right = st.columns(2)
 
-    for strategy_id in context["strategies"].keys():
+    with col_left:
+        st.markdown("### 📦 Portfolio-Level Sell Suggestions")
 
-        eval_df = evaluate_current_holdings(
-            con=con,
-            context=context,
-            strategy_id=strategy_id,
-            holdings_df=holdings_df,
-            sim_date=sim_date
+        sell_candidates_df = find_portfolio_sell_candidates(
+            strategy_evaluations=strategy_evaluations,
+            context=context
         )
 
-        strategy_evaluations[strategy_id] = eval_df
+        if sell_candidates_df is None or sell_candidates_df.empty:
+            st.success("No sell candidates found. Current holdings look acceptable across strategies.")
+            return
 
-    sell_candidates_df = find_portfolio_sell_candidates(strategy_evaluations)
+        decision_counts = (
+            sell_candidates_df["portfolio_decision"]
+            .value_counts()
+            .to_dict()
+            if "portfolio_decision" in sell_candidates_df.columns
+            else {}
+        )
 
-    st.write("Portfolio-level sell candidates")
-    st.dataframe(sell_candidates_df)
+        decision_col1, decision_col2, decision_col3, decision_col4 = st.columns(4)
+
+        with decision_col1:
+            st.metric("Sell Candidates", decision_counts.get("sell_candidate", 0))
+
+        with decision_col2:
+            st.metric("Low Confidence", decision_counts.get("sell_candidate_low_confidence", 0))
+
+        with decision_col3:
+            st.metric("Reduce", decision_counts.get("reduce_candidate", 0))
+
+        with decision_col4:
+            st.metric("Review", decision_counts.get("review_only", 0))
+
+        sell_candidates_display_cols = [
+            col for col in [
+                "ticker",
+                "name",
+                "sector",
+                "shares",
+                "current_price",
+                "market_value",
+                "portfolio_weight",
+                "portfolio_decision",
+                "support_count",
+                "exit_count",
+                "unknown_count",
+                "best_strategy_rank",
+                "worst_strategy_rank",
+                "passes_min_trade_filter",
+                "is_overweight"
+            ]
+            if col in sell_candidates_df.columns
+        ]
+
+        with st.expander("Show sell candidate details", expanded=False):
+            st.dataframe(
+                sell_candidates_df[sell_candidates_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+    with col_right:
+        
+        # ======================================================
+        # BUILD RECOMMENDED SELL ORDERS
+        # ======================================================
+        st.markdown("### 🧾 Recommended Sell Orders")
+
+        sell_execution_df = build_recommended_sell_execution_df(
+            sell_candidates_df=sell_candidates_df,
+            sell_fee=sell_fee
+        )
+
+        if sell_execution_df is None or sell_execution_df.empty:
+            st.info("Sell candidates were found, but no executable sell orders were generated.")
+            return
+
+        total_sell_value = sell_execution_df["estimated_value"].sum()
+        total_sell_fees = sell_execution_df["estimated_fee"].sum()
+        total_cash_added = sell_execution_df["estimated_cash_added"].sum()
+        number_of_sell_orders = len(sell_execution_df)
+
+        order_col1, order_col2, order_col3, order_col4 = st.columns(4)
+
+        with order_col1:
+            st.metric("Sell Orders", number_of_sell_orders)
+
+        with order_col2:
+            st.metric("Gross Sold", f"{total_sell_value:,.2f}")
+
+        with order_col3:
+            st.metric("Sell Fees", f"{total_sell_fees:,.2f}")
+
+        with order_col4:
+            st.metric("Net Cash Added", f"{total_cash_added:,.2f}")
+
+        with st.expander("Show Recommended Sell Orders", expanded=False):
+
+            execution_display_cols = [
+                col for col in [
+                    "ticker",
+                    "portfolio_decision",
+                    "current_holding_shares",
+                    "shares",
+                    "price",
+                    "estimated_value",
+                    "estimated_fee",
+                    "estimated_cash_added"
+                ]
+                if col in sell_execution_df.columns
+            ]
+
+            st.dataframe(
+                sell_execution_df[execution_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.warning(
+                "This action will execute real sell transactions in the database, "
+                "update holdings, charge sell fees, update available cash, and record a portfolio snapshot."
+            )
+
+
+
+    action_col1, action_col2 = st.columns([2, 1])
+
+    with action_col1:
+        confirm_sell = st.checkbox(
+            "I understand and want to execute these recommended sell orders."
+        )
+
+    with action_col2:
+        execute_clicked = st.button(
+            "Execute sells",
+            type="primary",
+            disabled=not confirm_sell,
+            use_container_width=True
+        )
+
+    if execute_clicked:
+        success, message = execute_portfolio_sell_orders(
+            con=con,
+            portfolio_id=portfolio_id,
+            execution_df=sell_execution_df,
+            timestamp=sim_date,
+            sell_fee=sell_fee
+        )
+
+        if success:
+            st.success(message)
+
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+
+            st.rerun()
+
+        else:
+            st.error(message)
+            
+            
+    

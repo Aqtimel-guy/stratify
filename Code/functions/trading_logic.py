@@ -11,7 +11,7 @@ DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרו�
 
 
 # for executing cash transactions (withdrawl \ depost)
-def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timestamp, reference=None):
+def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timestamp, reference=None , fee=0):
     """
     Executes a cash deposit or withdrawal, updates the database,
     and records a portfolio history snapshot.
@@ -63,6 +63,7 @@ def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timest
         con.execute("ROLLBACK")
         logger.error(f"Cash transaction failed: {e}")
         return False, str(e)
+
 
 # for executing a trade
 def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy' , fee=0):
@@ -137,7 +138,8 @@ def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='bu
         logger.error(f"Trade failed: {e}")
         return False, str(e)
 
-# for executing multiple trades simutaisly
+
+# for executing multiple trades simutaisly (buy side)
 def execute_portfolio_buy_orders(con, portfolio_id, execution_df, timestamp, buy_fee=0):
     """
     Executes multiple buy orders for a portfolio in one database transaction.
@@ -300,6 +302,185 @@ def execute_portfolio_buy_orders(con, portfolio_id, execution_df, timestamp, buy
         logger.error(f"Portfolio buy execution failed: {e}")
         return False, str(e)
 
+
+# for executing multiple trades simutaisly (sell side)
+def execute_portfolio_sell_orders(con, portfolio_id, execution_df, timestamp, sell_fee=0):
+    """
+    Executes multiple sell orders for a portfolio in one database transaction.
+
+    Expected execution_df columns:
+    - asset_id
+    - ticker
+    - price
+    - shares
+
+    This function:
+    - validates all sell orders before execution
+    - checks that the portfolio owns enough shares
+    - inserts all sell transactions
+    - updates holdings
+    - updates portfolio cash once, after subtracting sell fees
+    - records one portfolio snapshot
+    """
+
+    logger = logging.getLogger(__name__)
+
+    if execution_df is None or execution_df.empty:
+        return False, "No sell orders to execute."
+
+    required_cols = ["asset_id", "ticker", "price", "shares"]
+    missing_cols = [col for col in required_cols if col not in execution_df.columns]
+
+    if missing_cols:
+        return False, f"Missing required columns: {missing_cols}"
+
+    orders_df = execution_df.copy()
+
+    orders_df["asset_id"] = orders_df["asset_id"].astype(int)
+    orders_df["shares"] = orders_df["shares"].astype(int)
+    orders_df["price"] = orders_df["price"].astype(float)
+
+    orders_df = orders_df[
+        (orders_df["shares"] > 0) &
+        (orders_df["price"] > 0)
+    ].copy()
+
+    if orders_df.empty:
+        return False, "No valid sell orders after filtering."
+
+    orders_df = (
+        orders_df
+        .groupby(["asset_id", "ticker", "price"], as_index=False)["shares"]
+        .sum()
+    )
+
+    orders_df["total_value"] = orders_df["shares"] * orders_df["price"]
+
+    total_positions_value = float(orders_df["total_value"].sum())
+    total_fees = float(sell_fee * len(orders_df))
+    total_cash_added = total_positions_value - total_fees
+
+    if total_cash_added <= 0:
+        return False, (
+            f"Sell proceeds are not enough to cover fees. "
+            f"Positions: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Net cash added: {total_cash_added:.2f}"
+        )
+
+    asset_ids = orders_df["asset_id"].astype(int).tolist()
+    placeholders = ",".join(["?"] * len(asset_ids))
+
+    current_holdings_query = f"""
+        SELECT asset_id, quantity
+        FROM holdings
+        WHERE portfolio_id = ?
+          AND asset_id IN ({placeholders})
+    """
+
+    current_holdings = con.execute(
+        current_holdings_query,
+        [portfolio_id] + asset_ids
+    ).df()
+
+    current_quantity_map = {
+        int(row["asset_id"]): int(row["quantity"])
+        for _, row in current_holdings.iterrows()
+    }
+
+    validation_errors = []
+
+    for _, row in orders_df.iterrows():
+        asset_id = int(row["asset_id"])
+        ticker = row["ticker"]
+        requested_shares = int(row["shares"])
+        owned_shares = current_quantity_map.get(asset_id, 0)
+
+        if owned_shares <= 0:
+            validation_errors.append(
+                f"{ticker}: portfolio does not own this asset."
+            )
+
+        elif requested_shares > owned_shares:
+            validation_errors.append(
+                f"{ticker}: trying to sell {requested_shares}, but only {owned_shares} owned."
+            )
+
+    if validation_errors:
+        return False, " | ".join(validation_errors)
+
+    try:
+        con.execute("BEGIN TRANSACTION")
+
+        transaction_rows = [
+            (
+                int(row["asset_id"]),
+                portfolio_id,
+                timestamp,
+                int(row["shares"]),
+                float(row["price"]),
+                float(row["total_value"]),
+                "sell"
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            INSERT INTO assets_transactions (
+                asset_id,
+                portfolio_id,
+                timestamp,
+                quantity,
+                price_per_share,
+                total_value,
+                side
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, transaction_rows)
+
+        holding_update_rows = [
+            (
+                int(row["shares"]),
+                portfolio_id,
+                int(row["asset_id"])
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            UPDATE holdings
+            SET quantity = quantity - ?
+            WHERE portfolio_id = ?
+              AND asset_id = ?
+        """, holding_update_rows)
+
+        con.execute("""
+            DELETE FROM holdings
+            WHERE portfolio_id = ?
+              AND quantity <= 0
+        """, [portfolio_id])
+
+        con.execute("""
+            UPDATE portfolios
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [total_cash_added, portfolio_id])
+
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+
+        con.execute("COMMIT")
+
+        return True, (
+            f"Successfully executed {len(orders_df)} sell orders. "
+            f"Positions sold: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Cash added: {total_cash_added:.2f}"
+        )
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        logger.error(f"Portfolio sell execution failed: {e}")
+        return False, str(e)
 
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
@@ -595,112 +776,193 @@ def get_portfolio_cash_history(_con, portfolio_id, sim_date):
 
 # for simulating time
 def handle_time_jump(new_date, p_id):
-    # 1. חישוב תאריך גג (אתמול)
+    """
+    Advances a portfolio simulation date and backfills daily portfolio history.
+
+    This function:
+    - prevents jumping into the future
+    - calculates dividends earned during the jump window
+    - values current holdings for each simulated day using ASOF price matching
+    - writes daily portfolio history
+    - updates the portfolio's current simulation date and available cash
+    """
+
     yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
     yesterday_dt = datetime.datetime.combine(yesterday.date(), datetime.time.max)
 
     if new_date > yesterday_dt:
-        st.error(f"Cannot travel to the future!")
+        st.error("Cannot travel to the future!")
         return False
 
     con = st.session_state.con
+
     try:
-        
-        # שליפת התאריך הנוכחי
-        res = con.execute("SELECT current_sim_date FROM portfolios WHERE portfolio_id = ?", [p_id]).fetchone()
-        if not res:
+        portfolio_row = con.execute("""
+            SELECT current_sim_date, available_cash
+            FROM portfolios
+            WHERE portfolio_id = ?
+        """, [p_id]).fetchone()
+
+        if not portfolio_row:
+            st.error("Portfolio not found.")
             return False
-        start_date = res[0]
-        
-        # אם אין באמת קפיצה קדימה
+
+        start_date, starting_cash = portfolio_row
+
         if start_date >= new_date:
             return True
 
         con.execute("BEGIN TRANSACTION")
-        
-        # --- NEW: CALCULATE AND UPDATE DIVIDENDS DURING TIME JUMP ---
-        # 1. Fetch total dividends earned for current holdings within the time jump window
-        dividend_calc_query = """
-            SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0) as total_div
+
+        backfill_query = """
+            INSERT INTO portfolio_history (
+                portfolio_id,
+                timestamp,
+                portfolio_value,
+                available_cash
+            )
+            WITH current_holdings AS (
+                SELECT
+                    asset_id,
+                    quantity
+                FROM holdings
+                WHERE portfolio_id = ?
+                  AND quantity > 0
+            ),
+
+            date_series AS (
+                SELECT CAST(day_raw AS TIMESTAMP) AS day_ts
+                FROM generate_series(
+                    CAST(? AS TIMESTAMP) + INTERVAL 1 DAY,
+                    CAST(? AS TIMESTAMP),
+                    INTERVAL 1 DAY
+                ) AS t(day_raw)
+            ),
+
+            holding_days AS (
+                SELECT
+                    ds.day_ts,
+                    h.asset_id,
+                    h.quantity
+                FROM date_series ds
+                CROSS JOIN current_holdings h
+            ),
+
+            price_matches AS (
+                SELECT
+                    hd.day_ts,
+                    hd.asset_id,
+                    hd.quantity,
+                    p.close
+                FROM holding_days hd
+                ASOF LEFT JOIN prices p
+                  ON hd.asset_id = p.asset_id
+                 AND hd.day_ts >= p.timestamp
+            ),
+
+            assets_by_day AS (
+                SELECT
+                    day_ts,
+                    COALESCE(SUM(quantity * close), 0) AS assets_value
+                FROM price_matches
+                GROUP BY day_ts
+            ),
+
+            dividend_events AS (
+                SELECT
+                    CAST(d.timestamp AS TIMESTAMP) AS dividend_ts,
+                    SUM(h.quantity * d.dividend_amount) AS dividend_amount
+                FROM current_holdings h
+                JOIN dividends d
+                  ON h.asset_id = d.asset_id
+                WHERE d.timestamp > CAST(? AS TIMESTAMP)
+                  AND d.timestamp <= CAST(? AS TIMESTAMP)
+                GROUP BY d.timestamp
+            ),
+
+            daily_cash AS (
+                SELECT
+                    ds.day_ts,
+                    ? + COALESCE(SUM(de.dividend_amount), 0) AS available_cash
+                FROM date_series ds
+                LEFT JOIN dividend_events de
+                  ON de.dividend_ts <= ds.day_ts
+                GROUP BY ds.day_ts
+            )
+
+            SELECT
+                ? AS portfolio_id,
+                ds.day_ts,
+                COALESCE(abd.assets_value, 0) + dc.available_cash AS portfolio_value,
+                dc.available_cash
+            FROM date_series ds
+            LEFT JOIN assets_by_day abd
+              ON ds.day_ts = abd.day_ts
+            JOIN daily_cash dc
+              ON ds.day_ts = dc.day_ts
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM portfolio_history ph
+                WHERE ph.portfolio_id = ?
+                  AND ph.timestamp = ds.day_ts
+            )
+        """
+
+        con.execute(
+            backfill_query,
+            [
+                p_id,
+                start_date,
+                new_date,
+                start_date,
+                new_date,
+                starting_cash,
+                p_id,
+                p_id
+            ]
+        )
+
+        total_dividends = con.execute("""
+            SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0)
             FROM holdings h
-            JOIN dividends d ON h.asset_id = d.asset_id
+            JOIN dividends d
+              ON h.asset_id = d.asset_id
             WHERE h.portfolio_id = ?
               AND h.quantity > 0
-              AND d.timestamp > CAST(? AS DATE)
-              AND d.timestamp <= CAST(? AS DATE)
-        """
-        total_dividends = con.execute(dividend_calc_query, [p_id, start_date, new_date]).fetchone()[0]
+              AND d.timestamp > CAST(? AS TIMESTAMP)
+              AND d.timestamp <= CAST(? AS TIMESTAMP)
+        """, [p_id, start_date, new_date]).fetchone()[0]
 
-        # 2. If dividends were earned, update the user's available cash right now
-        if total_dividends > 0:
-            con.execute(
-                "UPDATE portfolios SET available_cash = available_cash + ? WHERE portfolio_id = ?",
-                [total_dividends, p_id]
-            )
-        # --- END OF NEW CODE ---
+        con.execute("""
+            UPDATE portfolios
+            SET
+                current_sim_date = ?,
+                available_cash = available_cash + ?
+            WHERE portfolio_id = ?
+        """, [new_date, total_dividends, p_id])
 
-        # 2. שאילתת ה-Backfill המשופרת (יציבה יותר)
-        # שים לב לשימוש ב-date_trunc וב-CAST מפורש
-        backfill_query = """
-        INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-        WITH date_series AS (
-            -- נותנים שם מפורש לעמודה (day_raw) כדי למנוע את שגיאת ה-Binder
-            SELECT CAST(day_raw AS TIMESTAMP) as day_ts
-            FROM generate_series(
-                CAST(? AS TIMESTAMP) + INTERVAL 1 DAY, 
-                CAST(? AS TIMESTAMP), 
-                INTERVAL 1 DAY
-            ) AS t(day_raw)
-        ),
-        daily_valuation AS (
-            SELECT 
-                ds.day_ts,
-                COALESCE(SUM(h.quantity * (
-                    SELECT p.close FROM prices p 
-                    WHERE p.asset_id = h.asset_id 
-                      AND p.timestamp <= ds.day_ts 
-                    ORDER BY p.timestamp DESC LIMIT 1
-                )), 0) as assets_value
-            FROM date_series ds
-            CROSS JOIN holdings h
-            WHERE h.portfolio_id = ?
-            GROUP BY ds.day_ts
-        )
-        SELECT 
-            ?, 
-            dv.day_ts, 
-            dv.assets_value + p.available_cash, 
-            p.available_cash
-        FROM daily_valuation dv
-        JOIN portfolios p ON p.portfolio_id = ?
-        """
-        
-        con.execute(backfill_query, [start_date, new_date, p_id, p_id, p_id])
-        
-
-        # 3. עדכון תאריך נוכחי בתיק
-        con.execute("UPDATE portfolios SET current_sim_date = ? WHERE portfolio_id = ?", [new_date, p_id])
-        
         con.execute("COMMIT")
 
-        # עדכון State
         st.session_state.current_sim_date = new_date
-        st.session_state.current_sim_date_display = new_date.strftime('%d/%m/%Y')
-        if 'perf_data' in st.session_state:
+        st.session_state.current_sim_date_display = new_date.strftime("%d/%m/%Y")
+
+        if "perf_data" in st.session_state:
             del st.session_state.perf_data
-            
+
         return True
 
     except Exception as e:
         try:
             con.execute("ROLLBACK")
-        except:
-            pass # אם הטרנזקציה כבר נסגרה
+        except Exception:
+            pass
+
         st.error(f"Time Jump Failed: {e}")
         return False
+    
 
 # for getting recomendations to buy
-def get_closest_assets(con, strategy_id: int, sim_date: str):
+def get_closest_assets(con, strategy_id: int, sim_date: str ,min_required_factors=4):
     """
     Returns all assets ranked by similarity to the user strategy vector.
 
@@ -754,16 +1016,53 @@ def get_closest_assets(con, strategy_id: int, sim_date: str):
         return assets_df
 
     # ======================================================
-    # 3. COMPUTE EUCLIDEAN DISTANCE
+    # 3. COMPUTE ROBUST EUCLIDEAN DISTANCE
     # ======================================================
-    asset_matrix = assets_df.iloc[:, 1:].to_numpy()
 
-    distances = np.sqrt(
-        np.sum(
-            (asset_matrix - strategy_vector) ** 2,
-            axis=1
-        )
+    factor_cols = [
+        "momentum_factor_market",
+        "value_factor_market",
+        "quality_factor_market",
+        "growth_factor_market",
+        "defensive_factor_market",
+        "size_factor_market",
+    ]
+
+    asset_matrix = (
+        assets_df[factor_cols]
+        .replace([np.inf, -np.inf], np.nan)
+        .to_numpy(dtype=float)
     )
+
+    strategy_vector = np.array(strategy_vector, dtype=float)
+
+    if not np.isfinite(strategy_vector).all():
+        raise ValueError(
+            f"Strategy {strategy_id} contains missing or invalid preference values"
+        )
+
+    total_factors = len(factor_cols)
+    valid_mask = np.isfinite(asset_matrix)
+    valid_counts = valid_mask.sum(axis=1)
+
+    diff = asset_matrix - strategy_vector
+
+    squared_diff = np.where(
+        valid_mask,
+        diff ** 2,
+        0.0
+    )
+
+    mean_squared_diff = np.divide(
+        squared_diff.sum(axis=1),
+        valid_counts,
+        out=np.full(len(assets_df), np.inf),
+        where=valid_counts > 0
+    )
+
+    distances = np.sqrt(mean_squared_diff * total_factors)
+
+    distances[valid_counts < min_required_factors] = np.inf
 
     assets_df = assets_df.copy()
     assets_df["distance"] = distances

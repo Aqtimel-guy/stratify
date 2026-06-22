@@ -162,7 +162,8 @@ def search_assets(con, search_term):
 
 
 # for calculating portfolio's Value at a given time 
-def portfolio_value_calculator(portfolio_id , timestamp , con=st.session_state.con):
+def portfolio_value_calculator(portfolio_id, timestamp, con=None):
+
     
     """
     this function will calculate the value of a portfolio
@@ -175,7 +176,8 @@ def portfolio_value_calculator(portfolio_id , timestamp , con=st.session_state.c
     """
         
     logger = logging.getLogger(__name__)
-    
+    if con is None:
+        con = st.session_state.con
     ### --- step 1: query ther relevant data from DB --- ###
     
     # get table of relevant prices

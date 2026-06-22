@@ -152,7 +152,7 @@ def show_buy_component(ticker, asset_price):
     con = st.session_state.con
     
     # 1. שימוש במזומן מה-State (חוסך פנייה מיותרת ל-DB עד רגע הקנייה)
-    current_cash = st.session_state.get('current_available_cash', 0.0)
+    current_cash = st.session_state.current_available_cash
 
     # מפתח ייחודי למצב האישור של הנכס הספציפי
     confirm_key = f"confirm_buy_{ticker}"
@@ -233,6 +233,11 @@ def render_holdings_table(con, portfolio_id, sim_date):
             color: #1E293B;
             font-weight: 500;
             padding: 0 8px;
+            overflow: hidden;            /* מונע מהטקסט לגלוש החוצה מהקונטיינר */
+            white-space: nowrap;         /* מונע מהטקסט לרדת שורה */
+            text-overflow: ellipsis;     /* מוסיף שלוש נקודות (...) כשאין מקום */
+            min-width: 10;                /* קריטי ב-Flexbox כדי לאפשר קיטום */
+            flex: 2;
         }
 
         /* Force the entire Streamlit column row block to adopt a subtle background color 
@@ -393,7 +398,7 @@ def render_holdings_table(con, portfolio_id, sim_date):
         
         # D) Combined Actions Layout (Trade Popover / Deep Analysis Dialog)
         with cols[7]:
-            p_cash = st.session_state.get('current_available_cash', 0)  
+            p_cash = st.session_state.current_available_cash
 
             with st.popover("💼 Trade", use_container_width=True):
                 # 1. Select Trade Side
@@ -692,7 +697,7 @@ def show_asset_analysis_dialog( asset_ticker):
 
     # 3. שליפת נתונים פונדמנטליים אחרונים (הכי קרובים לתאריך הסימולציה)
     fund_data = con.execute("""
-        SELECT pe_ratio, market_cap, revenue, eps 
+        SELECT market_cap, revenue, eps 
         FROM fundamentals 
         WHERE asset_id = ? AND timestamp <= ?
         ORDER BY timestamp DESC LIMIT 1
@@ -712,7 +717,8 @@ def show_asset_analysis_dialog( asset_ticker):
                                """ , [a_id, sim_date, sim_date]).df()
     
     # tab creation
-    tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
+    # tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
+    tab1, tab3= st.tabs(["📈 Price Chart", "🔍 Strategy Analysis (Market)"])
 
     with tab1:
     # 1. בחירת טווח זמן
@@ -814,16 +820,16 @@ def show_asset_analysis_dialog( asset_ticker):
         else:
             st.warning("No data available for this specific time range.")
 
-    with tab2:
-        if fund_data:
-            pe, mcap, rev, eps = fund_data
-            c1, c2 = st.columns(2)
-            c1.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
-            c1.metric("Market Cap", f"${mcap/1e9:.1f}B" if mcap else "N/A")
-            c2.metric("Revenue", f"${rev/1e9:.1f}B" if rev else "N/A")
-            c2.metric("EPS", f"${eps:.2f}" if eps else "N/A")
-        else:
-            st.info("No fundamental data recorded up to this date.")
+    # with tab2:
+    #     if fund_data:
+    #         pe, mcap, rev, eps = fund_data
+    #         c1, c2 = st.columns(2)
+    #         c1.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
+    #         c1.metric("Market Cap", f"${mcap/1e9:.1f}B" if mcap else "N/A")
+    #         c2.metric("Revenue", f"${rev/1e9:.1f}B" if rev else "N/A")
+    #         c2.metric("EPS", f"${eps:.2f}" if eps else "N/A")
+    #     else:
+    #         st.info("No fundamental data recorded up to this date.")
 
     with tab3:
         u_id = int(st.session_state.get('user_id', 1))
@@ -884,9 +890,19 @@ def show_asset_analysis_dialog( asset_ticker):
                     if strategies_df.empty:
                         target_val = 0
                     else:
-                        target_val = float(strat_row.get(pref_col, 50))
-                        
-                    actual_val = float(stock_data.iloc[0].get(actual_col, 0))
+                        target_val = strat_row.get(pref_col, 50)
+
+                    actual_raw = stock_data.iloc[0].get(actual_col, None)
+
+                    # Skip factor if value is missing / NaN / invalid
+                    if pd.isna(actual_raw):
+                        continue
+
+                    try:
+                        actual_val = float(actual_raw)
+                        target_val = float(target_val)
+                    except (TypeError, ValueError):
+                        continue
                     
                     # Calculate match percentage (100 - absolute distance)
                     diff = abs(target_val - actual_val)
@@ -1179,27 +1195,24 @@ def show_asset_analysis_dialog( asset_ticker):
                         """, unsafe_allow_html=True)
 
                     st.divider()     
-    
-    
-    
-                           
-    with tab4:
-            # ----------------------------------------------------
-            # Factor visualization section (non-intrusive addition)
-            # ----------------------------------------------------
-            try:
-                st.divider()
+                      
+    # with tab4:
+    #         # ----------------------------------------------------
+    #         # Factor visualization section (non-intrusive addition)
+    #         # ----------------------------------------------------
+    #         try:
+    #             st.divider()
                 
-                st.subheader("📊 Factor Positioning")
+    #             st.subheader("📊 Factor Positioning")
 
-                # Render 3 factor maps for selected asset
-                render_stock_factor_maps(con, asset_ticker)
+    #             # Render 3 factor maps for selected asset
+    #             render_stock_factor_maps(con, asset_ticker)
                 
-                st.divider()
+    #             st.divider()
             
-            except Exception as e:
-                # Fail-safe: UI should never break due to visualization layer
-                st.warning(f"Factor visualization unavailable: {e}")
+    #         except Exception as e:
+    #             # Fail-safe: UI should never break due to visualization layer
+    #             st.warning(f"Factor visualization unavailable: {e}")
           
 
 # Strategy creation and editing component
@@ -1278,7 +1291,7 @@ def strategy_creating_component(con, portfolio_id):
     # TAB CONFIG
     # =======================================
 
-        
+    
     tab_options = [
             "🧠 Questionnaire",
             "⚙️ Strategies Settings",

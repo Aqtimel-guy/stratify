@@ -1,4 +1,6 @@
 import duckdb
+import logging
+DB_PATH = r'C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb'
 
 # =========================================================================
 # DATABASE CONNECTION & INITIALIZATION
@@ -72,7 +74,6 @@ con.execute("""
     CREATE TABLE IF NOT EXISTS fundamentals (
         asset_id INTEGER,
         timestamp TIMESTAMP,
-        pe_ratio DOUBLE,
         market_cap DOUBLE,
         revenue DOUBLE,
         eps DOUBLE,
@@ -93,6 +94,7 @@ con.execute("""
         momentum_relative_sp_1y DOUBLE,
         avg_volume DOUBLE,
         volume_spike DOUBLE,
+        pe_ratio DOUBLE,
         rsi_14 DOUBLE,
         atr_14 DOUBLE,
         dist_sma50 DOUBLE,
@@ -395,11 +397,58 @@ con.execute("""
     );
 """)
 
+
+
+## Tables 19&20 - fundamentals_update_status
+con.execute("""
+                 /*
+    Purpose: Tracks the sync status of financial fundamentals for each asset.
+   - asset_id: Primary identifier for the asset (Linked to your main assets table).
+   - ticker/yahoo_ticker: Symbols used for API data fetching.
+   - timestamps: Track when the last update was attempted or successfully completed.
+   - last_fundamental_date: The date of the actual fundamental data stored.
+   - status: Current state (e.g., 'pending', 'success', 'failed').
+   - fail_count: Tracks consecutive failures for retry logic.
+   - error_message: Stores the last error encountered for debugging.
+                 */
+CREATE TABLE IF NOT exists fundamentals_update_status (
+    asset_id INTEGER PRIMARY KEY,
+    ticker VARCHAR,
+    yahoo_ticker VARCHAR,
+    last_attempt_at TIMESTAMP,
+    last_success_at TIMESTAMP,
+    last_fundamental_date DATE,
+    status VARCHAR,
+    fail_count INTEGER DEFAULT 0,
+    error_message VARCHAR
+);
+
+""")
+
+  
+con.execute("""
+        /*
+    Creates a status table for SEC backfill attempts.
+    Used to avoid retrying assets that SEC cannot improve.
+        */
+        
+    CREATE TABLE IF NOT EXISTS sec_fundamentals_backfill_status (
+        asset_id INTEGER PRIMARY KEY,
+        ticker VARCHAR,
+        last_attempt_at TIMESTAMP,
+        last_status VARCHAR,
+        sec_rows INTEGER,
+        inserted_rows INTEGER,
+        filled_values INTEGER,
+        written_rows INTEGER
+    )
+""")
+
 # =========================================================================
 # DATA ADMINISTRATIVE MAINTENANCE PIPELINES
 # =========================================================================
 
-def db_reset():
+def db_reset_users():
     """
     Safely executes database sweeping routines across transaction tables.
     Adheres strictly to referential integrity constraints to protect relational structure.
@@ -421,6 +470,262 @@ def db_reset():
     
     print("Cleanup successful! All user-related execution contexts wiped cleanly.")
 
+
+
+def db_reset_data():
+    """
+    Drops and recreates the main raw-data and factor pipeline tables.
+
+    Important:
+    - This function assumes the database was already backed up.
+    - It does not touch the assets table.
+    - It does not touch portfolio/user/strategy preference tables.
+    """
+
+    tables_to_drop = [
+        "asset_factors_normalized_final",
+        "asset_factors_normalized_zscore",
+        "asset_factors_normalized_percentile",
+        "asset_factors_raw_v1",
+        "features",
+        "fundamentals",
+        "dividends",
+        "prices",
+    ]
+
+    con = None
+
+    try:
+        con = duckdb.connect(DB_PATH)
+
+        logging.warning("Starting DROP and CREATE process for data pipeline tables.")
+        print("Starting DROP and CREATE process for data pipeline tables...")
+
+        con.execute("BEGIN")
+
+        # ======================================================
+        # DROP TABLES
+        # ======================================================
+
+        for table_name in tables_to_drop:
+            con.execute(f"DROP TABLE IF EXISTS {table_name}")
+            logging.warning(f"Dropped table if existed: {table_name}")
+            print(f"Dropped table if existed: {table_name}")
+
+        # ======================================================
+        # TABLE 2 - PRICES
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE prices (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                adj_close DOUBLE,
+                volume BIGINT,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 3 - FUNDAMENTALS
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE fundamentals (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                market_cap DOUBLE,
+                revenue DOUBLE,
+                eps DOUBLE,
+                shares_outstanding DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 4 - FEATURES
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE features (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                volatility DOUBLE,
+                momentum_relative_sp_1y DOUBLE,
+                avg_volume DOUBLE,
+                volume_spike DOUBLE,
+                pe_ratio DOUBLE,
+                rsi_14 DOUBLE,
+                atr_14 DOUBLE,
+                dist_sma50 DOUBLE,
+                dist_sma200 DOUBLE,
+                beta_90d DOUBLE,
+                sharpe_ratio_90d DOUBLE,
+                max_drawdown_90d DOUBLE,
+                revenue_growth_yoy DOUBLE,
+                eps_growth_yoy DOUBLE,
+                return_1d DOUBLE,
+                return_7d DOUBLE,
+                return_1m DOUBLE,
+                return_3m DOUBLE,
+                return_6m DOUBLE,
+                return_1y DOUBLE,
+                return_3y DOUBLE,
+                return_max DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 11 - DIVIDENDS
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE dividends (
+                asset_id INTEGER,
+                timestamp DATE,
+                dividend_amount DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 13 - GROUPED FACTORS RAW
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE asset_factors_raw_v1 (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                momentum_factor_raw DOUBLE,
+                value_factor_raw DOUBLE,
+                quality_factor_raw DOUBLE,
+                growth_factor_raw DOUBLE,
+                defensive_factor_raw DOUBLE,
+                size_factor_raw DOUBLE,
+                liquidity_factor_raw DOUBLE,
+                diversification_factor_raw DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 14 - GROUPED FACTORS PERCENTILE
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE asset_factors_normalized_percentile (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                momentum_factor_sector DOUBLE,
+                momentum_factor_market DOUBLE,
+                value_factor_sector DOUBLE,
+                value_factor_market DOUBLE,
+                quality_factor_sector DOUBLE,
+                quality_factor_market DOUBLE,
+                growth_factor_sector DOUBLE,
+                growth_factor_market DOUBLE,
+                defensive_factor_sector DOUBLE,
+                defensive_factor_market DOUBLE,
+                size_factor_sector DOUBLE,
+                size_factor_market DOUBLE,
+                liquidity_factor_sector DOUBLE,
+                liquidity_factor_market DOUBLE,
+                diversification_factor_sector DOUBLE,
+                diversification_factor_market DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 15 - GROUPED FACTORS Z-SCORE
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE asset_factors_normalized_zscore (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                momentum_factor_sector DOUBLE,
+                momentum_factor_market DOUBLE,
+                value_factor_sector DOUBLE,
+                value_factor_market DOUBLE,
+                quality_factor_sector DOUBLE,
+                quality_factor_market DOUBLE,
+                growth_factor_sector DOUBLE,
+                growth_factor_market DOUBLE,
+                defensive_factor_sector DOUBLE,
+                defensive_factor_market DOUBLE,
+                size_factor_sector DOUBLE,
+                size_factor_market DOUBLE,
+                liquidity_factor_sector DOUBLE,
+                liquidity_factor_market DOUBLE,
+                diversification_factor_sector DOUBLE,
+                diversification_factor_market DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        # ======================================================
+        # TABLE 16 - GROUPED FACTORS FINAL GRADE
+        # ======================================================
+
+        con.execute("""
+            CREATE TABLE asset_factors_normalized_final (
+                asset_id INTEGER,
+                timestamp TIMESTAMP,
+                momentum_factor_sector DOUBLE,
+                momentum_factor_market DOUBLE,
+                value_factor_sector DOUBLE,
+                value_factor_market DOUBLE,
+                quality_factor_sector DOUBLE,
+                quality_factor_market DOUBLE,
+                growth_factor_sector DOUBLE,
+                growth_factor_market DOUBLE,
+                defensive_factor_sector DOUBLE,
+                defensive_factor_market DOUBLE,
+                size_factor_sector DOUBLE,
+                size_factor_market DOUBLE,
+                liquidity_factor_sector DOUBLE,
+                liquidity_factor_market DOUBLE,
+                diversification_factor_sector DOUBLE,
+                diversification_factor_market DOUBLE,
+                PRIMARY KEY (asset_id, timestamp),
+                FOREIGN KEY (asset_id) REFERENCES assets(asset_id)
+            );
+        """)
+
+        con.execute("COMMIT")
+
+        logging.info("All data pipeline tables were recreated successfully.")
+        print("")
+        print("All data pipeline tables were recreated successfully.")
+
+    except Exception as e:
+        if con is not None:
+            con.execute("ROLLBACK")
+
+        logging.exception("Failed to recreate data pipeline tables.")
+        print("")
+        print("Failed to recreate data pipeline tables.")
+        print(str(e))
+        raise
+
+    finally:
+        if con is not None:
+            con.close()
+
+db_reset_data()
 # Closing core link thread handles properly
 con.close()
 
