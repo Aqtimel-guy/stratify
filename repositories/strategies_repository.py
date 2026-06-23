@@ -1,0 +1,2 @@
+class StrategiesRepository:
+    pass

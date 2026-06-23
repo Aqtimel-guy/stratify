@@ -3929,29 +3929,8 @@ def daily_updates(data=True , factor=True):
 ### RUN UPDATES
 ###########################
 
-# daily_updates()
-# db_quality_check()
-# update_asset_factors_raw_v1() # then we update the raw factor table with the latest calculations.
-# update_factors_percentile() # then we update the factors percentile table with the latest percentiles based on the updated raw factors.
-# update_factors_zscore() # then we update the factors zscore table with the latest z-scores based on the updated percentiles.
-# update_asset_factors_normalized_final() # then we update the final normalized factors table with the latest data from the raw, percentile, and zscore tables.
 
-# fill_fundamentals_table(
-#     force_refresh=False,
-#     refresh_days=30,
-#     retry_failed_days=5,
-#     max_fail_count=5,
-#     pause_between_batches=1
-# )
-# fill_fundamentals_table_from_sec()
-fill_features_table(
-    fundamental_lag_days=60,
-    lookback_days=1200,
-    force_rebuild=True,
-    rebuild_from_date="2001-01-01"
-)
-
-update_asset_factors_raw_v1(
-    force_rebuild=True,
-    rebuild_from_date="2001-01-01"
-)
+update_asset_factors_raw_v1(force_rebuild=True) # then we update the raw factor table with the latest calculations.
+update_factors_percentile() # then we update the factors percentile table with the latest percentiles based on the updated raw factors.
+update_factors_zscore() # then we update the factors zscore table with the latest z-scores based on the updated percentiles.
+update_asset_factors_normalized_final() # then we update the final normalized factors table with the latest data from the raw, percentile, and zscore tables.

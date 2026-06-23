@@ -1299,7 +1299,11 @@ def size_factor_raw_calculator(
 ###################################
 
 
-def update_asset_factors_raw_v1():
+def update_asset_factors_raw_v1(
+    force_rebuild=False,
+    rebuild_from_date=None,
+    only_ticker=None
+):
     """
     Updates raw factor values for all assets in the database.
 
@@ -1356,17 +1360,28 @@ def update_asset_factors_raw_v1():
         con = duckdb.connect(DB_PATH)
 
         logger.info("Starting asset_factors_raw_v1 update process")
+        ticker_filter = ""
+        params = []
 
-        asset_status_df = con.execute("""
+        if only_ticker is not None:
+            ticker_filter = "WHERE a.ticker = ?"
+            params.append(str(only_ticker).strip())
+
+        asset_status_df = con.execute(f"""
             SELECT
                 a.asset_id,
+                a.ticker,
                 MAX(f.timestamp) AS last_factor_timestamp
             FROM assets a
             LEFT JOIN asset_factors_raw_v1 f
                 ON a.asset_id = f.asset_id
-            GROUP BY a.asset_id
-            ORDER BY a.asset_id
-        """).df()
+            {ticker_filter}
+            GROUP BY
+                a.asset_id,
+                a.ticker
+            ORDER BY
+                a.asset_id
+        """, params).df()
 
         total_assets = len(asset_status_df)
 
@@ -1400,10 +1415,16 @@ def update_asset_factors_raw_v1():
                 # ======================================================
 
 
-                if last_ts is not None:
-                    start_date = pd.to_datetime(last_ts) - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)
+                if force_rebuild:
+                    if rebuild_from_date is None:
+                        start_date = None
+                    else:
+                        start_date = pd.to_datetime(rebuild_from_date)
                 else:
-                    start_date = None
+                    if last_ts is not None:
+                        start_date = pd.to_datetime(last_ts) - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)
+                    else:
+                        start_date = None
 
                 # ======================================================
                 # 1.2 LOAD PRICE TIMELINE
@@ -1882,179 +1903,37 @@ def diversification_factor_raw_calculator(con, asset_id, benchmark_id=504, windo
     ] 
 
 
-# update_asset_factors_raw_v1()
+# query = """
+# SELECT
+#     a.ticker,
+#     COUNT(*) AS rows_count,
 
+#     ROUND(
+#         100.0 * SUM(CASE WHEN r.growth_factor_raw IS NULL THEN 1 ELSE 0 END) / COUNT(*),
+#         2
+#     ) AS growth_null_pct,
 
-# test_tickers = ["AAPL", "MSFT", "TSLA", "PLTR", "F", "UBER" , "META"]
-# start_date = "2020-01-01"
+#     ROUND(
+#         100.0 * SUM(CASE WHEN r.quality_factor_raw IS NULL THEN 1 ELSE 0 END) / COUNT(*),
+#         2
+#     ) AS quality_null_pct,
 
-# factor_calculators = {
-#     "momentum_factor_raw": momentum_factor_raw_calculator,
-#     "value_factor_raw": value_factor_raw_calculator,
-#     "quality_factor_raw": quality_factor_raw_calculator,
-#     "growth_factor_raw": growth_factor_raw_calculator,
-#     "defensive_factor_raw": defensive_factor_raw_calculator,
-#     "size_factor_raw": size_factor_raw_calculator,
+#     ROUND(
+#         100.0 * SUM(CASE WHEN r.size_factor_raw IS NULL THEN 1 ELSE 0 END) / COUNT(*),
+#         2
+#     ) AS size_null_pct,
 
-# }
+#     SUM(CASE WHEN r.growth_factor_raw IS NOT NULL THEN 1 ELSE 0 END) AS growth_non_null,
 
-# results = []
+#     MIN(CASE WHEN r.growth_factor_raw IS NOT NULL THEN r.timestamp END) AS first_growth_date,
+#     MAX(CASE WHEN r.growth_factor_raw IS NOT NULL THEN r.timestamp END) AS last_growth_date
 
+# FROM asset_factors_raw_v1 r
+# JOIN assets a
+#     ON r.asset_id = a.asset_id
+# WHERE a.ticker = 'META'
+#   AND r.timestamp >= DATE '2006-01-01'
+# GROUP BY a.ticker;
+# """
 # with duckdb.connect(DB_PATH) as con:
-#     for ticker in test_tickers:
-#         row = con.execute("""
-#             SELECT asset_id
-#             FROM assets
-#             WHERE ticker = ?
-#             LIMIT 1
-#         """, [ticker]).fetchone()
-
-#         if row is None:
-#             print(ticker, "not found")
-#             continue
-
-#         asset_id = int(row[0])
-
-#         print("=" * 100)
-#         print(f"Testing ticker: {ticker} | asset_id: {asset_id}")
-#         print("=" * 100)
-
-#         for factor_col, calculator_func in factor_calculators.items():
-#             try:
-#                 df = calculator_func(
-#                     con=con,
-#                     asset_id=asset_id,
-#                     start_date=start_date
-#                 )
-
-#                 if df is None or df.empty:
-#                     result = {
-#                         "ticker": ticker,
-#                         "asset_id": asset_id,
-#                         "factor": factor_col,
-#                         "rows": 0,
-#                         "null_pct": 100.0,
-#                         "non_null": 0,
-#                         "first_non_null_date": None,
-#                         "last_non_null_date": None,
-#                         "status": "EMPTY_DF"
-#                     }
-
-#                     results.append(result)
-
-#                     print(
-#                         f"{factor_col:<30} | "
-#                         f"rows: {0:<6} | "
-#                         f"null pct: {100.0:<6} | "
-#                         f"non-null: {0:<6} | "
-#                         f"status: EMPTY_DF"
-#                     )
-
-#                     continue
-
-#                 if factor_col not in df.columns:
-#                     result = {
-#                         "ticker": ticker,
-#                         "asset_id": asset_id,
-#                         "factor": factor_col,
-#                         "rows": len(df),
-#                         "null_pct": None,
-#                         "non_null": None,
-#                         "first_non_null_date": None,
-#                         "last_non_null_date": None,
-#                         "status": "MISSING_FACTOR_COLUMN"
-#                     }
-
-#                     results.append(result)
-
-#                     print(
-#                         f"{factor_col:<30} | "
-#                         f"rows: {len(df):<6} | "
-#                         f"status: MISSING_FACTOR_COLUMN"
-#                     )
-
-#                     continue
-
-#                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-
-#                 non_null_mask = df[factor_col].notna()
-#                 rows_count = len(df)
-#                 non_null_count = int(non_null_mask.sum())
-#                 null_pct = round(df[factor_col].isna().mean() * 100, 2)
-
-#                 if non_null_count > 0:
-#                     first_non_null_date = df.loc[
-#                         non_null_mask,
-#                         "timestamp"
-#                     ].min()
-
-#                     last_non_null_date = df.loc[
-#                         non_null_mask,
-#                         "timestamp"
-#                     ].max()
-#                 else:
-#                     first_non_null_date = None
-#                     last_non_null_date = None
-
-#                 result = {
-#                     "ticker": ticker,
-#                     "asset_id": asset_id,
-#                     "factor": factor_col,
-#                     "rows": rows_count,
-#                     "null_pct": null_pct,
-#                     "non_null": non_null_count,
-#                     "first_non_null_date": first_non_null_date,
-#                     "last_non_null_date": last_non_null_date,
-#                     "status": "OK"
-#                 }
-
-#                 results.append(result)
-
-#                 print(
-#                     f"{factor_col:<30} | "
-#                     f"rows: {rows_count:<6} | "
-#                     f"null pct: {null_pct:<6} | "
-#                     f"non-null: {non_null_count:<6} | "
-#                     f"first: {first_non_null_date} | "
-#                     f"last: {last_non_null_date}"
-#                 )
-
-#             except Exception as e:
-#                 result = {
-#                     "ticker": ticker,
-#                     "asset_id": asset_id,
-#                     "factor": factor_col,
-#                     "rows": None,
-#                     "null_pct": None,
-#                     "non_null": None,
-#                     "first_non_null_date": None,
-#                     "last_non_null_date": None,
-#                     "status": f"ERROR: {str(e)}"
-#                 }
-
-#                 results.append(result)
-
-#                 print(
-#                     f"{factor_col:<30} | "
-#                     f"status: ERROR | {str(e)}"
-#                 )
-
-# results_df = pd.DataFrame(results)
-# problematic_df = results_df[
-#     (results_df["status"] != "OK") |
-#     (results_df["null_pct"].fillna(100) > 50)
-# ].copy()
-
-# print("\n")
-# print("=" * 100)
-# print("PROBLEMS TABLE")
-# print("=" * 100)
-
-# print(problematic_df)
-
-# print("\n")
-# print("=" * 100)
-# print("SUMMARY TABLE")
-# print("=" * 100)
-
-# print(results_df)
+#     print(con.execute(query).df())
