@@ -18,6 +18,54 @@ DB_PATH = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייק
 # python -m streamlit run "C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\main.py"
 
 
+def show_no_db_preview_mode():
+    # Preview mode for checking UI pages without opening DuckDB.
+
+    st.sidebar.warning("NO DB MODE is active")
+    st.sidebar.write("DuckDB connection is disabled.")
+
+    preview_page = st.sidebar.selectbox(
+        "Preview page",
+        [
+            "login_page",
+            "regestration_page",
+            "password_recovery_page",
+            "home_page",
+            "portfolios",
+            "dashboard_home",
+            "asset_purchsing",
+            "strategy_builder",
+            "portfolio_performance_analysis",
+            "strategy_managment",
+            "test_page",
+        ],
+        index=0
+    )
+
+    preview_pages = {
+        "login_page": show_login_page,
+        "regestration_page": show_registration_page,
+        "password_recovery_page": show_password_recovery_page,
+        "home_page": show_home_page,
+        "portfolios": show_portfolios_page,
+        "dashboard_home": show_dashboard_home,
+        "asset_purchsing": show_asset_purchsing,
+        "strategy_builder": show_strategy_builder,
+        "portfolio_performance_analysis": show_portfolio_performance_analysis,
+        "strategy_managment": show_strategy_manager,
+        "test_page": test_page,
+    }
+
+    # Minimal fake session state for UI preview
+    if "page" not in st.session_state:
+        st.session_state.page = preview_page
+
+    try:
+        preview_pages[preview_page]()
+
+    except Exception as e:
+        st.error("This page tried to use the database or missing session state.")
+        st.exception(e)
 def main():
     # ======================================================
     # PAGE CONFIGURATION
@@ -26,6 +74,15 @@ def main():
         page_title="Stratify 2026",
         layout="wide"
     )
+
+    # ======================================================
+    # NO DB LOCAL PREVIEW MODE
+    # ======================================================
+    # If enabled in .streamlit/secrets.toml, this prevents the app
+    # from opening the local DuckDB database.
+    if st.secrets.get("NO_DB_MODE", "false") == "true":
+        show_no_db_preview_mode()
+        st.stop()
 
     # ======================================================
     # INITIAL SESSION STATE
