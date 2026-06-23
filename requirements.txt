@@ -5,7 +5,6 @@ numpy
 matplotlib
 bcrypt
 plotly
-psycopg2-binary
-sqlalchemy
-gcsfs
-fsspec
+supabase
+requests
+pyarrow

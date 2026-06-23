@@ -16,15 +16,15 @@ def build_questionnaire(ans1, ans2, ans3, ans4, ans5, ans6, ans7):
         # Q1
         {
             "response": ans1,
-            "weights_yes": {"size": -2, "defensive": +3, "quality": +3, "value": -1},
-            "weights_no": {"size": +1, "defensive": -1, "quality": -1, "value": +3}
+            "weights_yes": {"size": +2, "defensive": +3, "quality": +3, "value": -1},
+            "weights_no": {"size": -1, "defensive": -1, "quality": -1, "value": +3}
         },
 
         # Q2
         {
             "response": ans2,
-            "weights_yes": {"size": -2, "momentum": +2, "defensive": -1},
-            "weights_no": {"size": +1, "momentum": -2, "defensive": +1}
+            "weights_yes": {"size": +2, "momentum": +2, "defensive": -1},
+            "weights_no": {"size": -1, "momentum": -2, "defensive": +1}
         },
 
         # Q3
@@ -44,8 +44,8 @@ def build_questionnaire(ans1, ans2, ans3, ans4, ans5, ans6, ans7):
         # Q5
         {
             "response": ans5,
-            "weights_yes": {"size": -3, "quality": +2, "defensive": +3, "value": -2, "liquidity": +2},
-            "weights_no": {"size": +3, "growth": +3, "quality": -2, "liquidity": -2}
+            "weights_yes": {"size": +3, "quality": +2, "defensive": +3, "value": -2, "liquidity": +2},
+            "weights_no": {"size": -3, "growth": +3, "quality": -2, "liquidity": -2}
         },
 
         # Q6
@@ -157,7 +157,7 @@ def questionnaire_to_weights(answers, factors=[
         "quality": 2.793,
         "growth": 2.406,
         "defensive": 2.391,
-        "size": -0.802,
+        "size": 0.802,
         "liquidity": 0.795
     }
 
@@ -238,3 +238,4 @@ def generate_random_user_weights(num_users=10**6):
 
 
 
+#print(pd.DataFrame([questionnaire_to_weights(build_questionnaire(True, False, True, False, True, False, True))]))

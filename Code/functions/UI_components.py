@@ -1,12 +1,15 @@
 import streamlit as st
 import duckdb
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta 
 import plotly.graph_objects as go
-from .trading_logic import execute_asset_trade , execute_cash_transaction
+from .trading_logic import execute_asset_trade , execute_cash_transaction, get_closest_assets , execute_portfolio_buy_orders
 from .portfolio_managment import calculate_fifo_avg_price
 from Code.functions.db_manager import *
 from Code.strategy_builder.user_prefrence import *
+from Code.strategy_builder.save_final_strategy import *
+
+
 
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
@@ -16,163 +19,158 @@ def go_to(page_name):
     st.session_state.page = page_name
     st.rerun()
     
-    
-
 # for showing cash management 
 def show_cash_management_ui():
+    con = st.session_state.con
     st.subheader("💰 Cash Management")
     col1, col2 = st.columns(2)
     
     # 1. Deposit
     with col1:
         # שימוש במפתח ייחודי שניתן לאפס אם רוצים (אופציונלי)
-        with st.popover("➕ Deposit Cash", width="stretch"):
+        with st.popover("➕ Deposit Cash", use_container_width=True):
             dep_amount = st.number_input("Amount to Deposit", min_value=1, step=100, key="dep_val")
             
             confirm_dep = st.checkbox(f"I confirm depositing ${dep_amount:,.2f}", key="conf_dep_check")
             
             if confirm_dep:
-                if st.button("🚀 Execute Deposit", width="stretch"):
+                if st.button("🚀 Execute Deposit", use_container_width=True):
                     if is_action_allowed(wait_time=2):
-                        with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_cash_transaction(
-                                con, 
-                                st.session_state.current_portfolio_id, 
-                                dep_amount, 
-                                'deposit', 
-                                st.session_state.current_sim_date
-                            )
-                            if success:
-                                st.success(msg)
+                        success, msg = execute_cash_transaction(
+                            con, 
+                            st.session_state.current_portfolio_id, 
+                            dep_amount, 
+                            'deposit', 
+                            st.session_state.current_sim_date
+                        )
+                        if success:
+                            st.success(msg)
+                            
+                            # ניקוי המפתחות מה-Session State כדי לאפס את הווידג'טים
+                            # משתמשים ברשימה של מפתחות שרוצים לנקות
+                            keys_to_reset = ["dep_val", "conf_dep_check", "with_val", "conf_with_check"]
+                            
+                            for key in keys_to_reset:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            
+                            # השהיה קלה לסגירת הדיאלוג/פופאוובר
+                            time.sleep(0.5)
+                            
                                 
-                                # ניקוי המפתחות מה-Session State כדי לאפס את הווידג'טים
-                                # משתמשים ברשימה של מפתחות שרוצים לנקות
-                                keys_to_reset = ["dep_val", "conf_dep_check", "with_val", "conf_with_check"]
-                                
-                                for key in keys_to_reset:
-                                    if key in st.session_state:
-                                        del st.session_state[key]
-                                
-                                # השהיה קלה לסגירת הדיאלוג/פופאוובר
-                                time.sleep(0.5)
-                                
-                                # סגירת חיבור לפני ריענון
-                                if 'con' in locals():
-                                    con.close()
-                                    
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Please wait a moment between actions.")
 
     # 2. Withdrawal
     with col2:
-        with st.popover("➖ Withdraw Cash", width="stretch"):
+        with st.popover("➖ Withdraw Cash", use_container_width=True):
             with_amount = st.number_input("Amount to Withdraw", min_value=1, step=100, key="with_val")
             
             confirm_with = st.checkbox(f"I confirm withdrawing ${with_amount:,.2f}", key="conf_with_check")
-            
+
             if confirm_with:
-                if st.button("💸 Execute Withdrawal", width="stretch"):
+                if st.button("💸 Execute Withdrawal", use_container_width=True):
                     if is_action_allowed(wait_time=2):
-                        with duckdb.connect(DB_PATH) as con:
-                            success, msg = execute_cash_transaction(
-                                con, 
-                                st.session_state.current_portfolio_id, 
-                                with_amount, 
-                                'withdrawal', 
-                                st.session_state.current_sim_date
-                            )
-                            if success:
-                                st.success(msg)
+                        success, msg = execute_cash_transaction(
+                            con, 
+                            st.session_state.current_portfolio_id, 
+                            with_amount, 
+                            'withdrawal', 
+                            st.session_state.current_sim_date
+                        )
+                        if success:
+                            st.success(msg)
+                            
+                            # במקום השמה (=), אנחנו משתמשים ב-del כדי למחוק את המפתח מה-Session State.
+                            # זה מונע את שגיאת ה-StreamlitAPIException.
+                            if "with_val" in st.session_state:
+                                del st.session_state["with_val"]
                                 
-                                # במקום השמה (=), אנחנו משתמשים ב-del כדי למחוק את המפתח מה-Session State.
-                                # זה מונע את שגיאת ה-StreamlitAPIException.
-                                if "with_val" in st.session_state:
-                                    del st.session_state["with_val"]
-                                    
-                                if "conf_with_check" in st.session_state:
-                                    del st.session_state["conf_with_check"]
-                                
-                                # השהיה קלה כדי שהמשתמש יספיק לראות את הודעת ההצלחה
-                                time.sleep(0.5)
-                                
-                                # חשוב: לסגור את החיבור לפני הריצה מחדש
-                                con.close()
-                                
-                                # קריאה לריצה מחדש - כעת הווידג'טים ייווצרו מחדש עם ערכי ברירת המחדל שלהם
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            if "conf_with_check" in st.session_state:
+                                del st.session_state["conf_with_check"]
+                            
+                            # השהיה קלה כדי שהמשתמש יספיק לראות את הודעת ההצלחה
+                            time.sleep(0.5)
+                        
+                            
+                            # קריאה לריצה מחדש - כעת הווידג'טים ייווצרו מחדש עם ערכי ברירת המחדל שלהם
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
                         st.warning("Please wait a moment between actions.")
 
 
-
-# Function to visually present asset metrics
+# for displaying assets data clearly and simply
 def display_asset_card(asset):
-    """
-    Renders an asset summary card within the UI block.
-    Validates availability based on timeframe price data and manages fallback alerts.
-    """
+    """Displays the asset data in a clean, professional card format."""
+    
+
+    
+    # Handle assets not trading on simulation date
     if asset['current_price'] is None:
         first_date = asset['first_trade_date']
         date_str = first_date.strftime('%Y-%m-%d') if hasattr(first_date, 'strftime') else str(first_date)
         
-        # FIXED: Converted all UI warning and info strings strictly to English
-        st.warning(f"⚠️ The stock **{asset['ticker']}** was not traded during this specific period.")
-        st.info(f"Initial public trading for this asset started on: **{date_str}**")
+        st.warning(f"⚠️ The stock **{asset['ticker']}** was not trading at this time.")
+        st.info(f"Trading started on: **{date_str}**")
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         return 
 
-    c1, c2, c3 = st.columns([1, 2, 1])
+    # Asset Header Layout
+    c1, c2, c3 = st.columns([1, 2, 0.8])
+    
+    sim_date = st.session_state.get("current_sim_date").date()
+    
     with c1:
-        st.metric("Price", f"${asset['current_price']:,.2f}")
+        st.metric(label=f"price at {sim_date}", value=f"${asset['current_price']:,.2f}")
+
+    
     with c2:
         st.subheader(f"{asset['name']} ({asset['ticker']})")
         st.caption(f"**Sector:** {asset['sector']} | **Industry:** {asset['industry']}")
-    with c3:
-        # Placeholder or container logic for active asset tracking imagery
-        st.subheader("logo of the company")
         
-    # Analysis Trigger Component aligned with execution state safeguards
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("📊 Run Deep Financial Analysis", key=f"analysis_btn_{asset['ticker']}", type="primary", width="stretch"):
-        st.session_state.selected_ticker_for_analysis = asset['ticker']
-        st.success(f"Selected {asset['ticker']} for quantitative research down-screen.")
+    with c3:
+        # Using a simple icon/emoji if a real logo is missing to keep it clean
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("### 🏢") 
+
+    st.divider()
 
 
-# for showing purchase 
+# for showing purchese 
 def show_buy_component(ticker, asset_price):
     """
-    Enhanced purchase component with smart state management and 
-    in-popover transaction confirmation connected directly to cloud engine.
-    All source documentation and comments are maintained strictly in English.
+    קומפוננטת רכישה משופרת עם ניהול State חכם ואישור בתוך ה-Popover.
     """
     portfolio_id = st.session_state.get('current_portfolio_id')
     sim_date = st.session_state.get('current_sim_date')
     
-    # 1. Fetch available cash from state to prevent redundant DB calls before submission
-    current_cash = st.session_state.get('current_available_cash', 0.0)
+    con = st.session_state.con
+    
+    # 1. שימוש במזומן מה-State (חוסך פנייה מיותרת ל-DB עד רגע הקנייה)
+    current_cash = st.session_state.current_available_cash
 
-    # Unique state key to handle dynamic confirmation flow for this specific asset
+    # מפתח ייחודי למצב האישור של הנכס הספציפי
     confirm_key = f"confirm_buy_{ticker}"
     if confirm_key not in st.session_state:
         st.session_state[confirm_key] = False
 
-    with st.popover(f"🛒 Buy {ticker}", width="stretch"):
+    with st.popover(f"🛒 Buy {ticker}", use_container_width=True):
         st.subheader(f"Purchase {ticker}")
         st.write(f"Cash Available: **${current_cash:,.2f}**")
         
-        # 2. Constraint validation
+        # 2. חישוב מגבלות
         max_shares = int(current_cash // asset_price) if asset_price > 0 else 0
         
         if max_shares <= 0:
             st.warning("Insufficient funds to buy this asset.")
             return
 
-        # 3. Choose order sizing method
+        # 3. בחירת שיטת קנייה (שימוש ב-form כדי למנוע ריענון על כל הקלדה)
         buy_method = st.radio("Buy by:", ["Quantity", "Total price ($)"], horizontal=True, key=f"method_{ticker}")
 
         if buy_method == "Quantity":
@@ -185,40 +183,28 @@ def show_buy_component(ticker, asset_price):
 
         st.info(f"Total Order: **{qty}** shares for **${total_cost:,.2f}**")
 
-        # 4. Smart two-step verification mechanism without redundant reruns
+        # 4. מנגנון אישור דו-שלבי חכם (ללא rerun מיותר)
         if not st.session_state[confirm_key]:
-            if st.button("Review Order", width="stretch"):
+            if st.button("Review Order", use_container_width=True):
                 st.session_state[confirm_key] = True
-                st.rerun()  # Rerun is required here to switch to confirmation buttons layout
+                st.rerun() # כאן rerun נחוץ כדי להציג את כפתור ה-Confirm במקום ה-Review
         else:
             st.warning("Confirm Transaction?")
             col_a, col_b = st.columns(2)
             
             with col_a:
-                if st.button("✅ Confirm", type="primary", width="stretch"):
-                    # Rate-limiting action boundary check
+                if st.button("✅ Confirm", type="primary", use_container_width=True):
+                    # בדיקת מחסום זמן (2 שניות)
                     if is_action_allowed(wait_time=2):
+                        success, msg = execute_asset_trade(con, portfolio_id, ticker, sim_date, qty, side='buy')
                         
-                        # 1. Get engine
-                        cloud_engine = get_supabase_engine()
-                        
-                        # 2. FIX: Open a clean connection, NOT a transaction block (.connect() instead of .begin())
-                        with cloud_engine.connect() as cloud_connection:
-                            success, msg = execute_asset_trade(
-                                cloud_con=cloud_connection, 
-                                duckdb_con=duckdb.connect(":memory:"),  # Safe, fast, and will never lock your file!
-                                portfolio_id=portfolio_id, 
-                                ticker=ticker, 
-                                timestamp=sim_date, 
-                                quantity=qty, 
-                                side='buy'
-                            )
-                            
                         if success:
                             st.session_state[confirm_key] = False
+                            # עדכון ה-State המקומי כדי שהדף הבא יראה את המזומן המעודכן מיד
                             st.session_state.current_available_cash -= total_cost
                             st.session_state.page = "dashboard_home"
                             st.toast(msg)
+                            
                             st.rerun()
                         else:
                             st.error(msg)
@@ -226,12 +212,12 @@ def show_buy_component(ticker, asset_price):
                         st.warning("Slow down...")
 
             with col_b:
-                if st.button("❌ Cancel", width="stretch"):
+                if st.button("❌ Cancel", use_container_width=True):
                     st.session_state[confirm_key] = False
                     st.rerun()
 
 # For showing holding positions
-def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
+def render_holdings_table(con, portfolio_id, sim_date):
     st.subheader("🏢 Current Holdings (FIFO)")
 
     # --- INJECTING TARGETED STYLE FOR HOLDINGS TABLE ---
@@ -247,10 +233,15 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
             color: #1E293B;
             font-weight: 500;
             padding: 0 8px;
+            overflow: hidden;            /* מונע מהטקסט לגלוש החוצה מהקונטיינר */
+            white-space: nowrap;         /* מונע מהטקסט לרדת שורה */
+            text-overflow: ellipsis;     /* מוסיף שלוש נקודות (...) כשאין מקום */
+            min-width: 10;                /* קריטי ב-Flexbox כדי לאפשר קיטום */
+            flex: 2;
         }
 
         /* Force the entire Streamlit column row block to adopt a subtle background color 
-            whenever an alternating row marker class is active inside it.
+           whenever an alternating row marker class is active inside it.
         */
         div[data-testid="stHorizontalBlock"]:has(.zebra-marker-even) {
             background-color: #F8FAFC !important;
@@ -322,26 +313,24 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
         unsafe_allow_html=True
     )
 
-    # 1. FIXED: Extract transaction history for FIFO calculations from Cloud (Supabase)
+    # 1. Fetch historical transactions for FIFO calculation
     tx_query = """
     SELECT asset_id, quantity, price_per_share, side, timestamp
     FROM assets_transactions
-    WHERE portfolio_id = :portfolio_id AND timestamp <= :sim_date
+    WHERE portfolio_id = ? AND timestamp <= ?
     ORDER BY timestamp, transaction_id
     """
-    tx_result = cloud_con.execute(text(tx_query), {"portfolio_id": portfolio_id, "sim_date": sim_date})
-    all_tx = pd.DataFrame(tx_result.fetchall(), columns=tx_result.keys()) if hasattr(tx_result, 'keys') else pd.DataFrame()
+    all_tx = con.execute(tx_query, [portfolio_id, sim_date]).df()
 
-    # 2. FIXED: Extract current active holdings matrix from Cloud (Supabase)
+    # 2. Fetch current holdings
     holdings_query = """
     SELECT a.asset_id, a.ticker, a.name, a.industry, h.quantity
     FROM holdings h
     JOIN assets a ON h.asset_id = a.asset_id
-    WHERE h.portfolio_id = :portfolio_id AND h.quantity > 0
+    WHERE h.portfolio_id = ? AND h.quantity > 0
     ORDER BY h.quantity DESC
     """
-    hold_result = cloud_con.execute(text(holdings_query), {"portfolio_id": portfolio_id})
-    holdings_df = pd.DataFrame(hold_result.fetchall(), columns=hold_result.keys()) if hasattr(hold_result, 'keys') else pd.DataFrame()
+    holdings_df = con.execute(holdings_query, [portfolio_id]).df()
 
     if holdings_df.empty:
         st.info("Your portfolio is currently empty.")
@@ -357,7 +346,11 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
     st.markdown("<hr style='margin: 8px 0 12px 0; border-color: rgba(0,0,0,0.08);'>", unsafe_allow_html=True)
 
     # --- TABLE BODY ROWS ---
-    for idx, row_data in holdings_df.iterrows():
+    # Using enumerate to track row positions for absolute accuracy
+    for idx, row in enumerate(holdings_df.iterrows()):
+        # unpack iterrows tuple
+        _, row_data = row
+        
         asset_id = row_data['asset_id']
         ticker = row_data['ticker']
         industry = row_data['industry']
@@ -367,24 +360,15 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
         zebra_marker = "zebra-marker-even" if idx % 2 == 0 else ""
         
         # A) Calculate FIFO metrics
-        if not all_tx.empty:
-            asset_tx = all_tx[all_tx['asset_id'] == asset_id]
-            avg_buy_price = calculate_fifo_avg_price(asset_tx)
-        else:
-            avg_buy_price = 0.0
+        asset_tx = all_tx[all_tx['asset_id'] == asset_id]
+        avg_buy_price = calculate_fifo_avg_price(asset_tx)
         
-        # B) FIXED: Evaluate Current Market Price from GCS (via DuckDB connection context)
-        try:
-            gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
-            current_price_res = duckdb_con.execute(f"""
-                SELECT close FROM read_parquet('{gcs_prices_url}') 
-                WHERE asset_id = ? AND date <= ? 
-                ORDER BY date DESC LIMIT 1
-            """, [asset_id, sim_date]).fetchone()
-            
-            current_price = float(current_price_res[0]) if current_price_res else 0.0
-        except Exception:
-            current_price = 0.0
+        # B) Fetch most recent asset closing price
+        current_price = con.execute("""
+            SELECT close FROM prices 
+            WHERE asset_id = ? AND timestamp <= ? 
+            ORDER BY timestamp DESC LIMIT 1
+        """, [asset_id, sim_date]).fetchone()[0]
 
         total_value = available_qty * current_price
         pnl_perc = ((current_price / avg_buy_price) - 1) * 100 if avg_buy_price > 0 else 0
@@ -414,18 +398,16 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
         
         # D) Combined Actions Layout (Trade Popover / Deep Analysis Dialog)
         with cols[7]:
-            # Safeguard cash extraction from session state layout
-            p_cash = st.session_state.get('current_available_cash', 0.0)
-            p_cash = float(p_cash) if not hasattr(p_cash, 'fetchone') else float(p_cash.fetchone()[0])
+            p_cash = st.session_state.current_available_cash
 
-            with st.popover("💼 Trade", width="stretch"):
-                # 1. Select Trade Side using a unique persistent key anchor blueprint
+            with st.popover("💼 Trade", use_container_width=True):
+                # 1. Select Trade Side
                 trade_side = st.radio(
                     "Direction",
                     options=["Buy", "Sell"],
                     horizontal=True,
                     label_visibility="collapsed",
-                    key=f"trade_side_radio_{ticker}_{idx}"
+                    key=f"side_{ticker}"
                 )
                 
                 st.markdown("<hr style='margin: 8px 0; border-color: rgba(0,0,0,0.05);'>", unsafe_allow_html=True)
@@ -436,10 +418,9 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
                     trade_qty = st.number_input(
                         "Quantity to sell", 
                         min_value=1, 
-                        max_value=max(1, available_qty),
-                        value=available_qty, 
+                        value=int(available_qty), 
                         step=1, 
-                        key=f"t_input_sell_val_{ticker}_{idx}",
+                        key=f"t_input_sell_{ticker}",
                         label_visibility="collapsed"
                     )
                     
@@ -447,18 +428,12 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
                     est_credit = trade_qty * current_price
                     st.markdown(f"<p style='font-size:11px; color:#64748B; margin-top:2px;'>Est. Credit: <strong>${est_credit:,.2f}</strong></p>", unsafe_allow_html=True)
                     
-                    if st.button("Confirm Sale", key=f"btn_s_commit_{ticker}_{idx}", type="primary", width="stretch"):
+                    if st.button("Confirm Sale", key=f"btn_s_{ticker}", type="primary", use_container_width=True):
                         if trade_qty > available_qty:
                             st.error(f"❌ Cannot sell {trade_qty}. You only have {available_qty} shares.")
                         else:
                             success, msg = execute_asset_trade(
-                                cloud_con=cloud_con, 
-                                duckdb_con=duckdb_con, 
-                                portfolio_id=portfolio_id, 
-                                ticker=ticker, 
-                                timestamp=sim_date, 
-                                quantity=trade_qty, 
-                                side='sell'
+                                con, portfolio_id, ticker, sim_date, trade_qty, side='sell'
                             )
                             if success:
                                 st.toast(f"📉 Successfully sold {trade_qty:,} shares of {ticker}!")
@@ -474,13 +449,13 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
                         min_value=1, 
                         value=1, 
                         step=1, 
-                        key=f"t_input_buy_val_{ticker}_{idx}",
+                        key=f"t_input_buy_{ticker}",
                         label_visibility="collapsed"
                     )
                     
                     # Estimated cost calculation
                     est_cost = trade_qty * current_price
-                    max_affordable = int(p_cash // current_price) if current_price > 0 else 0
+                    max_affordable = int(p_cash // current_price)
                     
                     st.markdown(
                         f"""
@@ -490,18 +465,12 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
                         unsafe_allow_html=True
                     )
                     
-                    if st.button("Confirm Purchase", key=f"btn_b_commit_{ticker}_{idx}", type="primary", width="stretch"):
+                    if st.button("Confirm Purchase", key=f"btn_b_{ticker}", type="primary", use_container_width=True):
                         if est_cost > p_cash:
                             st.error(f"❌ Insufficient cash. Total cost is ${est_cost:,.2f} but you only have ${p_cash:,.2f}")
                         else:
                             success, msg = execute_asset_trade(
-                                cloud_con=cloud_con, 
-                                duckdb_con=duckdb_con, 
-                                portfolio_id=portfolio_id, 
-                                ticker=ticker, 
-                                timestamp=sim_date, 
-                                quantity=trade_qty, 
-                                side='buy'
+                                con, portfolio_id, ticker, sim_date, trade_qty, side='buy'
                             )
                             if success:
                                 st.toast(f"🚀 Successfully purchased {trade_qty:,} shares of {ticker}!")
@@ -509,11 +478,12 @@ def render_holdings_table(cloud_con, duckdb_con, portfolio_id, sim_date):
                             else:
                                 st.error(msg)
                             
-            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}_{idx}", help="View Deep Analysis", width="stretch"):
+            if st.button("🔍 Analyze", key=f"analyze_hold_{ticker}", help="View Deep Analysis", use_container_width=True):
                 show_asset_analysis_dialog(ticker)
 
         # Subtle structural line break between rows 
         st.markdown("<hr style='margin: 6px 0; border-color: rgba(0,0,0,0.04);'>", unsafe_allow_html=True)
+
 
 # for portfolio performance analsys 
 def render_performance_chart(df, title="Portfolio Performance History"):
@@ -659,84 +629,138 @@ def render_performance_chart(df, title="Portfolio Performance History"):
 
     st.plotly_chart(
         fig,
-        width="stretch",
+        use_container_width=True,
         config={"displayModeBar": False},
     )
 
-
-# for the assets serch component
-def asset_search_component(con):
+def render_performance_comparison_chart(portfolio_df, asset_df, ticker):
     """
-    Manages asset search functionality and caches global asset list from public cloud storage.
-    Persists the selected asset ticker in session state for downstream financial deep analysis.
+    Renders normalized portfolio vs asset performance chart.
+    Both series start at 100 from the first shared available date.
     """
-    
-    # Initial load of the asset list into persistent session state cache from GCS
-    if 'all_assets_list' not in st.session_state:
-        try:
-            # Direct public HTTP access to the Google Cloud Storage bucket containing the parquet dataset
-            # Replace the mock URL below with your exact public asset bucket endpoint link
-            gcs_public_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/assets.parquet"
-            
-            # DuckDB natively reads column subsets remotely from raw public cloud URLs extremely fast
-            assets_df = con.execute(f"SELECT ticker, name FROM read_parquet('{gcs_public_url}')").df()
-            st.session_state.all_assets_list = [f"{row['ticker']} | {row['name']}" for _, row in assets_df.iterrows()]
-        except Exception as e:
-            st.error(f"⚠️ Failed to pull assets directory from cloud layer: {e}")
-            st.session_state.all_assets_list = []
 
-    st.subheader("Search by Ticker or Company Name")
-    
-    # Render searchable configuration box populated with structured cloud metadata
-    selected_option = st.selectbox(
-    label="Select Asset to Analyze",   # Clean structural accessibility label
-    label_visibility="collapsed",
-    options=[""] + st.session_state.all_assets_list,
-    format_func=lambda x: "Type to search..." if x == "" else x,
-    index=0,
-    key="strategy_search_box"
+    import pandas as pd
+    import plotly.express as px
+
+    if portfolio_df is None or portfolio_df.empty:
+        st.info("No portfolio performance data available.")
+        return
+
+    if asset_df is None or asset_df.empty:
+        st.warning(f"No price history found for {ticker}.")
+        render_performance_chart(portfolio_df, title="Portfolio Performance History")
+        return
+
+    portfolio_df = portfolio_df.copy()
+    asset_df = asset_df.copy()
+
+    portfolio_df["timestamp"] = pd.to_datetime(portfolio_df["timestamp"])
+    asset_df["timestamp"] = pd.to_datetime(asset_df["timestamp"])
+
+    portfolio_df = portfolio_df.sort_values("timestamp")
+    asset_df = asset_df.sort_values("timestamp")
+
+    common_start = max(
+        portfolio_df["timestamp"].min(),
+        asset_df["timestamp"].min()
     )
 
-    # Parse and anchor selected node metadata securely across runtime cycles
+    portfolio_df = portfolio_df[portfolio_df["timestamp"] >= common_start]
+    asset_df = asset_df[asset_df["timestamp"] >= common_start]
+
+    if portfolio_df.empty or asset_df.empty:
+        st.warning("Not enough overlapping data to compare portfolio and asset.")
+        render_performance_chart(portfolio_df, title="Portfolio Performance History")
+        return
+
+    portfolio_start_value = portfolio_df["value"].iloc[0]
+    asset_start_value = asset_df["value"].iloc[0]
+
+    # if portfolio_start_value == 0 or asset_start_value == 0:
+    #     st.warning("Cannot normalize chart because one of the starting values is zero.")
+    #     render_performance_chart(portfolio_df, title="Portfolio Performance History")
+    #     return
+
+    portfolio_df["normalized_value"] = portfolio_df["value"] / portfolio_start_value * 100
+    asset_df["normalized_value"] = asset_df["value"] / asset_start_value * 100
+
+    portfolio_plot_df = portfolio_df[["timestamp", "normalized_value"]].copy()
+    portfolio_plot_df["series"] = "Portfolio"
+
+    asset_plot_df = asset_df[["timestamp", "normalized_value"]].copy()
+    asset_plot_df["series"] = ticker
+
+    chart_df = pd.concat([portfolio_plot_df, asset_plot_df], ignore_index=True)
+
+    fig = px.line(
+        chart_df,
+        x="timestamp",
+        y="normalized_value",
+        color="series",
+        title=f"Portfolio Performance vs {ticker}",
+        labels={
+            "timestamp": "Date",
+            "normalized_value": "Normalized Value",
+            "series": "Series"
+        }
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+def asset_search_component(con):
+    """Handles asset search and stores selection in session state."""
+
+    # Load and cache assets list
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("SELECT ticker, name FROM assets").df()
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    st.subheader("🔎Search by Ticker or Company Name")
+
+    selected_option = st.selectbox(
+        "",
+        options=[""] + st.session_state.all_assets_list,
+        format_func=lambda x: "Type to search..." if x == "" else x,
+        index=0,
+        key="strategy_search_box"
+    )
+
+    # Prevent unnecessary reruns by tracking last selection
     if selected_option:
-        st.session_state.selected_ticker_for_analysis = selected_option.split(" | ")[0]
+        ticker = selected_option.split(" | ")[0]
+
+        if st.session_state.get("selected_ticker_for_analysis") != ticker:
+            st.session_state.selected_ticker_for_analysis = ticker
+            st.session_state.last_selected_option = selected_option
+            st.rerun()
 
 
 # for analysing an asset (analysis diolog pop up)
 @st.dialog("Asset Analysis Deep-Dive", width="large")
-def show_asset_analysis_dialog(asset_ticker):
-    """
-    Renders a comprehensive quantitative analysis modal popup window for a selected asset.
-    Handles temporal slice queries across pricing, fundamentals, and strategic factor indices.
-    Safely resolves catalog contexts to prevent database isolation drops inside cloud threads.
-    """
-    # 1. Extraction of basic metadata and validation of active data architecture
+def show_asset_analysis_dialog( asset_ticker):
+    # 1. שליפת מידע בסיסי וזיהוי ה-ID
     if 'con' not in st.session_state:
         st.error("Connection lost")
         return
         
     con = st.session_state.con
     
-    # SAFETIES: If running inside an isolated dialog thread, ensure the catalog is bound to the file
-    if con is None:
-        db_path = st.session_state.get('DB_PATH', 'stratify.duckdb')
-        con = duckdb.connect(database=db_path, read_only=False)
-        
-    asset_ticker_upper = asset_ticker.upper()
     
-    # Context query executed smoothly via standard database driver routing
-    asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker_upper]).fetchone()
+    asset_data = con.execute("SELECT asset_id, name, sector FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
     if not asset_data:
         st.error("Asset not found")
         return
-        
+    
     a_id, a_name, a_sector = asset_data
     sim_date = st.session_state.current_sim_date
 
-    st.title(f"{a_name} ({asset_ticker_upper})")
-    st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)}")
+    st.title(f"{a_name} ({asset_ticker})")
+    st.caption(f"Analysis up to simulation date: {sim_date.strftime('%Y-%m-%d')}")
 
-    # 2. Fetch tracking datasets via modern virtual relation routing architectures
+    # 2. שליפת היסטוריית מחירים עד תאריך הסימולציה
     price_df = con.execute("""
         SELECT timestamp, close, volume 
         FROM prices 
@@ -744,32 +768,43 @@ def show_asset_analysis_dialog(asset_ticker):
         ORDER BY timestamp ASC
     """, [a_id, sim_date]).df()
 
+    # 3. שליפת נתונים פונדמנטליים אחרונים (הכי קרובים לתאריך הסימולציה)
     fund_data = con.execute("""
-        SELECT pe_ratio, market_cap, revenue, eps 
+        SELECT market_cap, revenue, eps 
         FROM fundamentals 
         WHERE asset_id = ? AND timestamp <= ?
         ORDER BY timestamp DESC LIMIT 1
     """, [a_id, sim_date]).fetchone()
-    
+    # 4 quering strategy data for tab 4
     factors_data = con.execute("""
-        SELECT *
-        FROM asset_factors_normalized_final
-        WHERE asset_id = ?
-          AND timestamp <= ?
-          AND timestamp >= ? + INTERVAL '-1 week'
-    """, [a_id, sim_date, sim_date]).df()
+                               SELECT
+                               *
+                               FROM 
+                               asset_factors_normalized_final
+                               
+                               WHERE
+                               asset_id = ?
+                               AND timestamp <= ?
+                               AND timestamp >= ? + INTERVAL '-1 week'
+                               
+                               """ , [a_id, sim_date, sim_date]).df()
     
-    # Presentation initialization via tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
+    # tab creation
+    # tab1, tab2, tab3 , tab4= st.tabs(["📈 Price Chart", "📊 Fundamentals", "🔍 Strategy Analysis (Market)", "🗺️ Factor Mapping"])
+    tab1, tab3= st.tabs(["📈 Price Chart", "🔍 Strategy Analysis (Market)"])
 
     with tab1:
+    # 1. בחירת טווח זמן
         time_range = st.segmented_control(
-            "Select Range",
-            options=["1W", "1M", "6M", "1Y", "All"],
-            default="1W",
-            key=f"range_{asset_ticker_upper}"
-        )
+        "Select Range",
+        options=["1W" ,"1M", "6M", "1Y", "All"],
+        default="1W",
+        key=f"range_{asset_ticker}"
+    )
 
+    # 2. חישוב תאריך ההתחלה לפי הבחירה
+    
+    
         end_date = st.session_state.current_sim_date
         if time_range == "1W":
             start_date = end_date - timedelta(days=7)
@@ -779,44 +814,53 @@ def show_asset_analysis_dialog(asset_ticker):
             start_date = end_date - timedelta(days=180)
         elif time_range == "1Y":
             start_date = end_date - timedelta(days=365)
-        else:
-            start_date = pd.Timestamp.min
+        else: # "All"
+            start_date = pd.Timestamp.min # תאריך מוקדם מאוד
 
-        # Direct SQL pipeline fetch executed flawlessly
+        # 3. שליפת הנתונים המפלטרת (גם עד ה-sim_date וגם לפי הטווח)
         filtered_price_df = con.execute("""
             SELECT timestamp, close 
             FROM prices 
             WHERE asset_id = ? 
-              AND timestamp <= ? 
-              AND timestamp >= ?
+            AND timestamp <= ? 
+            AND timestamp >= ?
             ORDER BY timestamp ASC
         """, [a_id, end_date, start_date]).df()
 
+        # 4. הכנת הנתונים והצגת הגרף
         if not filtered_price_df.empty:
+            # חישוב נתונים מספריים לטווח הנבחר
             first_price = filtered_price_df['close'].iloc[0]
             last_price = filtered_price_df['close'].iloc[-1]
+            
             abs_change = last_price - first_price
             pct_change = (abs_change / first_price) * 100
             
+            # בחירת צבעים לפי הביצועים
             if abs_change >= 0:
                 chart_color = '#2ecc71'
                 fill_color = 'rgba(46, 204, 113, 0.1)'
-                delta_color = "normal" 
+                delta_color = "normal" # ירוק ב-st.metric
             else:
                 chart_color = '#e74c3c'
                 fill_color = 'rgba(231, 76, 60, 0.1)'
-                delta_color = "inverse" 
+                delta_color = "inverse" # אדום ב-st.metric
 
+            # --- הוספת שורת המדדים מעל הגרף ---
             col_m1, col_m2, col_m3 = st.columns(3)
+            
             with col_m1:
                 st.metric("Price", f"${last_price:,.2f}")
+            
             with col_m2:
                 st.metric("Change ($)", f"{abs_change:+,.2f}$", delta_color=delta_color)
+                
             with col_m3:
                 st.metric("Change (%)", f"{pct_change:+.2f}%", delta_color=delta_color)
                 
-            st.divider()
+            st.divider() # קו מפריד דק בין המספרים לגרף
 
+            # --- בניית הגרף (עם הלוגיקה הקודמת) ---
             y_min = filtered_price_df['close'].min()
             y_max = filtered_price_df['close'].max()
             padding = (y_max - y_min) * 0.15
@@ -845,54 +889,58 @@ def show_asset_analysis_dialog(asset_ticker):
                 template="plotly_white",
                 hovermode="x unified"
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("No data available for this specific time range.")
 
-    with tab2:
-        if fund_data:
-            pe, mcap, rev, eps = fund_data
-            c1, c2 = st.columns(2)
-            c1.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
-            c1.metric("Market Cap", f"${mcap/1e9:.1f}B" if mcap else "N/A")
-            c2.metric("Revenue", f"${rev/1e9:.1f}B" if rev else "N/A")
-            c2.metric("EPS", f"${eps:.2f}" if eps else "N/A")
-        else:
-            st.info("No fundamental data recorded up to this date.")
+    # with tab2:
+    #     if fund_data:
+    #         pe, mcap, rev, eps = fund_data
+    #         c1, c2 = st.columns(2)
+    #         c1.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
+    #         c1.metric("Market Cap", f"${mcap/1e9:.1f}B" if mcap else "N/A")
+    #         c2.metric("Revenue", f"${rev/1e9:.1f}B" if rev else "N/A")
+    #         c2.metric("EPS", f"${eps:.2f}" if eps else "N/A")
+    #     else:
+    #         st.info("No fundamental data recorded up to this date.")
 
     with tab3:
         u_id = int(st.session_state.get('user_id', 1))
         p_id = int(st.session_state.get('current_portfolio_id', 0))
-        use_cloud = st.session_state.get('use_cloud', False)
         
-        # 1. Architectural routing to fetch user strategy preferences
-        if use_cloud:
-            query_strat = "SELECT * FROM user_preferences_strategy WHERE user_id = :user_id AND portfolio_id = :portfolio_id"
-            strategies_df = get_data(query_strat, {"user_id": u_id, "portfolio_id": p_id}, use_cloud=True)
-        else:
-            query_strat = "SELECT * FROM user_preferences_strategy WHERE user_id = ? AND portfolio_id = ?"
-            strategies_df = get_data(query_strat, [u_id, p_id], use_cloud=False)
+        # 1. Fetch strategies
+        strategies_df = con.execute("""
+            SELECT * FROM user_preferences_strategy 
+            WHERE user_id = ? AND portfolio_id = ?
+        """, [u_id, p_id]).df()
 
-        if strategies_df.empty:
-            st.info("No customized asset target strategies formulated for this portfolio yet.")
-        else:
-            selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market", placeholder="Select a strategy")
-            if selected_name:
-                strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
 
-            # 2. Architectural routing to fetch target asset normalized factors
-            FACTORS_SOURCE = "asset_factors_normalized_final_cloud" if use_cloud else "asset_factors_normalized_final"
-            
-            if use_cloud:
-                query_stock_factors = f"SELECT * FROM {FACTORS_SOURCE} WHERE asset_id = :asset_id ORDER BY timestamp DESC LIMIT 1"
-                stock_data = get_data(query_stock_factors, {"asset_id": int(a_id)}, use_cloud=True)
-            else:
-                query_stock_factors = f"SELECT * FROM {FACTORS_SOURCE} WHERE asset_id = ? ORDER BY timestamp DESC LIMIT 1"
-                stock_data = get_data(query_stock_factors, [int(a_id)], use_cloud=False)
+    
+        selected_name = st.selectbox("Compare with Strategy:", strategies_df['strategy_name'], key="strat_select_market" , placeholder="Select a strategy or create one in the Strategy Builder page")
+        if not strategies_df.empty:
+            strat_row = strategies_df[strategies_df['strategy_name'] == selected_name].iloc[0]
+
+        # 2. Check if asset exists
+        check_asset = con.execute("SELECT asset_id FROM assets WHERE ticker = ?", [asset_ticker]).fetchone()
+        
+        if not check_asset:
+            st.error(f"Ticker {asset_ticker} not found in 'assets' table.")
+        else:
+            a_id = check_asset[0]
+            # Fetch data directly by ID without JOIN to avoid errors
+            stock_data = con.execute("""
+                SELECT * FROM asset_factors_normalized_final 
+                WHERE asset_id = ? 
+                ORDER BY timestamp DESC LIMIT 1
+            """, [a_id]).df()
 
             if stock_data.empty:
-                st.warning(f"No factors found for {asset_ticker_upper} in tracking matrices.")
+                st.warning(f"No factors found for {asset_ticker} (ID: {a_id}) in 'asset_factors_normalized_final'.")
+                # checking if the table is empty or if the asset_id is missing
+                count_test = con.execute("SELECT COUNT(*) FROM asset_factors_normalized_final").fetchone()[0]
+                st.write(f"Total rows in factors table: {count_test}")
             else:
+                # 3. data mapping
                 comparison_map = {
                     "momentum_preference": "momentum_factor_market", 
                     "value_preference": "value_factor_market",
@@ -902,58 +950,273 @@ def show_asset_analysis_dialog(asset_ticker):
                     "size_preference": "size_factor_market",
                 }
                 
+
+                
+                # --- Table Headers ---
                 h1, h2, h3 = st.columns([1, 2, 1.5])
                 h1.caption("FACTOR")
                 h2.caption("ASSET PERFORMANCE (0-100)")
                 h3.caption("STRATEGY MATCH")
 
                 for pref_col, actual_col in comparison_map.items():
-                    target_val = float(strat_row.get(pref_col, 50))
-                    actual_val = float(stock_data.iloc[0].get(actual_col, 0))
+                    # 1. Extract values and calculate logic
+                    if strategies_df.empty:
+                        target_val = 0
+                    else:
+                        target_val = strat_row.get(pref_col, 50)
+
+                    actual_raw = stock_data.iloc[0].get(actual_col, None)
+
+                    # Skip factor if value is missing / NaN / invalid
+                    if pd.isna(actual_raw):
+                        continue
+
+                    try:
+                        actual_val = float(actual_raw)
+                        target_val = float(target_val)
+                    except (TypeError, ValueError):
+                        continue
                     
+                    # Calculate match percentage (100 - absolute distance)
                     diff = abs(target_val - actual_val)
                     match_pct = max(0, 100 - diff)
                     gap = actual_val - target_val
 
+                    # 2. Score Color (Center Column): Higher is usually "Stronger" in factor terms
                     if actual_val >= 70:
-                        score_color = "#28a745"  
+                        score_color = "#28a745"  # Green
                     elif actual_val >= 40:
-                        score_color = "#ffc107"  
+                        score_color = "#ffc107"  # Yellow
                     else:
-                        score_color = "#dc3545"  
+                        score_color = "#dc3545"  # Red
 
+                    # 3. Match Color (Right Column): Based on proximity to Target
                     if match_pct >= 70:
-                        match_color = "#28a745"  
+                        match_color = "#28a745"  # Perfect/Strong match
                     elif match_pct >= 50:
-                        match_color = "#1f77b4"  
+                        match_color = "#1f77b4"  # Good/Blue match
                     elif match_pct >= 30:
-                        match_color = "#ffc107"  
+                        match_color = "#ffc107"  # Moderate match
                     else:
-                        match_color = "#dc3545"  
+                        match_color = "#dc3545"  # Poor match (Red)
 
+                    # 4. Create the 3-column layout
                     c1, c2, c3 = st.columns([1, 2, 1.5])
-                    factor_key = actual_col.replace('_factor_market', '').lower()
+
+                    # --- Column 1: Factor Name with Tooltip (Corrected) ---
+
+                    # 1. Clean the label and find the matching key for FACTOR_HELP
+                    factor_key = actual_col.replace('_factor_market', '').replace('_factor_sector', '').lower()
                     label = factor_key.capitalize()
 
+                    # 2. Get the help text from the dictionary
                     FACTOR_HELP = {
-                        "momentum": "**Momentum Factor**\n\nIdentifies assets in a strong upward trend.",
-                        "value": "**Value Factor**\n\nIdentifies stocks trading at a discount relative to fundamentals.",
-                        "quality": "**Quality Factor**\n\nFocuses on companies with strong financial health.",
-                        "growth": "**Growth Factor**\n\nIdentifies companies expanding business rapidly.",
-                        "defensive": "**Defensive Factor**\n\nPrioritizes stability and risk reduction.",
-                        "size": "**Size Factor**\n\nCaptures the Small-Cap Effect profile metrics."
+
+
+
+                        "momentum":
+
+
+
+                    "**Momentum Factor**\n\n"
+
+
+
+                    "Identifies assets in a strong upward trend. Based on:\n\n"
+
+
+
+                    "  **Price Returns:** Growth over the last 3, 6, and 12 months.\n\n"
+
+
+
+                    "  **Relative Strength:** Outperforming the S&P 500 index.\n\n"
+
+
+
+                    "  **Trend Health:** Price position relative to long-term averages.",
+
+
+
+                    
+
+
+
+                        "value":
+
+
+
+                "**Value Factor**\n\n"
+
+
+
+                "Identifies stocks trading at a discount relative to their fundamentals. Based on:\n\n"
+
+
+
+                "  **Earnings Yield:** Company profits (EPS) relative to the stock price.\n\n"
+
+
+
+                "  **Sales Yield:** Total revenue compared to the company's Market Cap.\n\n"
+
+
+
+                "  **Dividend Yield:** Yearly dividend payments relative to the stock price.",
+
+
+
+            
+
+                        "quality":
+
+
+
+                "**Quality Factor**\n\n"
+
+
+
+                "Focuses on companies with strong financial health and efficient operations. Based on:\n\n"
+
+
+
+                "  **Profitability:** Net income relative to revenue (Profit Margins).\n\n"
+
+
+
+                "  **Earnings Stability:** Low volatility in profits over time, indicating reliable business.\n\n"
+
+
+
+                "  **Revenue Efficiency:** The company's ability to generate sales on a per-share basis.",
+
+
+
+
+
+
+                        "growth":
+
+
+
+                "**Growth Factor**\n\n"
+
+
+
+                "Identifies companies expanding their business rapidly over the past year. Based on:\n\n"
+
+
+
+                "  **Earnings Growth (YoY):** The percentage increase in net profits compared to the same period last year.\n\n"
+
+
+
+                "  **Revenue Growth (YoY):** The percentage increase in total sales compared to the same period last year.\n\n"
+
+
+
+                "  **Real-Time Data:** Updates reflect new financial reports as soon as they become available to the market.",
+
+
+
+
+
+                        "defensive":
+
+
+
+                "**Defensive Factor**\n\n"
+
+
+
+                "Prioritizes stability and risk reduction to protect the portfolio during downturns. Based on:\n\n"
+
+
+
+                "  **Low Volatility:** Favors stocks with smaller price swings and steady movement.\n\n"
+
+
+
+                "  **Low Beta:** Targets assets that are less sensitive to overall market fluctuations (S&P 500 as the benchmark).\n\n"
+
+
+
+                "  **Drawdown Protection:** Focuses on stocks that demonstrate a smaller peak-to-trough decline.",
+
+
+
+                    
+
+
+
+                        "size":
+
+
+
+                "**Size Factor**\n\n"
+
+
+
+                "  **Market Capitalization:** Higher scores are assigned to companies with larger total market value.\n\n"
+
+
+
+                "  **Company Size:** Gives higher scores to companies with bigger market capitalization.\n\n"
+
+
+
+                "  **Liquidity Buffer:** Favors highly liquid stocks, ensuring ease of trading large positions without significant price impact.\n\n"
+
+
+                "  **Market Dominance:** Targets industry leaders that often exhibit greater stability and institutional resilience."
+,
+
+
+
+                    "liquidity":
+
+
+
+                "**Liquidity Factor**\n\n"
+
+
+
+                "Measures how easily you can enter or exit a position without affecting the stock price.\n\n"
+
+
+
+                "  **High Liquidity:** Safe and fast—allows you to sell immediately at the current market price.\n\n"
+
+
+
+                "  **Low Liquidity:** High risk/reward—harder to sell quickly, but often where 'hidden gems' are found.\n\n"
+
+
+
+                "  **Market Impact:** Filters out stocks where a single trade could cause an unwanted price crash."
+
+
+
                     }
+
                     
                     help_text = FACTOR_HELP.get(factor_key, "Factor explanation not found.")
 
+                    # 3. Render the label with a help icon in Column 1
                     with c1:
+                        # Adding a small vertical space to align with the middle/right columns
                         st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
+                        
+                        # st.markdown supports the 'help' parameter for tooltips
                         st.markdown(f"**{label}**", help=help_text)
 
+                    # --- Column 2: Actual Asset Score (Visual) ---
+                    # Color reflects the score itself (High=Green, Low=Red)
                     bar_html = f"""
                     <div style="margin-top: 5px; padding-right: 15px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
                             <span style="font-size: 0.9rem; font-weight: bold; color: {score_color};">{actual_val:.0f}</span>
+                            <span style="font-size: 0.7rem; color: gray;"></span>
                         </div>
                         <div style="width: 100%; background-color: #e9ecef; border-radius: 4px; height: 10px;">
                             <div style="width: {actual_val}%; background-color: {score_color}; height: 100%; border-radius: 4px;"></div>
@@ -962,17 +1225,33 @@ def show_asset_analysis_dialog(asset_ticker):
                     """
                     c2.markdown(bar_html, unsafe_allow_html=True)
 
-                    with c3:
-                        if match_pct >= 85:
-                            fit_label = "Perfect Match"; icon = "🌟"
-                        elif match_pct >= 70:
-                            fit_label = "Good Fit"; icon = "✅"
-                        elif match_pct >= 50:
-                            fit_label = "Slight Deviation"; icon = "⚖️"
-                        else:
-                            fit_label = "Too High" if gap > 0 else "Too Low"; icon = "⚠️"
+                    # --- Column 3: User-Friendly Strategy Fit ---
+                    if strategies_df.empty:
+                        c3.markdown("<div style='color: #888;'>No strategy selected.</div>", unsafe_allow_html=True)
+                    
+                    else:
 
-                        st.markdown(f"""
+
+                        # 1. Logic for human-readable labels
+                        if match_pct >= 85:
+                            fit_label = "Perfect Match"
+                            icon = "🌟"
+                        elif match_pct >= 70:
+                            fit_label = "Good Fit"
+                            icon = "✅"
+                        elif match_pct >= 50:
+                            fit_label = "Slight Deviation"
+                            icon = "⚖️"
+                        else:
+                            # Check direction of deviation for the label
+                            if gap > 0:
+                                fit_label = "Too High"
+                            else:
+                                fit_label = "Too Low"
+                            icon = "⚠️"
+
+                        # 2. Render the human-friendly column
+                        c3.markdown(f"""
                             <div style='text-align: right; border-left: 2px solid #f0f2f6; padding-left: 10px; padding-top: 2px;'>
                                 <div style='font-size: 0.9rem; font-weight: bold; color: {match_color}; margin-bottom: -2px;'>
                                     {icon} {fit_label}
@@ -980,20 +1259,34 @@ def show_asset_analysis_dialog(asset_ticker):
                                 <div style='font-size: 0.75rem; color: #888;'>
                                     {match_pct:.0f}% similarity
                                 </div>
+                                <div style='margin-top: 4px;'>
+                                    <span style='font-size: 0.65rem; background-color: #f1f3f5; padding: 2px 6px; border-radius: 10px; color: #444;'>
+                                        Target: {target_val:.0f}
+                                    </span>
+                                </div>
                             </div>
                         """, unsafe_allow_html=True)
+
                     st.divider()     
-        
-    with tab4:
-        try:
-            st.divider()
-            st.subheader("📊 Factor Positioning")
-            render_stock_factor_maps(con, asset_ticker_upper)
-            st.divider()
-        except Exception as e:
-            st.warning(f"Factor visualization unavailable: {e}")
+                      
+    # with tab4:
+    #         # ----------------------------------------------------
+    #         # Factor visualization section (non-intrusive addition)
+    #         # ----------------------------------------------------
+    #         try:
+    #             st.divider()
+                
+    #             st.subheader("📊 Factor Positioning")
 
-
+    #             # Render 3 factor maps for selected asset
+    #             render_stock_factor_maps(con, asset_ticker)
+                
+    #             st.divider()
+            
+    #         except Exception as e:
+    #             # Fail-safe: UI should never break due to visualization layer
+    #             st.warning(f"Factor visualization unavailable: {e}")
+          
 
 # Strategy creation and editing component
 def strategy_creating_component(con, portfolio_id):
@@ -1009,6 +1302,23 @@ def strategy_creating_component(con, portfolio_id):
         "defensive",
         "size",
     ]
+
+
+    # =======================================
+    # Fixing diffrence between building and managing
+    # =======================================
+    
+    page = st.session_state.page
+    builder_mode = True
+    
+    if page == "strategy_managment":
+        builder_mode = False
+    # if managing and no building, skipping tab 0
+    if builder_mode == False:
+        i = 1
+    else:
+        i = 0
+
 
     # =======================================
     # SESSION STATE INITIALIZATION
@@ -1047,17 +1357,21 @@ def strategy_creating_component(con, portfolio_id):
         st.session_state.show_save_box = False
         
     if "active_tab" not in st.session_state:
-        st.session_state.active_tab = 0
+        st.session_state.active_tab = i
+        
 
     # =======================================
     # TAB CONFIG
     # =======================================
+
+    
     tab_options = [
-        "🧠 Questionnaire",
-        "⚙️ Strategies Settings",
-        "📊 Multi-Strategy Allocation",
-        "🏆 Final Step",
-    ]
+            "🧠 Questionnaire",
+            "⚙️ Strategies Settings",
+            "📊 Multi-Strategy Allocation",
+            "🏆 Final Step"
+        ]
+
 
     # =======================================
     # STATE INIT
@@ -1080,9 +1394,13 @@ def strategy_creating_component(con, portfolio_id):
         st.session_state.active_tab = new_index
         st.rerun()
 
+
+
+    
     # =======================================
     # STEP 1 — QUESTIONNAIRE
     # =======================================
+    
     if st.session_state.active_tab == 0:
 
         st.markdown(
@@ -1127,7 +1445,7 @@ def strategy_creating_component(con, portfolio_id):
             with col_skip:
                 if st.button(
                     "🚀 Start Questionnaire",
-                    width="stretch",
+                    use_container_width=True,
                     type="primary",
                 ):
                     st.session_state.show_questions = True
@@ -1172,22 +1490,22 @@ def strategy_creating_component(con, portfolio_id):
 
             with col1:
                 if i > 0:
-                    if st.button("⬅ Previous", width="stretch"):
+                    if st.button("⬅ Previous", use_container_width=True):
                         st.session_state.current_question -= 1
                         st.rerun()
 
             with col2:
-                if st.button("❌ Exit", width="stretch"):
+                if st.button("❌ Exit", use_container_width=True):
                     st.session_state.show_questions = False
                     st.rerun()
 
             with col3:
                 if i < 6:
-                    if st.button("Next ➡", width="stretch", type="primary"):
+                    if st.button("Next ➡", use_container_width=True, type="primary"):
                         st.session_state.current_question += 1
                         st.rerun()
                 else:
-                    if st.button("✅ Proceed to Sliders", width="stretch", type="primary"):
+                    if st.button("✅ Proceed to Sliders", use_container_width=True, type="primary"):
 
                         @st.dialog("Processing your strategy 🧠")
                         def processing_modal():
@@ -1211,9 +1529,11 @@ def strategy_creating_component(con, portfolio_id):
                         st.session_state.active_tab = 1
 
                         st.rerun()
+    
     # =======================================
     # STEP 2 — STRATEGY SETTINGS AND SAVING
     # =======================================
+    
     if st.session_state.active_tab == 1:
         
         # Modern global UI styling for main container action buttons
@@ -1275,9 +1595,14 @@ def strategy_creating_component(con, portfolio_id):
                 # Initialize a revision counter for the popover to force close it when needed
                 if f"pop_rev_{portfolio_id}" not in st.session_state:
                     st.session_state[f"pop_rev_{portfolio_id}"] = 0
+                    
+                    
+                if st.button("🚀 Advance to Multi strategy allocation", key="advance_to_multi"):
+                    st.session_state.active_tab = 2
+                    st.rerun()
 
                 # Render popover with a dynamic key configuration
-                with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", width="stretch"):
+                with st.popover("💾 Save Strategy", key=f"proceed_btn_action_{portfolio_id}_rev_{st.session_state[f'pop_rev_{portfolio_id}']}", use_container_width=True):
                     st.markdown("<p style='font-size:14px; font-weight:600; margin-bottom:4px;'>Strategy Name</p>", unsafe_allow_html=True)
                     
                     new_strat_name = st.text_input(
@@ -1288,7 +1613,7 @@ def strategy_creating_component(con, portfolio_id):
                     )
 
                     # Dynamic database injection execution block
-                    if st.button("✅ Save Configuration", width="stretch", type="primary", key=f"pop_save_confirm_{portfolio_id}"):
+                    if st.button("✅ Save Configuration", use_container_width=True, type="primary", key=f"pop_save_confirm_{portfolio_id}"):
                         if new_strat_name.strip():
                             u_id = int(st.session_state.get("user_id", 0))
                             p_id = int(portfolio_id)
@@ -1438,11 +1763,11 @@ def strategy_creating_component(con, portfolio_id):
 
                     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
                     
-                    with st.popover("🗑 Delete Strategy", width="stretch"):
+                    with st.popover("🗑 Delete Strategy", use_container_width=True):
                         st.write(f"Permanently delete '{selected_name}'?")
                         
                         # The actual inner confirmation execution action button
-                        if st.button("⚠️ Confirm Delete", key=f"pop_del_btn_{portfolio_id}", width="stretch", type="primary"):
+                        if st.button("⚠️ Confirm Delete", key=f"pop_del_btn_{portfolio_id}", use_container_width=True, type="primary"):
                             con.execute(
                                 """
                                 DELETE FROM user_preferences_strategy
@@ -1488,7 +1813,7 @@ def strategy_creating_component(con, portfolio_id):
             "quality": "Prioritizes financially healthy businesses.",
             "growth": "Targets companies with rapid expansion.",
             "defensive": "Reduces risk and volatility.",
-            "size": "Focuses more on small-cap opportunities.",
+            "size": "Focuses more on big companies.",
             "liquidity": "Prioritizes easier buying and selling.",
         }
         
@@ -1544,13 +1869,15 @@ def strategy_creating_component(con, portfolio_id):
                             label_visibility="collapsed" 
                         )
                         st.write("") # Spacer padding below each individual pair block
+        # advance button
+
 
     # =======================================
     # STEP 3 — MULTI-STRATEGY ALLOCATION AND VISUAL SYNCHRONIZATION
     # =======================================
 
     if st.session_state.active_tab == 2:
-
+        
             # =======================================
             # Modern Styling
             # =======================================
@@ -1631,9 +1958,10 @@ def strategy_creating_component(con, portfolio_id):
             u_id = int(st.session_state.get("user_id", 0))
             p_id = int(portfolio_id)
 
+
             saved_strategies = con.execute(
                 """
-                SELECT strategy_name
+                SELECT strategy_name, portfolio_strategy_id
                 FROM user_preferences_strategy
                 WHERE portfolio_id = ?
                 AND user_id = ?
@@ -1676,7 +2004,9 @@ def strategy_creating_component(con, portfolio_id):
                 # Slider Sync Logic
                 # =======================================
                 def sync_sliders(changed_strategy):
+
                     new_val = st.session_state[f"alloc_slider_{p_id}_{changed_strategy}"]
+
                     visible_strategies = [
                         s for s in strategy_names
                         if s not in st.session_state.hidden_strategies
@@ -1687,8 +2017,13 @@ def strategy_creating_component(con, portfolio_id):
                         return
 
                     remaining_pool = 100.0 - new_val
+
                     other_strategies = [name for name in visible_strategies if name != changed_strategy]
-                    current_other_total = sum(st.session_state[f"alloc_slider_{p_id}_{name}"] for name in other_strategies)
+
+                    current_other_total = sum(
+                        st.session_state[f"alloc_slider_{p_id}_{name}"]
+                        for name in other_strategies
+                    )
 
                     if current_other_total > 0:
                         for name in other_strategies:
@@ -1700,6 +2035,8 @@ def strategy_creating_component(con, portfolio_id):
                         for name in other_strategies:
                             st.session_state[f"alloc_slider_{p_id}_{name}"] = round(even_share, 1)
 
+
+                    
                 # =======================================
                 # Layout Setup
                 # =======================================
@@ -1831,7 +2168,7 @@ def strategy_creating_component(con, portfolio_id):
 
                         st.plotly_chart(
                             fig,
-                            width="stretch",
+                            use_container_width=True,
                             config={'displayModeBar': False}
                         )
                     else:
@@ -1849,7 +2186,7 @@ def strategy_creating_component(con, portfolio_id):
                 # Footer Summary
                 # =======================================
                 st.write("")
-                if abs(total_allocated - 100.0) < 0.1:
+                if abs(total_allocated - 100.0) < 0.2:
                     pass
                 else:
                     st.warning(f"⚠ Current allocation total: {total_allocated:.1f}%")
@@ -1857,12 +2194,32 @@ def strategy_creating_component(con, portfolio_id):
                 # =======================================
                 # Further Button
                 # =======================================
-                st.write("")
-                if st.button(
-                    " 🚀 Procceed to the last step",
-                    type="primary",
-                    width="stretch"
-                ):
+                if st.button("🚀 Proceed to the last step", type="primary", use_container_width=True):
+                    # 1. Gather active strategies from UI
+                    active_allocations = []
+                    for name, s_id in saved_strategies:
+                        val = st.session_state.get(f"alloc_slider_{p_id}_{name}", 0)
+                        if val > 0:
+                            active_allocations.append({'id': s_id, 'pct': val})
+
+                    # 2. Adjust for minor rounding discrepancies (e.g., 99.9% -> 100%)
+                    if active_allocations:
+                        total_val = sum(item['pct'] for item in active_allocations)
+                        diff = 100.0 - total_val
+                        
+                        # If difference is significant but within the accepted threshold (0.2)
+                        if abs(diff) > 0.001:
+                            # Add the difference to the strategy with the largest allocation
+                            max_alloc = max(active_allocations, key=lambda x: x['pct'])
+                            max_alloc['pct'] += diff
+                            # Ensure the value is rounded to avoid floating point artifacts
+                            max_alloc['pct'] = round(max_alloc['pct'], 2)
+                    
+                    # 3. Save to session_state instead of DB
+                    # This makes the data available for the next tab/final save
+                    st.session_state['final_allocations'] = active_allocations
+                    
+                    # 4. Move to next tab
                     st.session_state.active_tab = 3
                     st.rerun()
 
@@ -1871,6 +2228,7 @@ def strategy_creating_component(con, portfolio_id):
     # =======================================
     # STEP 4 - FINAL PORTFOLIO CONFIG
     # =======================================
+   
     if st.session_state.active_tab == 3:
 
         p_id = int(portfolio_id)
@@ -1957,8 +2315,17 @@ def strategy_creating_component(con, portfolio_id):
                 pref_key = f"pref_sectors_{p_id}"
                 excl_key = f"excl_sectors_{p_id}"
 
+                # Ensure session state variables are initialized as lists
+                if not isinstance(st.session_state.get(pref_key), list):
+                    st.session_state[pref_key] = []
+                if not isinstance(st.session_state.get(excl_key), list):
+                    st.session_state[excl_key] = []
+
+                # Get current values for filtering
+                currently_excluded = st.session_state[excl_key]
+                currently_focused = st.session_state[pref_key]
+
                 # Preferred Sectors (Focus) - Filter out anything already excluded
-                currently_excluded = st.session_state.get(excl_key, [])
                 focus_options = [s for s in master_sector_list if s not in currently_excluded]
 
                 preferred_sectors = st.multiselect(
@@ -1969,7 +2336,6 @@ def strategy_creating_component(con, portfolio_id):
                 )
 
                 # Excluded Sectors (Avoid) - Filter out anything already focused
-                currently_focused = st.session_state.get(pref_key, [])
                 avoid_options = [s for s in master_sector_list if s not in currently_focused]
 
                 excluded_sectors = st.multiselect(
@@ -1978,7 +2344,8 @@ def strategy_creating_component(con, portfolio_id):
                     key=excl_key,
                     help="These sectors will be fully removed from recommendations."
                 )
-
+                
+                
         # ======================================================
         # CENTER COLUMN: DEPOSITS
         # ======================================================
@@ -2064,22 +2431,22 @@ def strategy_creating_component(con, portfolio_id):
             st.session_state[div_key] = "Medium"
 
         div_options = {
-            "Low": {
-                "icon": "🎯",
-                "range": 'Maximum 10 different assets',
-                "desc": "Invests in fewer assets. Bigger gains possible, but also bigger risks."
-            },
-            "Medium": {
-                "icon": "⚖️",
-                "range": "10 - 20 different assets",
-                "desc": "Balanced mix of assets. Good balance between growth and stability."
-            },
-            "High": {
-                "icon": "🧱",
-                "range": "no limit on number of assets",
-                "desc": "Spreads money across many assets. Lower risk, but usually slower growth."
+                "Low": {
+                    "icon": "🎯",
+                    "range": "A small number of assets, big exposure to fewer sectors",
+                    "desc": "Focuses on fewer assets. The value may change more sharply over time - both upward and downward ."
+                },
+                "Medium": {
+                    "icon": "⚖️",
+                    "range": "A moderate number of assets , Exposure to a moderate number of sectors",
+                    "desc": "A balanced mix. Tries to combine steady behavior with noticeable growth, without strong swings in either direction."
+                },
+                "High": {
+                    "icon": "🧱",
+                    "range": "A wide spread of assets, Exposure across many different sectors",
+                    "desc": "Spreads across many assets. Changes tend to be smoother, hence safer but growth may feel slower."
+                }
             }
-        }
 
         # Callback function to handle the card selection cleanly
         def set_diversification(selected_option):
@@ -2132,7 +2499,7 @@ def strategy_creating_component(con, portfolio_id):
                     st.button(
                         label="✓ Selected" if selected else f"Select {option}",
                         key=f"native_click_{div_key}_{option}",
-                        width="stretch",
+                        use_container_width=True,
                         type="primary" if selected else "secondary", # Primary colors it blue based on your theme
                         on_click=set_diversification,
                         args=(option,)
@@ -2140,31 +2507,508 @@ def strategy_creating_component(con, portfolio_id):
 
         # Final value for your recommendation system
         diversification = st.session_state[div_key]
+        # Map the string from session_state to the integer expected by the DB
+        div_mapping = {"Low": 1, "Medium": 2, "High": 3}
+        raw_div = st.session_state.get(f"div_{p_id}", "Medium")
+        
+        
+        # --- CLEANING THE DATA BEFORE SAVING ---
+        # Convert strings back to lists if they were accidentally saved as strings
+        def force_list(val):
+            if isinstance(val, list):
+                return val
+            # If it's a string like "['a', 'b']", convert it to a real list
+            if isinstance(val, str):
+                try:
+                    import ast
+                    return ast.literal_eval(val)
+                except:
+                    return val.split(',') if val else []
+            return []
+
+        clean_pref = force_list(st.session_state.get(f"pref_sectors_{p_id}", []))
+        clean_excl = force_list(st.session_state.get(f"excl_sectors_{p_id}", []))
 
 
         
         
         # ======================================================
-        # FOOTER ACTION
+        # FINAL SUBMIT BUTTON
         # ======================================================
-        st.write("")
+        st.write("---")
+        if st.button("✅ Build Portfolio", type="primary", use_container_width=True):
+            try:
+                # 1. Collect all parameters from session state
+                params = {
+                    'con': con,
+                    'user_id': int(st.session_state.get("user_id")),
+                    'portfolio_id': p_id,
+                    'monthly_deposit': st.session_state.get(f"monthly_{p_id}", 0),
+                    'initial_investment': st.session_state.get(f"lump_{p_id}", 0),
+                    'diversification': div_mapping.get(raw_div, 2),
+                    'buy_fee': st.session_state.get(f"buy_fee_{p_id}", 0),
+                    'sell_fee': st.session_state.get(f"sell_fee_{p_id}", 0),
+                    'deposit_fee': st.session_state.get(f"dep_fee_{p_id}", 0),
+                    'withdrawal_fee': st.session_state.get(f"with_fee_{p_id}", 0),
+                    'preferred_sectors': clean_pref,
+                    'excluded_sectors': clean_excl
+                            }
+
+                # 2. Retrieve strategy allocations from previous step
+                allocations = st.session_state.get('final_allocations', [])
+                
+                # 3. Fill strategy slots (1-4)
+                for i in range(4):
+                    if i < len(allocations):
+                        params[f'strategy{i+1}_id'] = allocations[i]['id']
+                        params[f'strategy{i+1}_pct'] = allocations[i]['pct']
+                    else:
+                        params[f'strategy{i+1}_id'] = None
+                        params[f'strategy{i+1}_pct'] = 0
+
+                # 4. Execute save function
+                save_final_strategy(**params)
+                
+                execute_cash_transaction(con , p_id , st.session_state.get(f"lump_{p_id}", 0) , 'deposit' , st.session_state.get('current_sim_date') , "Initil investment")
+                                
+                st.success("🎉 Portfolio configured successfully!")
+                
+                st.session_state.page = "asset_purchsing" 
+                
+                st.rerun()
+                
+                
+            except Exception as e:
+                st.error(f"Error saving portfolio: {str(e)}")
+                st.session_state.active_tab = 2
+                st.rerun()
+                
+        
+# for comparing assets during performance analysis
+def asset_search_component_for_comparison(con):
+    """
+    Lets the user search for an asset and stores the selected ticker in session state.
+    """
+
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("""
+            SELECT ticker, name 
+            FROM assets
+            ORDER BY ticker
+        """).df()
+
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    selected_option = st.selectbox(
+        "Choose asset to compare",
+        options=[""] + st.session_state.all_assets_list,
+        format_func=lambda x: "Type to search..." if x == "" else x,
+        index=0,
+        key="performance_comparison_search_box"
+    )
+
+    if selected_option:
+        ticker = selected_option.split(" | ")[0]
+
+        if st.button("Add comparison", key="add_performance_comparison_button"):
+            st.session_state.performance_comparison_ticker = ticker
+            st.rerun()
+
+    if st.session_state.get("performance_comparison_ticker"):
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            st.info(f"Comparing against: {st.session_state.performance_comparison_ticker}")
+
+        with col2:
+            if st.button("Remove", key="remove_performance_comparison_button"):
+                st.session_state.performance_comparison_ticker = None
+                st.rerun()
+
+    
+# for recomending assets based on strategy  
+    
+def render_strategy_selector(con):
+    u_id = int(st.session_state.get('user_id', 1))
+    p_id = int(st.session_state.get('current_portfolio_id', 0))
+
+    strategies_df = con.execute("""
+        SELECT * FROM user_preferences_strategy 
+        WHERE user_id = ? AND portfolio_id = ?
+    """, [u_id, p_id]).df()
+
+    if strategies_df.empty:
+        st.warning("No strategies found for this portfolio.")
+        return None
+
+    strategy_map = {
+    row["strategy_name"]: row["portfolio_strategy_id"]
+    for _, row in strategies_df.iterrows()
+}
+
+    options = list(strategy_map.keys())
+
+    selected_label = st.selectbox(
+        "Choose strategy",
+        options=options,
+        key="strategy_selector_debug"
+    )
+
+    selected_strategy_id = strategy_map[selected_label]
+
+
+    return strategy_map[selected_label]
+
+
+def render_asset_finder(con):
+
+    sim_date = st.session_state.get("current_sim_date")
+
+    # ======================================================
+    # DATA CHECK
+    # ======================================================
+    df = st.session_state.get("closest_assets")
+    has_data = df is not None
+
+    # ======================================================
+    # CONTROLS
+    # ======================================================
+
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+    # ---- Strategy selector ----
+    with col1:
+        strategy_id = render_strategy_selector(con)
+
+        if strategy_id is None:
+            st.warning("Please select a strategy")
+            return
+
+        st.session_state["strategy_id"] = strategy_id
+
+    # ---- K ----
+    with col2:
+        k_option = st.selectbox(
+            "Show top assets",
+            options=[20, 5, 10],
+            index=1,
+            key="k_option"
+        )
+
+    # ---- Sector filter ----
+    with col3:
+
+        df_sectors = pd.read_sql_query("SELECT DISTINCT sector FROM assets", con)
+        all_sectors = sorted(df_sectors["sector"].dropna().tolist())
+
+        if "selected_sectors" not in st.session_state:
+            st.session_state.selected_sectors = all_sectors.copy()
+
+        st.markdown(
+            """
+            <div style="font-size:12px; line-height:1.1; margin-bottom: 2px;">
+                Select sectors to include in your investment universe
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        with st.popover("🎯 Filter sectors"):
+
+            cols = st.columns(3)
+            new_selected = []
+
+            for i, sector in enumerate(all_sectors):
+                with cols[i % 3]:
+                    checked = st.checkbox(
+                        sector,
+                        value=(sector in st.session_state.selected_sectors),
+                        key=f"sector_{sector}"
+                    )
+                    if checked:
+                        new_selected.append(sector)
+
+            # fallback to avoid empty selection breaking filters
+            st.session_state.selected_sectors = new_selected if new_selected else all_sectors
+
+    # ---- RUN BUTTON ----
+    with col4:
+
+        if st.button("🔍 Find closest assets", type="primary"):
+
+            if strategy_id and sim_date:
+
+                results = get_closest_assets(con, strategy_id, sim_date)
+
+                st.session_state["closest_assets"] = results
+
+                st.rerun()
+
+            else:
+                st.error("Missing strategy or simulation date.")
+
+    st.divider()
+
+    # ======================================================
+    # EMPTY STATE (UI STILL RENDERS ABOVE)
+    # ======================================================
+    if not has_data:
+        st.info("No assets loaded yet. Click 'Find closest assets'")
+        return
+
+    # ======================================================
+    # FILTERING
+    # ======================================================
+
+    filtered_df = df.copy()
+
+    selected_sectors = st.session_state.get("selected_sectors", all_sectors)
+
+    filtered_df = filtered_df[
+        filtered_df["sector"].isin(selected_sectors)
+    ]
+
+    filtered_df = filtered_df.head(int(k_option))
+
+    # ======================================================
+    # CARD RENDER
+    # ======================================================
+
+    def render_asset_card(row, rank):
+
+        st.html(f"""
+        <div style="line-height:1.2;">
+            <div style="font-size:18px; font-weight:600;">
+                #{rank} {row['name']}
+            </div>
+
+            <div style="
+                display:inline-block;
+                padding:2px 8px;
+                border-radius:12px;
+                background:rgba(76,175,80,0.15);
+                color:#4CAF50;
+                font-size:12px;
+                font-weight:600;
+                margin-top:4px;
+            ">
+                {row['sector']}
+            </div>
+
+            <div style="
+                font-size:12px;
+                opacity:0.65;
+                margin-top:4px;
+            ">
+                {row['ticker']} • Compatibility {100 - row['distance']:.2f} %
+            </div>
+        </div>
+        """)
+
+        c1, c2 = st.columns([1, 1], gap="small")
+
+        with c1:
+            if st.button(
+                "🔍 Analyze",
+                key=f"analyze_{row['ticker']}"
+            ):
+                show_asset_analysis_dialog(row["ticker"])
+
+        with c2:
+            sim_date = st.session_state.get("current_sim_date")
+            portfolio_id = st.session_state.get("current_portfolio_id")
+            p_cash = st.session_state.get("current_available_cash")
+
+            # ======================================================
+            # BASIC GUARDS (no st.stop → avoids UI break)
+            # ======================================================
+            if not portfolio_id or not sim_date:
+                st.warning("Missing portfolio or simulation date.")
+            else:
+            
+                with st.popover("💼Trade"):
+                    open_trade_dialog(con , row , portfolio_id , sim_date , p_cash)
+    # ======================================================
+    # DISPLAY
+    # ======================================================
+
+    items = list(filtered_df.iterrows())
+
+    for i in range(0, len(items), 2):
+
+        col1, col2 = st.columns(2, gap="small")
+
+        with col1:
+            _, row = items[i]
+            render_asset_card(row, i + 1)
+
+        with col2:
+            if i + 1 < len(items):
+                _, row = items[i + 1]
+                render_asset_card(row, i + 2)
+
+
+# for short buy\sell component
+def open_trade_dialog(con, row, portfolio_id, sim_date, p_cash):
+    
+    
+    uid = f"{row['asset_id']}" 
+
+    # ======================================================
+    # CURRENT PRICE
+    # ======================================================
+    result = con.execute("""
+        SELECT close 
+        FROM prices 
+        WHERE asset_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    """, [row["asset_id"], sim_date]).fetchone()
+
+    current_price = result[0] if result else None
+
+    if current_price is None:
+        st.warning("No price available for this asset at selected time.")
+        return
+
+    # ======================================================
+    # TRADE SIDE
+    # ======================================================
+    trade_side = st.radio(
+        "Direction",
+        ["Buy", "Sell"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"side_{uid}"
+    )
+
+    st.divider()
+
+    # ======================================================
+    # SELL FLOW
+    # ======================================================
+    if trade_side == "Sell":
+
+        result = con.execute("""
+            SELECT quantity
+            FROM holdings
+            WHERE portfolio_id = ? AND asset_id = ?
+        """, [portfolio_id, row["asset_id"]]).fetchone()
+
+        available_qty = result[0] if result else 0
+
+        if available_qty <= 0:
+            st.info("No shares available to sell.")
+            return
+
+        st.caption(f"Available: {available_qty:,} shares")
+
+        sell_qty = st.number_input(
+            "Quantity",
+            min_value=1,
+            max_value=int(available_qty),
+            value=int(available_qty),
+            step=1,
+            key=f"sell_qty_{uid}"
+        )
+
+        st.caption(f"Est. Credit: ${sell_qty * current_price:,.2f}")
 
         if st.button(
-            "🚀 Generate Portfolio",
+            "Confirm Sale",
+            key=f"sell_btn_{uid}",
             type="primary",
-            width="stretch"
+            use_container_width=True
         ):
 
-            st.toast("Building your optimized portfolio...", icon="⚙️")
+            success, msg = execute_asset_trade(
+                con,
+                portfolio_id,
+                row["ticker"],
+                sim_date,
+                sell_qty,
+                side="sell"
+            )
 
-            #st.session_state.active_tab = 4
-            st.rerun()
-        
-        
-        
-        
-        
-        
+            if success:
+                st.session_state["refresh_needed"] = True
+
+                st.toast(
+                    f"📉 Sold {sell_qty:,} shares of {row['ticker']}",
+                    icon="✅"
+                )
+                st.session_state["current_available_cash"] += sell_qty * current_price
+
+                st.success(f"Order executed: SOLD {sell_qty:,} {row['ticker']}", icon="🎯")
+
+                st.rerun()
+            else:
+                st.error(msg)
+
+    # ======================================================
+    # BUY FLOW
+    # ======================================================
+    else:
+
+        if p_cash is None or p_cash <= 0:
+            st.info("No cash available.")
+            return
+
+        st.caption(f"Cash: ${p_cash:,.2f}")
+
+        max_affordable = int(p_cash // current_price) if current_price > 0 else 0
+
+        buy_qty = st.number_input(
+            "Quantity",
+            min_value=1,
+            max_value=max_affordable if max_affordable > 0 else 1,
+            value=1,
+            step=1,
+            key=f"buy_qty_{uid}"
+        )
+
+        est_cost = buy_qty * current_price
+
+        st.caption(f"Est. Cost: ${est_cost:,.2f} | Max: {max_affordable:,}")
+
+        if st.button(
+            "Confirm Purchase",
+            key=f"buy_btn_{uid}",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if est_cost > p_cash:
+                st.error("Insufficient cash.")
+            else:
+                success, msg = execute_asset_trade(
+                    con,
+                    portfolio_id,
+                    row["ticker"],
+                    sim_date,
+                    buy_qty,
+                    side="buy"
+                )
+
+                if success:
+                    st.session_state["refresh_needed"] = True
+
+                    st.toast(
+                        f"🚀 Bought {buy_qty:,} shares of {row['ticker']}",
+                        icon="✅"
+                    )
+                    st.session_state["current_available_cash"] -= est_cost
+
+                    st.success(f"Order executed: BOUGHT {buy_qty:,} {row['ticker']}", icon="🎯")
+
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+
 # for showing easily the factors of an asset
 def render_stock_factor_maps(con, ticker: str):
     """
@@ -2329,7 +3173,7 @@ def render_stock_factor_maps(con, ticker: str):
                 "Growth",
                 "Defensive"
             ),
-            width="stretch"
+            use_container_width=True
         )
 
     with col2:
@@ -2341,7 +3185,7 @@ def render_stock_factor_maps(con, ticker: str):
                 "Value",
                 "Size"
             ),
-            width="stretch"
+            use_container_width=True
         )
 
     with col3:
@@ -2353,5 +3197,337 @@ def render_stock_factor_maps(con, ticker: str):
                 "Momentum",
                 "Quality"
             ),
-            width="stretch"
+            use_container_width=True
         )
+        
+        
+# for executing total allocation trade
+def asset_search_for_execution(con):
+    """Searches assets and returns selected ticker."""
+
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("""
+            SELECT ticker, name
+            FROM assets
+            ORDER BY ticker
+        """).df()
+
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    selected_option = st.selectbox(
+        "🔎 Add another stock",
+        options=[""] + st.session_state.all_assets_list,
+        format_func=lambda x: "Type to search..." if x == "" else x,
+        index=0,
+        key="execution_asset_search_box"
+    )
+
+    if not selected_option:
+        return None
+
+    return selected_option.split(" | ")[0]
+
+
+@st.dialog("Review Portfolio Execution", width="large")
+def open_execution_review_dialog(con, total_df, total_cash, buy_fee):
+    """
+    Lets the user review, edit, add, remove, and confirm portfolio execution orders.
+
+    The recommendation engine is not rerun here.
+    This dialog only edits the final execution list before real trades are submitted.
+    """
+
+    sim_date = st.session_state.get("current_sim_date")
+
+    if sim_date is None:
+        st.error("Missing simulation date.")
+        return
+
+    # ======================================================
+    # EDITOR STATE
+    # ======================================================
+    if "execution_editor_version" not in st.session_state:
+        st.session_state.execution_editor_version = 0
+
+    # ======================================================
+    # INIT CUSTOM ADDED ASSETS
+    # ======================================================
+    if "execution_custom_rows" not in st.session_state:
+        st.session_state.execution_custom_rows = []
+
+    st.markdown("### 🛒 Review execution list")
+    st.caption("You can remove stocks, change share amounts, or add new stocks before executing.")
+
+    # ======================================================
+    # ADD NEW ASSET BEFORE BUILDING THE EDITOR
+    # This must happen before data_editor so the new row appears immediately.
+    # ======================================================
+    selected_ticker = asset_search_for_execution(con)
+
+    col_reset, col_add = st.columns(2)
+
+    with col_reset:
+        if st.button("🔄 Reset to Recommendation", use_container_width=True):
+            st.session_state.execution_custom_rows = []
+            st.session_state.execution_editor_version += 1
+            st.rerun()
+
+    with col_add:
+        if not selected_ticker:
+            st.button(
+                "➕ Add selected stock",
+                disabled=True,
+                use_container_width=True,
+                key="execution_add_disabled"
+            )
+
+        else:
+            if st.button("➕ Add selected stock", use_container_width=True, key="execution_add_selected"):
+                asset_row = con.execute("""
+                    SELECT 
+                        a.asset_id,
+                        a.ticker,
+                        a.name,
+                        a.sector,
+                        p.close AS price
+                    FROM assets a
+                    LEFT JOIN prices p
+                        ON a.asset_id = p.asset_id
+                       AND p.timestamp = (
+                            SELECT MAX(p2.timestamp)
+                            FROM prices p2
+                            WHERE p2.asset_id = a.asset_id
+                              AND p2.timestamp <= ?
+                       )
+                    WHERE a.ticker = ?
+                """, [sim_date, selected_ticker]).df()
+
+                if asset_row.empty or pd.isna(asset_row.iloc[0]["price"]):
+                    st.warning("No price available for this asset.")
+                else:
+                    row = asset_row.iloc[0]
+
+                    new_row = {
+                        "asset_id": int(row["asset_id"]),
+                        "ticker": row["ticker"],
+                        "name": row["name"],
+                        "sector": row["sector"],
+                        "price": float(row["price"]),
+                        "shares": 1,
+                        "value": float(row["price"]),
+                        "weight": 0.0,
+                        "selected": True
+                    }
+
+                    already_added = any(
+                        item["asset_id"] == new_row["asset_id"]
+                        for item in st.session_state.execution_custom_rows
+                    )
+
+                    already_in_recommendation = new_row["asset_id"] in total_df["asset_id"].values
+
+                    if already_added or already_in_recommendation:
+                        st.info(f"{row['ticker']} is already in the execution list.")
+                    else:
+                        st.session_state.execution_custom_rows.append(new_row)
+                        st.session_state.execution_editor_version += 1
+                        st.success(f"{row['ticker']} added to execution list.")
+
+    st.divider()
+
+    # ======================================================
+    # BUILD EDITABLE EXECUTION DATAFRAME
+    # Custom user-added assets appear first.
+    # ======================================================
+    custom_rows_df = pd.DataFrame(st.session_state.execution_custom_rows)
+
+    editable_df = pd.concat(
+        [
+            custom_rows_df,
+            total_df.copy()
+        ],
+        ignore_index=True
+    )
+
+    if editable_df.empty:
+        st.info("No assets available for execution.")
+        return
+
+    editable_df["shares"] = editable_df["shares"].fillna(0).astype(int)
+
+    if "selected" not in editable_df.columns:
+        editable_df["selected"] = True
+    else:
+        editable_df["selected"] = editable_df["selected"].fillna(True).astype(bool)
+
+    editable_df["value"] = editable_df["price"] * editable_df["shares"]
+
+    # ======================================================
+    # GROUP DUPLICATES SAFELY
+    # Preserve manual assets at the top.
+    # ======================================================
+    editable_df["manual_order"] = range(len(editable_df))
+
+    editable_df = (
+        editable_df
+        .groupby(["asset_id", "ticker", "name", "sector", "price"], as_index=False)
+        .agg({
+            "shares": "sum",
+            "value": "sum",
+            "weight": "sum",
+            "selected": "max",
+            "manual_order": "min"
+        })
+    )
+
+    editable_df = (
+        editable_df
+        .sort_values("manual_order")
+        .drop(columns=["manual_order"])
+        .reset_index(drop=True)
+    )
+
+    # ======================================================
+    # USER EDITOR
+    # Only shares and selected are editable.
+    # ======================================================
+    edited_df = st.data_editor(
+        editable_df,
+        use_container_width=True,
+        hide_index=True,
+        key=f"execution_review_editor_{st.session_state.execution_editor_version}",
+        column_config={
+            "shares": st.column_config.NumberColumn(
+                "Shares",
+                min_value=0,
+                step=1
+            ),
+            "selected": st.column_config.CheckboxColumn(
+                "Include"
+            )
+        },
+        disabled=[
+            "asset_id",
+            "ticker",
+            "name",
+            "sector",
+            "price",
+            "value",
+            "weight"
+        ]
+    )
+
+    # ======================================================
+    # FINAL EXECUTION DATA
+    # Recalculate everything after user edits the table.
+    # ======================================================
+    execution_df = edited_df[
+        (edited_df["selected"] == True) &
+        (edited_df["shares"] > 0)
+    ].copy()
+
+    execution_df["shares"] = execution_df["shares"].astype(int)
+    execution_df["value"] = execution_df["price"] * execution_df["shares"]
+
+    total_value = execution_df["value"].sum()
+
+    if total_value > 0:
+        execution_df["weight"] = execution_df["value"] / total_value
+    else:
+        execution_df["weight"] = 0.0
+
+    total_fees = buy_fee * len(execution_df)
+    total_required_cash = total_value + total_fees
+    leftover_cash = total_cash - total_required_cash
+
+    # ======================================================
+    # UPDATED EXECUTION PREVIEW
+    # This table reflects the latest user edits.
+    # ======================================================
+    if not execution_df.empty:
+        preview_df = execution_df.copy()
+
+        preview_df["price"] = preview_df["price"].round(2)
+        preview_df["value"] = preview_df["value"].round(2)
+        preview_df["weight"] = (preview_df["weight"] * 100).round(2)
+
+        preview_df = preview_df.rename(columns={
+            "name": "Company",
+            "ticker": "Ticker",
+            "sector": "Sector",
+            "price": "Price",
+            "shares": "Shares",
+            "value": "Value",
+            "weight": "Weight %"
+        })
+
+        st.markdown("#### Updated execution preview")
+
+        st.dataframe(
+            preview_df[
+                ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.divider()
+
+    # ======================================================
+    # EXECUTION METRICS
+    # ======================================================
+    metric_cols = st.columns(4)
+
+    with metric_cols[0]:
+        st.metric("Positions Value", f"{total_value:,.2f} $")
+
+    with metric_cols[1]:
+        st.metric("Estimated Buy Fees", f"{total_fees:,.2f} $")
+
+    with metric_cols[2]:
+        st.metric("Required Cash", f"{total_required_cash:,.2f} $")
+
+    with metric_cols[3]:
+        st.metric("Leftover Cash", f"{leftover_cash:,.2f} $")
+
+    # ======================================================
+    # VALIDATION
+    # ======================================================
+    if execution_df.empty:
+        st.warning("No assets selected for execution.")
+        return
+
+    if total_required_cash > total_cash:
+        st.error("Not enough cash to execute these trades.")
+        return
+
+    # ======================================================
+    # CONFIRM EXECUTION
+    # ======================================================
+    if st.button("✅ Confirm execution", type="primary", use_container_width=True):
+        success, message = execute_portfolio_buy_orders(
+        con=con,
+        portfolio_id=st.session_state.get("current_portfolio_id"),
+        execution_df=execution_df,
+        timestamp=sim_date,
+        buy_fee=buy_fee
+    )
+
+        if success:
+            st.success(message)
+
+            st.session_state["current_available_cash"] = total_cash - total_required_cash
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+            st.session_state.page = "dashboard_home"
+            st.rerun()
+            
+        else:
+            st.error(message)
+        
+        
+        

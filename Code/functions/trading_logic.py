@@ -4,565 +4,612 @@ import streamlit as st
 import datetime
 import pandas as pd
 import math
-from .db_manager import *
-from sqlalchemy import text
-
+import numpy as np
+import math
 DB_PATH = 'C:\\Users\\Lavie\\OneDrive\\Desktop\\מוצאים עבודה\\פרוייקטים\\Stratify - gamify financial strategy\\Data_Storage\\stratify.duckdb'
 
 
 
-# for executing cash transactions (withdrawal / deposit)
-def execute_cash_transaction(cloud_con, duckdb_con, portfolio_id, amount, transaction_type, timestamp, reference=None):
+# for executing cash transactions (withdrawl \ depost)
+def execute_cash_transaction(con, portfolio_id, amount, transaction_type, timestamp, reference=None , fee=0):
     """
-    Executes a cash deposit or withdrawal and records a portfolio snapshot.
-
-    Responsibilities:
-    - Validates cash balance
-    - Writes cash transaction ledger entry
-    - Updates portfolio liquidity
-    - Triggers portfolio snapshot (cloud + analytics)
+    Executes a cash deposit or withdrawal, updates the database,
+    and records a portfolio history snapshot.
+    
+    transaction_type: 'deposit' or 'withdrawal'
     """
-
-    import logging
-    from sqlalchemy import text
-
     logger = logging.getLogger(__name__)
-
+    
     try:
-        # ------------------------------------------------------------
-        # 1. Fetch current cash balance
-        # ------------------------------------------------------------
-        res = cloud_con.execute(
-            text("""
-                SELECT available_cash
-                FROM portfolios
-                WHERE portfolio_id = :id
-            """),
-            {"id": portfolio_id}
-        ).fetchone()
-
+        # 1. Check current cash balance (crucial for withdrawals)
+        res = con.execute("SELECT available_cash FROM portfolios WHERE portfolio_id = ?", [portfolio_id]).fetchone()
         if not res:
             return False, "Portfolio not found"
+        
+        current_cash = res[0]
 
-        current_cash = float(res[0])
-
-        # ------------------------------------------------------------
-        # 2. Validate withdrawal rules
-        # ------------------------------------------------------------
+        # 2. Validation for withdrawal requests
         if transaction_type == 'withdrawal' and amount > current_cash:
             return False, f"Insufficient funds. Available: ${current_cash:,.2f}"
 
-        # ------------------------------------------------------------
-        # 3. Transaction scope
-        # ------------------------------------------------------------
-        is_nested = cloud_con.in_transaction()
-        tx = None if is_nested else cloud_con.begin()
+        # 3. Begin Atomic Database Transaction
+        con.execute("BEGIN TRANSACTION")
 
-        try:
-            # --------------------------------------------------------
-            # A. Insert cash transaction ledger entry
-            # --------------------------------------------------------
-            max_id_res = cloud_con.execute(
-                text("SELECT COALESCE(MAX(transaction_id), 0) FROM cash_transactions")
-            ).fetchone()
+        # A. Record the event inside the cash_transactions audit ledger table
+        con.execute("""
+                INSERT INTO cash_transactions (transaction_id, portfolio_id, timestamp, amount, transaction_type, reference)
+                VALUES (
+                    (SELECT COALESCE(MAX(transaction_id), 0) + 1 FROM cash_transactions),
+                    ?, ?, ?, ?, ?
+                )
+            """, [portfolio_id, timestamp, amount, transaction_type, reference])
 
-            next_transaction_id = int(max_id_res[0]) + 1
-
-            cloud_con.execute(
-                text("""
-                    INSERT INTO cash_transactions (
-                        transaction_id,
-                        portfolio_id,
-                        timestamp,
-                        amount,
-                        transaction_type,
-                        reference
-                    )
-                    VALUES (
-                        :transaction_id,
-                        :portfolio_id,
-                        :timestamp,
-                        :amount,
-                        :transaction_type,
-                        :reference
-                    )
-                """),
-                {
-                    "transaction_id": next_transaction_id,
-                    "portfolio_id": portfolio_id,
-                    "timestamp": timestamp,
-                    "amount": amount,
-                    "transaction_type": transaction_type,
-                    "reference": reference
-                }
-            )
-
-            # --------------------------------------------------------
-            # B. Update portfolio cash balance
-            # --------------------------------------------------------
-            cash_change = amount if transaction_type == 'deposit' else -amount
-
-            cloud_con.execute(
-                text("""
-                    UPDATE portfolios
-                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
-                    WHERE portfolio_id = :portfolio_id
-                """),
-                {
-                    "cash_change": cash_change,
-                    "portfolio_id": portfolio_id
-                }
-            )
-
-            # --------------------------------------------------------
-            # C. Snapshot (IMPORTANT: now correct signature)
-            # --------------------------------------------------------
-            capture_portfolio_snapshot(
-                cloud_con=cloud_con,
-                duckdb_con=duckdb_con,
-                portfolio_id=portfolio_id,
-                sim_date=timestamp
-            )
-
-            # --------------------------------------------------------
-            # D. Commit
-            # --------------------------------------------------------
-            if tx:
-                tx.commit()
-            else:
-                cloud_con.commit()
-
-            logger.info(
-                f"Cash transaction executed: {transaction_type} "
-                f"${amount} for portfolio {portfolio_id}"
-            )
-
-            return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
-
-        except Exception as inner_error:
-            if tx:
-                tx.rollback()
-            else:
-                try:
-                    cloud_con.rollback()
-                except Exception:
-                    pass
-            raise inner_error
+        # B. Mutate and update the liquidity balance inside the portfolios table
+        cash_change = amount if transaction_type == 'deposit' else -amount
+        con.execute("""
+            UPDATE portfolios 
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [cash_change, portfolio_id])
+        
+        # C. Trigger system historical timeline snapshot update
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+        
+        con.execute("COMMIT")
+        logger.info(f"Successfully executed {transaction_type} of ${amount} for portfolio {portfolio_id}")
+        return True, f"Successfully {transaction_type}ed ${amount:,.2f}"
 
     except Exception as e:
+        con.execute("ROLLBACK")
         logger.error(f"Cash transaction failed: {e}")
         return False, str(e)
 
+
 # for executing a trade
-def execute_asset_trade( cloud_con, duckdb_con, portfolio_id, ticker, timestamp, quantity, side):
-    """
-    Executes an asset trade and records all related state changes.
+def execute_asset_trade(con, portfolio_id, ticker, timestamp, quantity, side='buy' , fee=0):
+    logger = logging.getLogger(__name__)
+    
+    # --- Step 1: Query relevant data ---
+    # (החלק הזה נשאר זהה)
+    df_assets = con.execute("SELECT asset_id FROM assets WHERE ticker = ? LIMIT 1", [ticker]).fetchone()
+    if not df_assets:
+        return False, f"Asset {ticker} not found"
+    asset_id = df_assets[0]
 
-    Responsibilities:
-    - Resolve asset metadata
-    - Validate portfolio state
-    - Fetch historical price (DuckDB)
-    - Validate trade constraints
-    - Update holdings + cash
-    - Record transaction ledger
-    - Trigger portfolio snapshot
-    """
+    df_prices = con.execute("""
+        SELECT close FROM prices 
+        WHERE asset_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """, [asset_id, timestamp]).fetchone()
+    if not df_prices:
+        return False, f"Price for {ticker} not found"
+    asset_price = df_prices[0]
 
-    import logging
-    from sqlalchemy import text
+    df_portfolios = con.execute("SELECT starting_at, available_cash FROM portfolios WHERE portfolio_id = ?", [portfolio_id]).fetchone()
+    portfolio_start_day, portfolio_available_cash = df_portfolios
+
+    # --- Step 2: Validations ---
+    total_amount = quantity * asset_price
+    
+    if side == 'buy' and portfolio_available_cash < total_amount:
+        return False, "Insufficient funds"
+
+    if side == 'sell':
+        df_holdings = con.execute("SELECT quantity FROM holdings WHERE portfolio_id = ? AND asset_id = ?", [portfolio_id, asset_id]).fetchone()
+        amount_held = df_holdings[0] if df_holdings else 0
+        if amount_held < quantity:
+            return False, f"Not enough shares (Held: {amount_held}, Request: {quantity})"
+
+    # --- Step 3: Execute Trade ---
+    try:
+        con.execute("BEGIN TRANSACTION")
+
+        # 1. Transactions table (שינוי קטן: הוספתי את ה-side לשאילתה שלך)
+        con.execute("""
+            INSERT INTO assets_transactions (portfolio_id, asset_id, timestamp, quantity, price_per_share, total_value, side)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [portfolio_id, asset_id, timestamp, quantity, asset_price, total_amount, side])
+
+        # 2. Holdings table
+        qty_change = quantity if side == 'buy' else -quantity
+        con.execute("""
+            INSERT INTO holdings (portfolio_id, asset_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT (portfolio_id, asset_id)
+            DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity
+        """, [portfolio_id, asset_id, qty_change])
+
+        # 3. Portfolios (Cash update)
+        cash_change = -total_amount if side == 'buy' else total_amount
+        con.execute("""
+            UPDATE portfolios 
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [cash_change, portfolio_id])
+
+        # 4. Clean up zero holdings (הוספת portfolio_id לביטחון)
+        con.execute("DELETE FROM holdings WHERE quantity <= 0 AND portfolio_id = ?", [portfolio_id])
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+        con.execute("COMMIT")
+        return True, f"Successfully {side} {quantity} shares of {ticker}"
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        logger.error(f"Trade failed: {e}")
+        return False, str(e)
+
+
+# for executing multiple trades simutaisly (buy side)
+def execute_portfolio_buy_orders(con, portfolio_id, execution_df, timestamp, buy_fee=0):
+    """
+    Executes multiple buy orders for a portfolio in one database transaction.
+
+    Expected execution_df columns:
+    - asset_id
+    - ticker
+    - price
+    - shares
+
+    This function:
+    - validates all orders before execution
+    - checks available cash including buy fees
+    - inserts all transactions
+    - updates holdings
+    - updates portfolio cash once
+    - records one portfolio snapshot
+    """
 
     logger = logging.getLogger(__name__)
 
+    if execution_df is None or execution_df.empty:
+        return False, "No buy orders to execute."
+
+    required_cols = ["asset_id", "ticker", "price", "shares"]
+    missing_cols = [col for col in required_cols if col not in execution_df.columns]
+
+    if missing_cols:
+        return False, f"Missing required columns: {missing_cols}"
+
+    orders_df = execution_df.copy()
+
+    orders_df["asset_id"] = orders_df["asset_id"].astype(int)
+    orders_df["shares"] = orders_df["shares"].astype(int)
+    orders_df["price"] = orders_df["price"].astype(float)
+
+    orders_df = orders_df[orders_df["shares"] > 0].copy()
+
+    if orders_df.empty:
+        return False, "No valid buy orders after filtering."
+
+    orders_df["total_value"] = orders_df["shares"] * orders_df["price"]
+
+    total_positions_value = orders_df["total_value"].sum()
+    total_fees = buy_fee * len(orders_df)
+    total_required_cash = total_positions_value + total_fees
+
+    portfolio_row = con.execute("""
+        SELECT available_cash
+        FROM portfolios
+        WHERE portfolio_id = ?
+    """, [portfolio_id]).fetchone()
+
+    if not portfolio_row:
+        return False, f"Portfolio {portfolio_id} not found."
+
+    available_cash = float(portfolio_row[0])
+
+    if available_cash < total_required_cash:
+        return False, (
+            f"Insufficient funds. "
+            f"Required: {total_required_cash:.2f}, "
+            f"Available: {available_cash:.2f}"
+        )
+
     try:
-        # ------------------------------------------------------------
-        # 1. Resolve asset
-        # ------------------------------------------------------------
-        asset_res = cloud_con.execute(
-            text("""
-                SELECT asset_id
-                FROM assets
-                WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(:ticker))
-                LIMIT 1
-            """),
-            {"ticker": ticker}
-        ).fetchone()
+        con.execute("BEGIN TRANSACTION")
 
-        if not asset_res:
-            return False, f"Asset '{ticker}' not found"
-
-        asset_id = asset_res[0]
-
-        # ------------------------------------------------------------
-        # 2. Resolve portfolio state
-        # ------------------------------------------------------------
-        portfolio_res = cloud_con.execute(
-            text("""
-                SELECT available_cash
-                FROM portfolios
-                WHERE portfolio_id = :portfolio_id
-            """),
-            {"portfolio_id": portfolio_id}
-        ).fetchone()
-
-        if not portfolio_res:
-            return False, "Portfolio not found"
-
-        portfolio_cash = float(portfolio_res[0] or 0.0)
-
-        # ------------------------------------------------------------
-        # 3. Fetch historical price (DuckDB)
-        # ------------------------------------------------------------
-        gcs_prices_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/prices.parquet"
-
-        price_res = duckdb_con.execute(f"""
-            SELECT close
-            FROM read_parquet('{gcs_prices_url}')
-            WHERE asset_id = ?
-              AND timestamp = ?
-            LIMIT 1
-        """, [asset_id, timestamp]).fetchone()
-
-        if not price_res:
-            return False, f"No price data for {ticker} at {timestamp}"
-
-        asset_price = float(price_res[0])
-
-        # ------------------------------------------------------------
-        # 4. Validation
-        # ------------------------------------------------------------
-        total_amount = quantity * asset_price
-
-        if side == "buy" and portfolio_cash < total_amount:
-            return False, "Insufficient funds"
-
-        if side == "sell":
-            holding_res = cloud_con.execute(
-                text("""
-                    SELECT quantity
-                    FROM holdings
-                    WHERE portfolio_id = :portfolio_id
-                      AND asset_id = :asset_id
-                """),
-                {"portfolio_id": portfolio_id, "asset_id": asset_id}
-            ).fetchone()
-
-            held_qty = float(holding_res[0]) if holding_res else 0.0
-
-            if held_qty < quantity:
-                return False, f"Not enough shares (held={held_qty})"
-
-        # ------------------------------------------------------------
-        # 5. Transaction block
-        # ------------------------------------------------------------
-        is_nested = cloud_con.in_transaction()
-        tx = None if is_nested else cloud_con.begin()
-
-        try:
-            # A. Ledger insert
-            max_id = cloud_con.execute(
-                text("SELECT COALESCE(MAX(transaction_id), 0) FROM assets_transactions")
-            ).fetchone()[0]
-
-            next_id = int(max_id) + 1
-
-            cloud_con.execute(
-                text("""
-                    INSERT INTO assets_transactions (
-                        transaction_id,
-                        portfolio_id,
-                        asset_id,
-                        timestamp,
-                        quantity,
-                        price_per_share,
-                        total_value,
-                        side
-                    )
-                    VALUES (
-                        :transaction_id,
-                        :portfolio_id,
-                        :asset_id,
-                        :timestamp,
-                        :quantity,
-                        :price_per_share,
-                        :total_value,
-                        :side
-                    )
-                """),
-                {
-                    "transaction_id": next_id,
-                    "portfolio_id": portfolio_id,
-                    "asset_id": asset_id,
-                    "timestamp": timestamp,
-                    "quantity": quantity,
-                    "price_per_share": asset_price,
-                    "total_value": total_amount,
-                    "side": side
-                }
+        # ======================================================
+        # INSERT TRANSACTIONS
+        # Each row includes the position value only.
+        # Fees are handled in the portfolio cash update.
+        # ======================================================
+        transaction_rows = [
+            (
+                int(row["asset_id"]),
+                portfolio_id,
+                timestamp,
+                int(row["shares"]),
+                float(row["price"]),
+                float(row["total_value"]),
+                "buy"
             )
+            for _, row in orders_df.iterrows()
+        ]
 
-            # B. Holdings update
-            qty_change = quantity if side == "buy" else -quantity
-
-            existing = cloud_con.execute(
-                text("""
-                    SELECT quantity
-                    FROM holdings
-                    WHERE portfolio_id = :portfolio_id
-                      AND asset_id = :asset_id
-                """),
-                {"portfolio_id": portfolio_id, "asset_id": asset_id}
-            ).fetchone()
-
-            if existing:
-                cloud_con.execute(
-                    text("""
-                        UPDATE holdings
-                        SET quantity = quantity + :qty_change
-                        WHERE portfolio_id = :portfolio_id
-                          AND asset_id = :asset_id
-                    """),
-                    {
-                        "qty_change": qty_change,
-                        "portfolio_id": portfolio_id,
-                        "asset_id": asset_id
-                    }
-                )
-            else:
-                cloud_con.execute(
-                    text("""
-                        INSERT INTO holdings (portfolio_id, asset_id, quantity)
-                        VALUES (:portfolio_id, :asset_id, :qty_change)
-                    """),
-                    {
-                        "portfolio_id": portfolio_id,
-                        "asset_id": asset_id,
-                        "qty_change": qty_change
-                    }
-                )
-
-            # C. Cash update
-            cash_change = -total_amount if side == "buy" else total_amount
-
-            cloud_con.execute(
-                text("""
-                    UPDATE portfolios
-                    SET available_cash = ROUND(CAST(available_cash + :cash_change AS NUMERIC), 2)
-                    WHERE portfolio_id = :portfolio_id
-                """),
-                {
-                    "cash_change": cash_change,
-                    "portfolio_id": portfolio_id
-                }
+        con.executemany("""
+            INSERT INTO assets_transactions (
+                asset_id,
+                portfolio_id,
+                timestamp,
+                quantity,
+                price_per_share,
+                total_value,
+                side
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, transaction_rows)
 
-            # D. Cleanup
-            cloud_con.execute(
-                text("""
-                    DELETE FROM holdings
-                    WHERE quantity <= 0
-                      AND portfolio_id = :portfolio_id
-                """),
-                {"portfolio_id": portfolio_id}
+        # ======================================================
+        # UPDATE HOLDINGS
+        # ======================================================
+        holding_rows = [
+            (
+                portfolio_id,
+                int(row["asset_id"]),
+                int(row["shares"])
             )
+            for _, row in orders_df.iterrows()
+        ]
 
-            # E. Snapshot (FIXED)
-            capture_portfolio_snapshot(
-                cloud_con=cloud_con,
-                duckdb_con=duckdb_con,
-                portfolio_id=portfolio_id,
-                sim_date=timestamp
+        con.executemany("""
+            INSERT INTO holdings (
+                portfolio_id,
+                asset_id,
+                quantity
             )
+            VALUES (?, ?, ?)
+            ON CONFLICT (portfolio_id, asset_id)
+            DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity
+        """, holding_rows)
 
-            # F. Commit
-            if tx:
-                tx.commit()
-            else:
-                cloud_con.commit()
+        # ======================================================
+        # UPDATE AVAILABLE CASH ONCE
+        # ======================================================
+        cash_change = -float(total_required_cash)
 
-            return True, f"Executed {side} {quantity} {ticker}"
+        con.execute("""
+            UPDATE portfolios
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [cash_change, portfolio_id])
 
-        except Exception as inner:
-            if tx:
-                tx.rollback()
-            else:
-                try:
-                    cloud_con.rollback()
-                except Exception:
-                    pass
-            raise inner
+        # ======================================================
+        # CLEAN ZERO / NEGATIVE HOLDINGS
+        # Mostly defensive; should not happen for buy-only flow.
+        # ======================================================
+        con.execute("""
+            DELETE FROM holdings
+            WHERE portfolio_id = ?
+              AND quantity <= 0
+        """, [portfolio_id])
+
+        # ======================================================
+        # RECORD SNAPSHOT ONCE
+        # ======================================================
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+
+        con.execute("COMMIT")
+
+        return True, (
+            f"Successfully executed {len(orders_df)} buy orders. "
+            f"Positions: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Total: {total_required_cash:.2f}"
+        )
 
     except Exception as e:
-        logger.error(f"Trade execution failed: {e}")
+        con.execute("ROLLBACK")
+        logger.error(f"Portfolio buy execution failed: {e}")
+        return False, str(e)
+
+
+# for executing multiple trades simutaisly (sell side)
+def execute_portfolio_sell_orders(con, portfolio_id, execution_df, timestamp, sell_fee=0):
+    """
+    Executes multiple sell orders for a portfolio in one database transaction.
+
+    Expected execution_df columns:
+    - asset_id
+    - ticker
+    - price
+    - shares
+
+    This function:
+    - validates all sell orders before execution
+    - checks that the portfolio owns enough shares
+    - inserts all sell transactions
+    - updates holdings
+    - updates portfolio cash once, after subtracting sell fees
+    - records one portfolio snapshot
+    """
+
+    logger = logging.getLogger(__name__)
+
+    if execution_df is None or execution_df.empty:
+        return False, "No sell orders to execute."
+
+    required_cols = ["asset_id", "ticker", "price", "shares"]
+    missing_cols = [col for col in required_cols if col not in execution_df.columns]
+
+    if missing_cols:
+        return False, f"Missing required columns: {missing_cols}"
+
+    orders_df = execution_df.copy()
+
+    orders_df["asset_id"] = orders_df["asset_id"].astype(int)
+    orders_df["shares"] = orders_df["shares"].astype(int)
+    orders_df["price"] = orders_df["price"].astype(float)
+
+    orders_df = orders_df[
+        (orders_df["shares"] > 0) &
+        (orders_df["price"] > 0)
+    ].copy()
+
+    if orders_df.empty:
+        return False, "No valid sell orders after filtering."
+
+    orders_df = (
+        orders_df
+        .groupby(["asset_id", "ticker", "price"], as_index=False)["shares"]
+        .sum()
+    )
+
+    orders_df["total_value"] = orders_df["shares"] * orders_df["price"]
+
+    total_positions_value = float(orders_df["total_value"].sum())
+    total_fees = float(sell_fee * len(orders_df))
+    total_cash_added = total_positions_value - total_fees
+
+    if total_cash_added <= 0:
+        return False, (
+            f"Sell proceeds are not enough to cover fees. "
+            f"Positions: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Net cash added: {total_cash_added:.2f}"
+        )
+
+    asset_ids = orders_df["asset_id"].astype(int).tolist()
+    placeholders = ",".join(["?"] * len(asset_ids))
+
+    current_holdings_query = f"""
+        SELECT asset_id, quantity
+        FROM holdings
+        WHERE portfolio_id = ?
+          AND asset_id IN ({placeholders})
+    """
+
+    current_holdings = con.execute(
+        current_holdings_query,
+        [portfolio_id] + asset_ids
+    ).df()
+
+    current_quantity_map = {
+        int(row["asset_id"]): int(row["quantity"])
+        for _, row in current_holdings.iterrows()
+    }
+
+    validation_errors = []
+
+    for _, row in orders_df.iterrows():
+        asset_id = int(row["asset_id"])
+        ticker = row["ticker"]
+        requested_shares = int(row["shares"])
+        owned_shares = current_quantity_map.get(asset_id, 0)
+
+        if owned_shares <= 0:
+            validation_errors.append(
+                f"{ticker}: portfolio does not own this asset."
+            )
+
+        elif requested_shares > owned_shares:
+            validation_errors.append(
+                f"{ticker}: trying to sell {requested_shares}, but only {owned_shares} owned."
+            )
+
+    if validation_errors:
+        return False, " | ".join(validation_errors)
+
+    try:
+        con.execute("BEGIN TRANSACTION")
+
+        transaction_rows = [
+            (
+                int(row["asset_id"]),
+                portfolio_id,
+                timestamp,
+                int(row["shares"]),
+                float(row["price"]),
+                float(row["total_value"]),
+                "sell"
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            INSERT INTO assets_transactions (
+                asset_id,
+                portfolio_id,
+                timestamp,
+                quantity,
+                price_per_share,
+                total_value,
+                side
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, transaction_rows)
+
+        holding_update_rows = [
+            (
+                int(row["shares"]),
+                portfolio_id,
+                int(row["asset_id"])
+            )
+            for _, row in orders_df.iterrows()
+        ]
+
+        con.executemany("""
+            UPDATE holdings
+            SET quantity = quantity - ?
+            WHERE portfolio_id = ?
+              AND asset_id = ?
+        """, holding_update_rows)
+
+        con.execute("""
+            DELETE FROM holdings
+            WHERE portfolio_id = ?
+              AND quantity <= 0
+        """, [portfolio_id])
+
+        con.execute("""
+            UPDATE portfolios
+            SET available_cash = ROUND(available_cash + ?, 2)
+            WHERE portfolio_id = ?
+        """, [total_cash_added, portfolio_id])
+
+        record_portfolio_snapshot(con, portfolio_id, timestamp)
+
+        con.execute("COMMIT")
+
+        return True, (
+            f"Successfully executed {len(orders_df)} sell orders. "
+            f"Positions sold: {total_positions_value:.2f}, "
+            f"Fees: {total_fees:.2f}, "
+            f"Cash added: {total_cash_added:.2f}"
+        )
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        logger.error(f"Portfolio sell execution failed: {e}")
         return False, str(e)
 
 # for easier performnce analysis
 def record_portfolio_snapshot(con, portfolio_id, timestamp):
     """
-    Computes the total current valuation layout of a portfolio and commits a clean 
-    historical snapshot record inside the Supabase database instance.
-    All source documentation and comments are maintained strictly in English.
+    מחשבת את השווי הכולל הנוכחי ושומרת שורה ב-portfolio_history.
     """
-    logger = logging.getLogger(__name__)
+    # א. חישוב שווי הנכסים (כמות ב-holdings כפול מחיר אחרון ב-prices)
+    # שים לב: אנחנו לוקחים את המחיר הכי קרוב ל-timestamp של הסימולציה
+    assets_val_query = """
+        SELECT SUM(h.quantity * p.close)
+        FROM holdings h
+        JOIN prices p ON h.asset_id = p.asset_id
+        WHERE h.portfolio_id = ?
+        AND p.timestamp = (
+            SELECT MAX(timestamp) FROM prices 
+            WHERE asset_id = h.asset_id AND timestamp <= ?
+        )
+    """
+    assets_value = con.execute(assets_val_query, [portfolio_id, timestamp]).fetchone()[0] or 0.0
     
-    try:
-        # 1. Delegate dynamic valuation to our updated cloud-native calculator function
-        total_value = portfolio_value_calculator(
-                        duckdb_con=con, 
-                        portfolio_id=portfolio_id, 
-                        timestamp=timestamp
-                            )
-        
-        # 2. Extract the present cash balance frame using cloud binding parameters
-        cash_res = con.execute(
-            text("SELECT available_cash FROM portfolios WHERE portfolio_id = :id"),
-            {"id": portfolio_id}
-        ).fetchone()
-        
-        available_cash = float(cash_res[0]) if cash_res else 0.0
-        
-        # 3. Safe Clean-up: Delete any pre-existing snapshot rows for this target date 
-        # to guarantee unique execution frames without relying on strict DB physical constraints
-        con.execute(
-            text("""
-                DELETE FROM portfolio_history 
-                WHERE portfolio_id = :portfolio_id AND timestamp = :timestamp
-            """),
-            {"portfolio_id": portfolio_id, "timestamp": timestamp}
-        )
-        
-        # 4. Standard secure cloud INSERT execution layout
-        cloud_insert_query = text("""
-            INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
-            VALUES (:portfolio_id, :timestamp, :portfolio_value, :available_cash);
-        """)
-        
-        con.execute(
-            cloud_insert_query,
-            {
-                "portfolio_id": portfolio_id,
-                "timestamp": timestamp,
-                "portfolio_value": total_value,
-                "available_cash": available_cash
-            }
-        )
-        
-        logger.info(f"Cloud portfolio timeline snapshot successfully recorded for ID {portfolio_id} at {timestamp}.")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Cloud explicit database snapshot logging workflow failed: {e}")
-        raise e
-
+    # ב. שליפת המזומן הנוכחי
+    cash_val = con.execute("SELECT available_cash FROM portfolios WHERE portfolio_id = ?", [portfolio_id]).fetchone()[0]
+    
+    total_value = assets_value + cash_val
+    
+    # ג. הכנסה לטבלת ההיסטוריה
+    con.execute("""
+        INSERT INTO portfolio_history (portfolio_id, timestamp, portfolio_value, available_cash)
+        VALUES (?, ?, ?, ?)
+    """, [portfolio_id, timestamp, total_value, cash_val])
+    
 
 # for showing the history of transactions
 @st.cache_data(show_spinner=False)
-def get_portfolio_cash_history(portfolio_id, sim_date):
+def get_portfolio_cash_history(_con, portfolio_id, sim_date):
     """
-    Builds a unified portfolio cash ledger by combining cloud and analytical layers.
-    Processes deposits/withdrawals and trades from Supabase, and matches historical 
-    dividend allocations from the local DuckDB storage engine.
-    
+    Builds a unified portfolio cash ledger including:
+
+    1. Deposits / withdrawals
+    2. Buy / sell transactions
+    3. Dividends based on historical holdings ownership
+
     Optimized with:
-    - Streamlit cache layer mapping
-    - Cross-engine data merging pipelines
-    - Vectorized pandas ledger cleaning pipelines
-    All comments and documentation are maintained strictly in English.
+    - Streamlit cache
+    - Single-pass portfolio simulation
+    - Vectorized preprocessing
     """
-    logger = logging.getLogger(__name__)
 
     # =========================================
-    # 1. ESTABLISH CLOUD CONNECTION (SUPABASE)
+    # CASH TRANSACTIONS
     # =========================================
-    # Fetching cloud connection context internally to preserve caching layer stability
-    cloud_engine = get_supabase_engine()
-    
-    with cloud_engine.connect() as cloud_con:
-        # --- CASH TRANSACTIONS (Cloud) ---
-        cash_query = text("""
-            SELECT
-                timestamp,
-                amount,
-                transaction_type AS type,
-                reference
-            FROM cash_transactions
-            WHERE portfolio_id = :portfolio_id
-              AND timestamp <= :sim_date
-        """)
-        
-        cash_res = cloud_con.execute(cash_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
-        
-        if cash_res:
-            cash_df = pd.DataFrame(cash_res, columns=["timestamp", "amount", "type", "reference"])
-            cash_df["type"] = cash_df["type"].astype(str).str.lower()
-        else:
-            cash_df = pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+    cash_df = _con.execute("""
+        SELECT
+            timestamp,
+            amount,
+            transaction_type AS type,
+            reference
+        FROM cash_transactions
+        WHERE portfolio_id = ?
+          AND timestamp <= ?
+    """, [portfolio_id, sim_date]).df()
 
-        # --- ASSET TRANSACTIONS (Cloud) ---
-        tx_query = text("""
-            SELECT
-                t.timestamp,
-                t.asset_id,
-                a.ticker,
-                t.quantity,
-                t.price_per_share,
-                t.side
-            FROM assets_transactions t
-            JOIN assets a
-                ON t.asset_id = a.asset_id
-            WHERE t.portfolio_id = :portfolio_id
-              AND t.timestamp <= :sim_date
-            ORDER BY t.timestamp ASC
-        """)
-        
-        tx_res = cloud_con.execute(tx_query, {"portfolio_id": portfolio_id, "sim_date": sim_date}).fetchall()
-        
-        if tx_res:
-            tx_df = pd.DataFrame(tx_res, columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
-        else:
-            tx_df = pd.DataFrame(columns=["timestamp", "asset_id", "ticker", "quantity", "price_per_share", "side"])
+    if not cash_df.empty:
+        cash_df["type"] = cash_df["type"].astype(str).str.lower()
 
     # =========================================
-    # 2. LOCAL ANALYTICAL LAYER (DUCKDB)
+    # ASSET TRANSACTIONS
     # =========================================
-    # Historical large-scale dividend datasets are executed exclusively via local memory engines
-    div_query = """
+    tx_df = _con.execute("""
+        SELECT
+            t.timestamp,
+            t.asset_id,
+            a.ticker,
+            t.quantity,
+            t.price_per_share,
+            t.side
+        FROM assets_transactions t
+        JOIN assets a
+            ON t.asset_id = a.asset_id
+        WHERE t.portfolio_id = ?
+          AND t.timestamp <= ?
+        ORDER BY t.timestamp ASC
+    """, [portfolio_id, sim_date]).df()
+
+    # =========================================
+    # DIVIDEND EVENTS
+    # =========================================
+    div_df = _con.execute("""
         SELECT
             d.asset_id,
             d.timestamp,
             d.dividend_amount,
             a.ticker
-        FROM 'https://storage.googleapis.com/stratify-historical-data/data_snapshots/dividends.parquet' d
+        FROM dividends d
         JOIN assets a
             ON d.asset_id = a.asset_id
-        WHERE d.timestamp <= $sim_date
+        WHERE d.timestamp <= ?
         ORDER BY d.timestamp ASC
-    """
-    
-    try:
-        # Executes directly against the local duckdb instance/file infrastructure
-        div_res_df = duckdb.execute(div_query, {"sim_date": sim_date}).df()
-        if not div_res_df.empty:
-            div_df = div_res_df
-        else:
-            div_df = pd.DataFrame(columns=["asset_id", "timestamp", "dividend_amount", "ticker"])
-    except Exception as e:
-        logger.error(f"Failed to fetch dividends from local DuckDB storage layer: {e}")
-        div_df = pd.DataFrame(columns=["asset_id", "timestamp", "dividend_amount", "ticker"])
+    """, [sim_date]).df()
 
     # =========================================
-    # EMPTY CASE FALLBACK
+    # EMPTY CASE
     # =========================================
     if cash_df.empty and tx_df.empty and div_df.empty:
-        return pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+        return pd.DataFrame(
+            columns=["timestamp", "amount", "type", "reference"]
+        )
 
     # =========================================
-    # STRUCTURAL DATA CLEANING
+    # CLEANING
     # =========================================
     if not tx_df.empty:
         tx_df["timestamp"] = pd.to_datetime(tx_df["timestamp"])
-        tx_df["side"] = tx_df["side"].astype(str).str.strip().str.lower()
-        tx_df["quantity"] = pd.to_numeric(tx_df["quantity"], errors="coerce").fillna(0.0)
-        tx_df["price_per_share"] = pd.to_numeric(tx_df["price_per_share"], errors="coerce").fillna(0.0)
+        tx_df["side"] = (
+            tx_df["side"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        tx_df["quantity"] = pd.to_numeric(
+            tx_df["quantity"],
+            errors="coerce"
+        ).fillna(0)
+
+        tx_df["price_per_share"] = pd.to_numeric(
+            tx_df["price_per_share"],
+            errors="coerce"
+        ).fillna(0)
 
     if not div_df.empty:
         div_df["timestamp"] = pd.to_datetime(div_df["timestamp"])
@@ -571,17 +618,20 @@ def get_portfolio_cash_history(portfolio_id, sim_date):
         cash_df["timestamp"] = pd.to_datetime(cash_df["timestamp"])
 
     # =========================================
-    # BUILD BUY / SELL LEDGER FRAME
+    # BUILD BUY / SELL LEDGER
     # =========================================
     trade_records = []
 
     if not tx_df.empty:
+
         for _, tx in tx_df.iterrows():
-            trade_value = float(tx["quantity"] * tx["price_per_share"])
-            
+
+            trade_value = tx["quantity"] * tx["price_per_share"]
+
             if tx["side"] == "buy":
                 signed_amount = -trade_value
                 trade_type = "buy"
+
             else:
                 signed_amount = trade_value
                 trade_type = "sell"
@@ -593,54 +643,83 @@ def get_portfolio_cash_history(portfolio_id, sim_date):
                 "reference": tx["ticker"]
             })
 
-    trades_df = pd.DataFrame(trade_records) if trade_records else pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+    trades_df = pd.DataFrame(trade_records)
 
     # =========================================
-    # BUILD DIVIDEND HISTORICAL LEDGER
+    # BUILD DIVIDEND LEDGER
     # =========================================
     dividend_records = []
 
     if not tx_df.empty and not div_df.empty:
+
+        # Unified chronological event stream
         tx_events = tx_df.copy()
         tx_events["event_type"] = "transaction"
 
         div_events = div_df.copy()
         div_events["event_type"] = "dividend"
 
-        events = pd.concat([tx_events, div_events], ignore_index=True)
+        events = pd.concat(
+            [tx_events, div_events],
+            ignore_index=True
+        )
 
-        # Critical prioritizing map: process execution transactions BEFORE tracking dividends on matching days
-        events["priority"] = events["event_type"].map({"transaction": 0, "dividend": 1})
-        events = events.sort_values(["timestamp", "priority"])
+        # Critical ordering:
+        # transactions BEFORE dividends on same day
+        events["priority"] = events["event_type"].map({
+            "transaction": 0,
+            "dividend": 1
+        })
 
+        events = events.sort_values(
+            ["timestamp", "priority"]
+        )
+
+        # Portfolio holdings state
         holdings = {}
 
-        # Executing single state machine simulation pass
+        # Single simulation pass
         for _, event in events.iterrows():
+
             asset_id = event["asset_id"]
 
+            # ---------------------------------
+            # TRANSACTION EVENT
+            # ---------------------------------
             if event["event_type"] == "transaction":
-                qty = float(event["quantity"])
+
+                qty = event["quantity"]
+
                 if event["side"] == "buy":
-                    holdings[asset_id] = holdings.get(asset_id, 0.0) + qty
+                    holdings[asset_id] = (
+                        holdings.get(asset_id, 0) + qty
+                    )
+
                 elif event["side"] == "sell":
-                    holdings[asset_id] = holdings.get(asset_id, 0.0) - qty
+                    holdings[asset_id] = (
+                        holdings.get(asset_id, 0) - qty
+                    )
+
                 continue
 
-            # Process dividend calculations based on current historical ownership state
-            current_qty = holdings.get(asset_id, 0.0)
+            # ---------------------------------
+            # DIVIDEND EVENT
+            # ---------------------------------
+            current_qty = holdings.get(asset_id, 0)
+
             if current_qty > 0:
+
                 dividend_records.append({
                     "timestamp": event["timestamp"],
-                    "amount": float(current_qty * event["dividend_amount"]),
+                    "amount": current_qty * event["dividend_amount"],
                     "type": "dividend",
                     "reference": event["ticker"]
                 })
 
-    dividend_df = pd.DataFrame(dividend_records) if dividend_records else pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+    dividend_df = pd.DataFrame(dividend_records)
 
     # =========================================
-    # FINAL CONSOLIDATED MERGE
+    # FINAL MERGE
     # =========================================
     frames = []
 
@@ -653,36 +732,61 @@ def get_portfolio_cash_history(portfolio_id, sim_date):
     if not dividend_df.empty:
         frames.append(dividend_df)
 
+    # Handle brand new portfolios safely
     if len(frames) == 0:
-        return pd.DataFrame(columns=["timestamp", "amount", "type", "reference"])
+        return pd.DataFrame(
+            columns=["timestamp", "amount", "type", "reference"]
+        )
 
     unified = pd.concat(frames, ignore_index=True)
 
-    # Cast output formats cleanly into static date layout objects
-    unified["timestamp"] = pd.to_datetime(unified["timestamp"]).dt.date
-    unified["amount"] = pd.to_numeric(unified["amount"], errors="coerce").fillna(0.0)
-    unified["reference"] = unified["reference"].fillna("-").astype(str)
-    unified["type"] = unified["type"].fillna("unknown").astype(str).str.lower()
+    # Keep only date (not full timestamp)
+    unified["timestamp"] = (
+        pd.to_datetime(unified["timestamp"])
+        .dt.date
+    )
 
-    # Sort chronology: newest operational actions bubble to the top interface view
-    unified = unified.sort_values("timestamp", ascending=False).reset_index(drop=True)
+    # Clean formatting
+    unified["amount"] = pd.to_numeric(
+        unified["amount"],
+        errors="coerce"
+    ).fillna(0)
+
+    unified["reference"] = (
+        unified["reference"]
+        .fillna("-")
+        .astype(str)
+    )
+
+    unified["type"] = (
+        unified["type"]
+        .fillna("unknown")
+        .astype(str)
+        .str.lower()
+    )
+
+    # Newest first
+    unified = unified.sort_values(
+        "timestamp",
+        ascending=False
+    ).reset_index(drop=True)
 
     return unified
-
-
 
 
 # for simulating time
 def handle_time_jump(new_date, p_id):
     """
-    Advances the operational simulation clock, calculates and distributes interim dividends 
-    via local DuckDB analytical layer reading from cloud Parquet snapshots, and bulk backfills 
-    daily historical performance metrics directly within the cloud database.
-    All source documentation and comments are maintained strictly in English.
+    Advances a portfolio simulation date and backfills daily portfolio history.
+
+    This function:
+    - prevents jumping into the future
+    - calculates dividends earned during the jump window
+    - values current holdings for each simulated day using ASOF price matching
+    - writes daily portfolio history
+    - updates the portfolio's current simulation date and available cash
     """
-    logger = logging.getLogger(__name__)
-    
-    # 1. Enforce structural timeline ceiling boundaries (Yesterday constraint)
+
     yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
     yesterday_dt = datetime.datetime.combine(yesterday.date(), datetime.time.max)
 
@@ -690,173 +794,1024 @@ def handle_time_jump(new_date, p_id):
         st.error("Cannot travel to the future!")
         return False
 
-    engine = get_supabase_engine()
-    
+    con = st.session_state.con
+    p_id = st.session_state.current_portfolio_id
+
     try:
-        # =====================================================================
-        # STEP 1: FETCH STATE FRAME FROM CLOUD (SUPABASE)
-        # =====================================================================
-        with engine.begin() as con:
-            res = con.execute(
-                text("SELECT current_sim_date, available_cash FROM portfolios WHERE portfolio_id = :p_id"),
-                {"p_id": p_id}
-            ).fetchone()
-            
-            if not res:
-                return False
-                
-            start_date = res[0]
-            current_cash = float(res[1])
-            
-            # Bypass execution if no forward progression is requested
-            if start_date >= new_date:
-                return True
+        portfolio_row = con.execute("""
+            SELECT current_sim_date, available_cash
+            FROM portfolios
+            WHERE portfolio_id = ?
+        """, [p_id]).fetchone()
 
-            # Extract holding matrix metadata to feed local analytical query scopes
-            holdings_res = con.execute(
-                text("SELECT asset_id, quantity FROM holdings WHERE portfolio_id = :p_id AND quantity > 0"),
-                {"p_id": p_id}
-            ).fetchall()
-            
-            df_holdings = pd.DataFrame(holdings_res, columns=["asset_id", "quantity"])
+        if not portfolio_row:
+            st.error("Portfolio not found.")
+            return False
 
-        # =====================================================================
-        # STEP 2: HEAVY LIFTING INSIDE LOCAL LAYER (DUCKDB + PARQUET URL)
-        # =====================================================================
-        total_dividends = 0.0
-        df_history_backfill = pd.DataFrame(columns=["portfolio_id", "timestamp", "portfolio_value", "available_cash"])
+        start_date, starting_cash = portfolio_row
 
-        if not df_holdings.empty:
-            asset_ids = df_holdings["asset_id"].tolist()
-            
-            # Direct optimization routing pointing straight to the Google Cloud Storage Parquet file
-            div_parquet_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots/dividends.parquet"
-            
-            # Vectorized dividend query mapping matching historical holding states
-            div_calc_query = f"""
-                SELECT d.asset_id, SUM(d.dividend_amount) as total_rate
-                FROM '{div_parquet_url}' d
-                WHERE d.asset_id IN $asset_list
-                  AND d.timestamp > $start_date
-                  AND d.timestamp <= $new_date
-                GROUP BY d.asset_id
-            """
-            
-            # Ensure DuckDB reads from network endpoints seamlessly
-            duckdb.execute("INSTALL httpfs; LOAD httpfs;")
-            
-            df_div_rates = duckdb.execute(div_calc_query, {
-                "asset_list": asset_ids,
-                "start_date": start_date,
-                "new_date": new_date
-            }).df()
+        if start_date >= new_date:
+            return True
 
-            if not df_div_rates.empty:
-                df_div_merge = pd.merge(df_holdings, df_div_rates, on="asset_id", how="inner")
-                total_dividends = float((df_div_merge["quantity"] * df_div_merge["total_rate"]).sum())
+        con.execute("BEGIN TRANSACTION")
 
-            # Generate dynamic daily time-series performance tracking matrices inside local core
-            backfill_matrix_query = """
-                WITH date_series AS (
-                    SELECT CAST(day_raw AS TIMESTAMP) as day_ts
-                    FROM generate_series(
-                        CAST($start_date AS TIMESTAMP) + INTERVAL '1 day', 
-                        CAST($new_date AS TIMESTAMP), 
-                        INTERVAL '1 day'
-                    ) AS day_raw
-                ),
-                daily_prices AS (
-                    SELECT 
-                        ds.day_ts,
-                        h.asset_id,
-                        h.quantity,
-                        p.close,
-                        ROW_NUMBER() OVER (PARTITION BY ds.day_ts, h.asset_id ORDER BY p.timestamp DESC) as rn
-                    FROM date_series ds
-                    CROSS JOIN df_holdings h
-                    JOIN prices p ON p.asset_id = h.asset_id AND p.timestamp <= ds.day_ts
-                ),
-                daily_valuation AS (
-                    SELECT day_ts, SUM(quantity * close) as assets_value
-                    FROM daily_prices
-                    WHERE rn = 1
-                    GROUP BY day_ts
-                )
-                SELECT 
-                    $p_id as portfolio_id,
-                    day_ts as timestamp,
-                    assets_value + $final_cash as portfolio_value,
-                    $final_cash as available_cash
-                FROM daily_valuation
-            """
-            
-            final_cash_projection = current_cash + total_dividends
-            df_history_backfill = duckdb.execute(backfill_matrix_query, {
-                "start_date": start_date,
-                "new_date": new_date,
-                "p_id": p_id,
-                "final_cash": final_cash_projection
-            }).df()
+        backfill_query = """
+            INSERT INTO portfolio_history (
+                portfolio_id,
+                timestamp,
+                portfolio_value,
+                available_cash
+            )
+            WITH current_holdings AS (
+                SELECT
+                    asset_id,
+                    quantity
+                FROM holdings
+                WHERE portfolio_id = ?
+                  AND quantity > 0
+            ),
 
-        # =====================================================================
-        # STEP 3: RE-ENGAGE CLOUD LAYER FOR FINAL WRITE ACTIONS (SUPABASE)
-        # =====================================================================
-        with engine.begin() as con:
-            # Inject calculated global dividend yields into core profile state
-            if total_dividends > 0:
-                con.execute(
-                    text("""
-                        UPDATE portfolios 
-                        SET available_cash = available_cash + :total_dividends 
-                        WHERE portfolio_id = :p_id
-                    """),
-                    {"total_dividends": total_dividends, "p_id": p_id}
-                )
+            date_series AS (
+                SELECT CAST(day_raw AS TIMESTAMP) AS day_ts
+                FROM generate_series(
+                    CAST(? AS TIMESTAMP) + INTERVAL 1 DAY,
+                    CAST(? AS TIMESTAMP),
+                    INTERVAL 1 DAY
+                ) AS t(day_raw)
+            ),
 
-            # Clear overlapping historical record slices to ensure operational idempotency
-            con.execute(
-                text("""
-                    DELETE FROM portfolio_history 
-                    WHERE portfolio_id = :portfolio_id 
-                      AND timestamp > CAST(:start_date AS TIMESTAMP)
-                      AND timestamp <= CAST(:new_date AS TIMESTAMP)
-                """),
-                {"portfolio_id": p_id, "start_date": start_date, "new_date": new_date}
+            holding_days AS (
+                SELECT
+                    ds.day_ts,
+                    h.asset_id,
+                    h.quantity
+                FROM date_series ds
+                CROSS JOIN current_holdings h
+            ),
+
+            price_matches AS (
+                SELECT
+                    hd.day_ts,
+                    hd.asset_id,
+                    hd.quantity,
+                    p.close
+                FROM holding_days hd
+                ASOF LEFT JOIN prices p
+                  ON hd.asset_id = p.asset_id
+                 AND hd.day_ts >= p.timestamp
+            ),
+
+            assets_by_day AS (
+                SELECT
+                    day_ts,
+                    COALESCE(SUM(quantity * close), 0) AS assets_value
+                FROM price_matches
+                GROUP BY day_ts
+            ),
+
+            dividend_events AS (
+                SELECT
+                    CAST(d.timestamp AS TIMESTAMP) AS dividend_ts,
+                    SUM(h.quantity * d.dividend_amount) AS dividend_amount
+                FROM current_holdings h
+                JOIN dividends d
+                  ON h.asset_id = d.asset_id
+                WHERE d.timestamp > CAST(? AS TIMESTAMP)
+                  AND d.timestamp <= CAST(? AS TIMESTAMP)
+                GROUP BY d.timestamp
+            ),
+
+            daily_cash AS (
+                SELECT
+                    ds.day_ts,
+                    ? + COALESCE(SUM(de.dividend_amount), 0) AS available_cash
+                FROM date_series ds
+                LEFT JOIN dividend_events de
+                  ON de.dividend_ts <= ds.day_ts
+                GROUP BY ds.day_ts
             )
 
-            # Bulk safe write operations using highly optimized pandas backend to_sql framework
-            if not df_history_backfill.empty:
-                df_history_backfill["timestamp"] = pd.to_datetime(df_history_backfill["timestamp"])
-                df_history_backfill.to_sql(
-                    name="portfolio_history",
-                    con=con,
-                    if_exists="append",
-                    index=False,
-                    method="multi"
-                )
-
-            # Finalize core milestone timeline metrics anchoring step
-            con.execute(
-                text("UPDATE portfolios SET current_sim_date = :new_date WHERE portfolio_id = :p_id"),
-                {"new_date": new_date, "p_id": p_id}
+            SELECT
+                ? AS portfolio_id,
+                ds.day_ts,
+                COALESCE(abd.assets_value, 0) + dc.available_cash AS portfolio_value,
+                dc.available_cash
+            FROM date_series ds
+            LEFT JOIN assets_by_day abd
+              ON ds.day_ts = abd.day_ts
+            JOIN daily_cash dc
+              ON ds.day_ts = dc.day_ts
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM portfolio_history ph
+                WHERE ph.portfolio_id = ?
+                  AND ph.timestamp = ds.day_ts
             )
+        """
 
-        # Update core Streamlit reactive application state variables layout framework
+        con.execute(
+            backfill_query,
+            [
+                p_id,
+                start_date,
+                new_date,
+                start_date,
+                new_date,
+                starting_cash,
+                p_id,
+                p_id
+            ]
+        )
+
+        total_dividends = con.execute("""
+            SELECT COALESCE(SUM(h.quantity * d.dividend_amount), 0)
+            FROM holdings h
+            JOIN dividends d
+              ON h.asset_id = d.asset_id
+            WHERE h.portfolio_id = ?
+              AND h.quantity > 0
+              AND d.timestamp > CAST(? AS TIMESTAMP)
+              AND d.timestamp <= CAST(? AS TIMESTAMP)
+        """, [p_id, start_date, new_date]).fetchone()[0]
+
+        con.execute("""
+            UPDATE portfolios
+            SET
+                current_sim_date = ?,
+                available_cash = available_cash + ?
+            WHERE portfolio_id = ?
+        """, [new_date, total_dividends, p_id])
+
+        con.execute("COMMIT")
+
         st.session_state.current_sim_date = new_date
-        st.session_state.current_sim_date_display = new_date.strftime('%d/%m/%Y')
-        if 'perf_data' in st.session_state:
+        st.session_state.current_sim_date_display = new_date.strftime("%d/%m/%Y")
+
+        if "perf_data" in st.session_state:
             del st.session_state.perf_data
-            
+
         return True
 
     except Exception as e:
-        logger.error(f"Global time jump processing pipeline sequence crashed safely: {e}")
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+
         st.error(f"Time Jump Failed: {e}")
         return False
+    
+
+# for getting recomendations to buy
+def get_closest_assets(con, strategy_id: int, sim_date: str ,min_required_factors=4):
+    """
+    Returns all assets ranked by similarity to the user strategy vector.
+
+    This function is PURE backend logic:
+    - Computes similarity
+    - Joins metadata
+    - Returns FULL sorted dataset
+
+    No filtering, no limits, no UI decisions.
+    """
+
+    # ======================================================
+    # 1. LOAD USER STRATEGY VECTOR
+    # ======================================================
+    strategy = con.sql(f"""
+        SELECT *
+        FROM user_preferences_strategy
+        WHERE portfolio_strategy_id = {strategy_id}
+    """).df().iloc[0]
+
+    strategy_vector = np.array([
+        strategy["momentum_preference"],
+        strategy["value_preference"],
+        strategy["quality_preference"],
+        strategy["growth_preference"],
+        strategy["defensive_preference"],
+        strategy["size_preference"],
+    ])
+
+    # ======================================================
+    # 2. LOAD ASSET FACTORS FOR GIVEN DATE
+    # ======================================================
+    assets_df = con.execute("""
+        SELECT
+            asset_id,
+            momentum_factor_market,
+            value_factor_market,
+            quality_factor_market,
+            growth_factor_market,
+            defensive_factor_market,
+            size_factor_market
+        FROM asset_factors_normalized_final
+        WHERE timestamp = (
+            SELECT MAX(timestamp)
+            FROM asset_factors_normalized_final
+            WHERE timestamp <= ?
+        )
+    """, [sim_date]).df()
+
+    if assets_df.empty:
+        return assets_df
+
+    # ======================================================
+    # 3. COMPUTE ROBUST EUCLIDEAN DISTANCE
+    # ======================================================
+
+    factor_cols = [
+        "momentum_factor_market",
+        "value_factor_market",
+        "quality_factor_market",
+        "growth_factor_market",
+        "defensive_factor_market",
+        "size_factor_market",
+    ]
+
+    asset_matrix = (
+        assets_df[factor_cols]
+        .replace([np.inf, -np.inf], np.nan)
+        .to_numpy(dtype=float)
+    )
+
+    strategy_vector = np.array(strategy_vector, dtype=float)
+
+    if not np.isfinite(strategy_vector).all():
+        raise ValueError(
+            f"Strategy {strategy_id} contains missing or invalid preference values"
+        )
+
+    total_factors = len(factor_cols)
+    valid_mask = np.isfinite(asset_matrix)
+    valid_counts = valid_mask.sum(axis=1)
+
+    diff = asset_matrix - strategy_vector
+
+    squared_diff = np.where(
+        valid_mask,
+        diff ** 2,
+        0.0
+    )
+
+    mean_squared_diff = np.divide(
+        squared_diff.sum(axis=1),
+        valid_counts,
+        out=np.full(len(assets_df), np.inf),
+        where=valid_counts > 0
+    )
+
+    distances = np.sqrt(mean_squared_diff * total_factors)
+
+    distances[valid_counts < min_required_factors] = np.inf
+
+    assets_df = assets_df.copy()
+    assets_df["distance"] = distances
+
+    # ======================================================
+    # 4. MERGE METADATA
+    # ======================================================
+    assets_meta = con.sql("""
+        SELECT asset_id, ticker, sector, industry, name
+        FROM assets
+    """).df()
+
+    merged_df = assets_df.merge(
+        assets_meta,
+        on="asset_id",
+        how="left"
+    )
+
+    # ======================================================
+    # 5. RETURN FULL RANKED LIST (NO LIMIT)
+    # ======================================================
+    return merged_df.sort_values("distance").reset_index(drop=True)
 
 
 
-# for getting recomendations to buy/sell
+# for getting compleate multi-strategy context
+def build_strategy_context(con, portfolio_id: int, sim_date: str):
+    """
+    Builds the execution context for a portfolio by allocating cash across strategies
+    and filtering candidate assets based on market data and user preferences.
 
+    Args:
+        con: Database connection object.
+        portfolio_id (int): The unique identifier for the portfolio.
+        sim_date (str): The date string used for market data lookup.
+
+    Returns:
+    dict: A dictionary containing:
+        - "meta": global portfolio-level parameters such as fees, deposits,
+          investment settings, sector preferences, and available cash.
+        - "strategies": a dictionary where keys are strategy IDs and values
+          contain:
+              - allocated cash for the strategy
+              - preference vector (as a dict for debugging clarity)
+              - filtered DataFrame of closest tradable assets after preference adjustments
+    """
+    # ======================================================
+    # A.1 LOAD RELEVANT DATA
+    # ======================================================
+
+    multi = con.sql(f"""
+        SELECT *
+        FROM multi_strategy
+        WHERE portfolio_id = {portfolio_id}
+        ORDER BY multi_strategy_id DESC
+        LIMIT 1
+    """).df().iloc[0]
+    
+    prices_df = con.execute("""
+        SELECT asset_id, close as price
+        FROM prices p
+        WHERE p.timestamp = (
+            SELECT MAX(p2.timestamp)
+            FROM prices p2
+            WHERE p2.asset_id = p.asset_id
+            AND p2.timestamp <= ?
+        )
+    """, [sim_date]).df()
+
+
+
+    strategies = [
+        (multi["strategy_1_id"], multi["strategy_1_pct"]),
+        (multi["strategy_2_id"], multi["strategy_2_pct"]),
+        (multi["strategy_3_id"], multi["strategy_3_pct"]),
+        (multi["strategy_4_id"], multi["strategy_4_pct"]),
+    ]
+
+    monthly_deposit = multi["monthly_deposit"]
+    initial_investment = multi["initial_investment"]
+    buy_fee = multi["buy_fee"]
+    sell_fee = multi["sell_fee"]
+    deposit_fee = multi["deposit_fee"]
+    withdrawal_fee = multi["withdrawal_fee"]
+    diversification = multi["diversification"]
+
+    # sector filters (clean handling)
+    preferred_sectors = multi["preferred_sectors"]
+    excluded_sectors = multi["excluded_sectors"]
+
+    # parse excluded sectors
+    if excluded_sectors:
+        excluded_sectors = [s.strip() for s in excluded_sectors.split(",")]
+    else:
+        excluded_sectors = []
+
+    # parse preferred sectors 
+    if preferred_sectors:
+        preferred_sectors = [s.strip() for s in preferred_sectors.split(",")]
+    else:
+        preferred_sectors = []
+
+    # ======================================================
+    # A.2 AVAILABLE CASH
+    # ======================================================
+
+    total_cash = st.session_state.get("current_available_cash")
+
+    if total_cash is None:
+        total_cash = con.execute(
+            "SELECT available_cash FROM portfolios WHERE portfolio_id = ?",
+            [portfolio_id]
+        ).fetchone()[0]
+        
+        
+    # ======================================================
+    # A.3 META DATA
+    # ======================================================
+        
+        
+    meta = {
+            "monthly_deposit": monthly_deposit,
+            "initial_investment": initial_investment,
+            "buy_fee": buy_fee,
+            "sell_fee": sell_fee,
+            "deposit_fee": deposit_fee,
+            "withdrawal_fee": withdrawal_fee,
+            "diversification": diversification,
+            "preferred_sectors": preferred_sectors,
+            "excluded_sectors": excluded_sectors,
+            "total_cash": total_cash
+        }
+
+    # ======================================================
+    # B. BUILD STRATEGY CONTEXT
+    # ======================================================
+
+    strategy_context = {}
+
+    for strategy_id, pct in strategies:
+
+        if strategy_id is None or pct == 0:
+            continue
+
+        # B.1 ALLOCATE CASH
+        cash = total_cash * (pct / 100)
+
+        # B.2 LOAD STRATEGY
+        strategy = con.sql(f"""
+            SELECT *
+            FROM user_preferences_strategy
+            WHERE portfolio_strategy_id = {strategy_id}
+        """).df().iloc[0]
+
+        # B.3 BUILD STRATEGY VECTOR
+        vector = np.array([
+            strategy["momentum_preference"],
+            strategy["value_preference"],
+            strategy["quality_preference"],
+            strategy["growth_preference"],
+            strategy["defensive_preference"],
+            strategy["size_preference"],
+        ])
+        
+
+        # B.4 GET CLOSEST ASSETS
+        closest_assets = get_closest_assets(con, strategy_id, sim_date)
+
+        # sector filter
+        if excluded_sectors:
+            closest_assets = closest_assets[
+                ~closest_assets["sector"].isin(excluded_sectors)
+            ]
+            
+        closest_assets = closest_assets.merge(prices_df,on="asset_id",how="left")
+
+        # feasibility filter (price vs cash)
+        closest_assets = closest_assets[
+            closest_assets["price"] <= cash
+        ].reset_index(drop=True)
+        
+        
+        # B.5 SCORE ASSETS
+        
+        closest_assets = closest_assets.reset_index(drop=True)
+        closest_assets["base_score"] = 1.0 / ((closest_assets.index) / 100 + 1)
+        closest_assets["score"] = closest_assets["base_score"]
+
+
+        if preferred_sectors:
+
+            mask = closest_assets["sector"].isin(preferred_sectors)
+
+            closest_assets.loc[mask, "score"] *= 1.1
+            
+        # B.6 RE ORDER TABLE BASED ON SCORE AN NOT DIST
+        
+        closest_assets = closest_assets.sort_values(
+                by="score",
+                ascending=False
+            ).reset_index(drop=True)
+
+
+        # B.7 STORE CONTEXT
+        strategy_context[strategy_id] = {
+            "cash": cash,
+            "vector": vector, 
+            "closest_assets": closest_assets ,
+        }
+    
+    
+
+    return  {"meta": meta, "strategies": strategy_context}
+
+
+
+
+# for dynamic re scoring of relevancy of assets depending on strategy and holdings
+def re_score_assets(context, strategy_id, current_step_holdings):
+    """
+    Re-ranks candidate assets based on current portfolio state.
+
+    This function implements a stateful re-scoring mechanism used inside a greedy
+    allocation loop. The goal is to dynamically adjust asset attractiveness based on:
+
+    1. Current asset-level exposure (to avoid over-concentration in single assets)
+    2. Current sector-level exposure (to enforce diversification constraints)
+    3. Strategy-level diversification settings
+    4. Preference bias from the initial context (e.g., preferred sectors)
+
+    The function is intended to be called iteratively during portfolio construction,
+    where `current_step_holdings` is updated after each allocation step.
+
+    Args:
+        context (dict):
+            Full strategy execution context containing:
+            - "meta": global portfolio configuration (fees, diversification level, etc.)
+            - "strategies": per-strategy asset universe and precomputed scores
+
+        strategy_id (int):
+            Identifier of the active strategy.
+
+        current_step_holdings (dict):
+            Dictionary mapping:
+                asset_id -> current portfolio weight (0..1 or normalized share)
+
+    Returns:
+        pd.DataFrame:
+            Re-ranked asset universe with updated "score" column.
+            Higher score indicates higher priority for allocation.
+    """
+
+    # getting data
+    ctx = context["strategies"][strategy_id]
+    meta = context["meta"]
+    
+    # looking ony at what we hold + 200 top assets
+    
+    df = ctx["closest_assets"].copy().reset_index(drop=True)
+    held_assets = set(current_step_holdings.keys())
+    top_200 = df.head(200)
+
+    extra_held = df[
+        (df["asset_id"].isin(held_assets))
+        & (~df["asset_id"].isin(top_200["asset_id"]))
+    ]
+
+    df = pd.concat([top_200, extra_held], ignore_index=True)
+    
+    # creating a price map for calculations
+    price_map = dict(zip(df["asset_id"], df["price"]))
+
+
+    # ======================================================
+    # 1. DIVERSIFICATION POLICY PARAMETERS
+    # ======================================================
+    
+    diversification = meta["diversification"]
+
+    if diversification == 1:
+        max_assets = 8
+        a = 0.09
+        b = 0.06
+
+    elif diversification == 2:
+        max_assets = 20
+        a = 0.12
+        b = 0.08
+
+    elif diversification == 3:
+        max_assets = 30
+        a = 0.16
+        b = 0.13
+
+    else:
+        raise ValueError("Invalid diversification level")
+
+    # ======================================================
+    # 2. PORTFOLIO STATE  
+    # ======================================================
+
+    asset_value = {}
+
+    for asset_id, shares in current_step_holdings.items():
+
+        if shares <= 0:
+            continue
+
+        price = price_map.get(asset_id)
+
+        if price is None:
+            logging.warning(f"missing price for asset_id: {asset_id}")
+            continue
+
+        asset_value[asset_id] = shares * price
+
+    total_value = sum(asset_value.values()) or 1
+
+    asset_weight = {
+        aid: val / total_value
+        for aid, val in asset_value.items()
+    }
+
+    sector_value = {}
+
+    for asset_id, value in asset_value.items():
+
+        sector = df.loc[df["asset_id"] == asset_id, "sector"]
+
+        if len(sector) == 0:
+            continue
+
+        sector = sector.iloc[0]
+
+        sector_value[sector] = sector_value.get(sector, 0) + value
+
+    sector_weight = {
+        s: v / total_value
+        for s, v in sector_value.items()
+    }
+
+    # ======================================================
+    # 3. PENALTY FUNCTIONS
+    # ======================================================
+
+    def asset_penalty(w):
+        return 1 / (1 + a * math.log(1 + w))
+
+    def sector_penalty(w):
+        return 1 / (1 + b * math.log(1 + w))
+
+    # ======================================================
+    # 4. BASE SCORING
+    # ======================================================
+
+    df["score"] = df["base_score"]
+
+    preferred_sectors = meta["preferred_sectors"]
+
+    if preferred_sectors:
+        mask = df["sector"].isin(preferred_sectors)
+        df.loc[mask, "score"] *= 1.05
+
+    # ======================================================
+    # 5. DYNAMIC RE-SCORING
+    # ======================================================
+
+    for i, row in df.iterrows():
+
+        asset_id = row["asset_id"]
+        sector = row["sector"]
+
+        w_asset = asset_weight.get(asset_id, 0)
+        w_sector = sector_weight.get(sector, 0)
+
+        penalty = asset_penalty(w_asset) * sector_penalty(w_sector)
+
+        df.loc[i, "score"] *= penalty
+        
+        
+    if len(current_step_holdings) >= max_assets:
+
+        held_assets = set(current_step_holdings.keys())
+
+        df = df[df["asset_id"].isin(held_assets)].reset_index(drop=True)
+
+    # ======================================================
+    # 6. FINAL SORTING
+    # ======================================================
+
+    df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+    return df
+
+
+       
+# for actual allocation building
+def build_allocation(strategy_id, context, df, cash, current_step_holdings, max_assets=25):
+    """
+    Greedy portfolio construction engine.
+
+    This function iteratively builds a portfolio by:
+    1. Re-scoring candidate assets based on current holdings state
+    2. Selecting the best affordable asset
+    3. Adding one unit (share) of the selected asset
+    4. Updating remaining cash
+    5. Repeating until constraints are met
+
+    The process is stateful and dynamic:
+    - Each iteration updates holdings
+    - Each update triggers a re-scoring step
+    - The scoring function reflects diversification pressure and exposure penalties
+
+    Final weights are normalized only at the end of the process.
+
+    Args:
+        strategy_id (int):
+            Identifier of the active investment strategy.
+
+        context (dict):
+            Full execution context containing:
+            - meta configuration (diversification, preferences, etc.)
+            - strategy-specific asset universe and metadata
+
+        df (pd.DataFrame):
+            Candidate assets DataFrame. Must include:
+            - asset_id
+            - price
+            - score (precomputed base score)
+
+        cash (float):
+            Total available capital for allocation.
+
+        current_step_holdings (dict):
+            Dictionary mapping:
+                asset_id -> shares
+
+            where:
+                weight: current portfolio weight (0..1, recomputed at end)
+                shares: number of units held
+
+        max_assets (int):
+            Maximum number of distinct assets allowed in the portfolio.
+
+    Returns:
+        dict:
+            Updated holdings in the format:
+                asset_id -> (final_weight, shares)
+
+            where:
+                final_weight is normalized based on total invested capital.
+    """
+    
+
+    if current_step_holdings is None:
+        current_step_holdings = {}
+
+    remaining_cash = cash
+    buy_fee = context["meta"].get("buy_fee", 0)
+    
+    df = df.copy().reset_index(drop=True)
+    
+    diversification = context["meta"]["diversification"]
+
+    if diversification == 1:
+        max_assets = 8
+        max_asset_weight = 0.25
+        max_sector_weight = 0.5
+
+    elif diversification == 2:
+        max_assets = 20
+        max_asset_weight = 0.15
+        max_sector_weight = 0.35
+
+    elif diversification == 3:
+        max_assets = 30
+        max_asset_weight = 0.08
+        max_sector_weight = 0.20
+
+    else:
+        raise ValueError("Invalid diversification level")
+
+    # initial scoring based on empty or partial state
+    df = re_score_assets(context, strategy_id, current_step_holdings)
+    price_map = dict(zip(df["asset_id"], df["price"]))
+
+    while True:
+
+        active_assets = [
+            aid for aid, shares in current_step_holdings.items()
+            if shares > 0
+        ]
+
+        invested_so_far = cash - remaining_cash
+        current_fee_reserve = buy_fee * len(active_assets)
+        cash_available_after_fees = cash - invested_so_far - current_fee_reserve
+
+        if cash_available_after_fees <= 0:
+            break
+
+        affordable_df = df[df["price"] <= cash_available_after_fees].copy()
+
+        if affordable_df.empty:
+            break
+
+        bought = False
+        
+        active_assets = [
+                aid for aid, shares in current_step_holdings.items()
+                if shares > 0]
+        
+        invested_so_far = cash - remaining_cash
+        current_fee_reserve = buy_fee * len(active_assets)
+        cash_available_after_fees = cash - invested_so_far - current_fee_reserve
+
+        if cash_available_after_fees <= 0:
+            break
+
+        for _, row in affordable_df.iterrows():
+
+            asset_id = row["asset_id"]
+            price = row["price"]
+            sector = row["sector"]
+
+
+            ## applaying hard caps
+            invested_so_far = cash - remaining_cash
+
+            asset_current_value = current_step_holdings.get(asset_id, 0) * price
+
+            sector_current_value = 0
+
+            for held_asset_id, held_shares in current_step_holdings.items():
+                held_price = price_map.get(held_asset_id)
+
+                if held_price is None:
+                    continue
+
+                held_row = df[df["asset_id"] == held_asset_id]
+
+                if held_row.empty:
+                    continue
+
+                held_sector = held_row.iloc[0]["sector"]
+
+                if held_sector == sector:
+                    sector_current_value += held_price * held_shares
+            
+
+            if asset_id not in current_step_holdings and len(active_assets) >= max_assets:
+                continue
+
+            # Fee-aware affordability check
+            extra_fee_needed = 0 if asset_id in current_step_holdings else buy_fee
+
+            cash_available_for_this_asset = cash_available_after_fees - extra_fee_needed
+
+            if price > cash_available_for_this_asset:
+                continue
+
+            # ==========================
+            # UPDATE HOLDINGS (GREEDY STEP) (Improved for complexity reasons, every iteration we buy minimum 1% worth of our total cash)
+            # ==========================
+
+            target_buy_value = cash * 0.01
+
+            shares_to_buy = max(1, int(target_buy_value // price))
+            shares_to_buy = min(shares_to_buy, int(cash_available_for_this_asset // price))
+
+            max_asset_value_allowed = cash * max_asset_weight
+            max_sector_value_allowed = cash * max_sector_weight
+
+            asset_room_value = max_asset_value_allowed - asset_current_value
+            sector_room_value = max_sector_value_allowed - sector_current_value
+
+            allowed_buy_value = min( asset_room_value, sector_room_value, cash_available_for_this_asset)
+
+            allowed_shares = int(allowed_buy_value // price)
+
+            shares_to_buy = min(shares_to_buy, allowed_shares)
+
+            if shares_to_buy <= 0:
+                continue
+
+            spent = shares_to_buy * price
+
+            current_step_holdings[asset_id] = current_step_holdings.get(asset_id, 0) + shares_to_buy
+
+            remaining_cash -= spent
+
+            bought = True
+            break
+
+        # ==========================
+        # TERMINATION CONDITIONS
+        # ==========================
+
+        if not bought:
+            break
+
+        if remaining_cash <= df["price"].min():
+            break
+
+        # re-score after state update
+        df = re_score_assets(context, strategy_id, current_step_holdings)
+        
+        
+    # ==========================
+    # MIN POSITION VALUE FILTER
+    # ==========================
+
+    def min_position_filter(current_step_holdings):
+        """
+        Removes positions that are too small compared to fees.
+
+        Logic:
+        - Find the smallest position below min_position_value.
+        - Remove it and recycle its value.
+        - Use recycled cash to buy more shares of assets we already hold.
+        - Do not open new positions.
+        - Repeat until no small positions remain or no progress can be made.
+        """
+
+        recycled_cash = 0
+
+        while True:
+
+            # ==========================
+            # CALCULATE CURRENT VALUES
+            # ==========================
+            asset_values = {
+                asset_id: price_map[asset_id] * shares
+                for asset_id, shares in current_step_holdings.items()
+                if shares > 0 and asset_id in price_map
+            }
+
+            if not asset_values:
+                break
+
+            # ==========================
+            # FIND SMALLEST VIOLATING POSITION
+            # ==========================
+            violating_assets = {
+                asset_id: value
+                for asset_id, value in asset_values.items()
+                if value < min_position_value
+            }
+
+            if not violating_assets:
+                break
+
+            asset_to_remove = min(
+                violating_assets,
+                key=violating_assets.get
+            )
+
+            recycled_cash += asset_values[asset_to_remove]
+
+            del current_step_holdings[asset_to_remove]
+
+            if not current_step_holdings:
+                break
+
+            # ==========================
+            # TRY TO REINVEST INTO EXISTING HOLDINGS
+            # ==========================
+            made_purchase = True
+
+            while made_purchase:
+                made_purchase = False
+
+                asset_values = {
+                    asset_id: price_map[asset_id] * shares
+                    for asset_id, shares in current_step_holdings.items()
+                    if shares > 0 and asset_id in price_map
+                }
+
+                if not asset_values:
+                    break
+
+                # Try to strengthen the smallest remaining position first
+                sorted_existing_assets = sorted(
+                    asset_values.items(),
+                    key=lambda x: x[1]
+                )
+
+                for asset_id, current_value in sorted_existing_assets:
+
+                    price = price_map.get(asset_id)
+
+                    if price is None or price <= 0:
+                        continue
+
+                    if price > recycled_cash:
+                        continue
+
+                    shares_to_add = int(recycled_cash // price)
+
+                    if shares_to_add <= 0:
+                        continue
+
+                    current_step_holdings[asset_id] += shares_to_add
+                    recycled_cash -= shares_to_add * price
+                    made_purchase = True
+
+                    # After adding to the smallest possible asset, recalculate
+                    break
+
+        return current_step_holdings
+
+    sell_fee = context["meta"].get("sell_fee", 0)
+
+    min_position_value = 50 * max(buy_fee, sell_fee)
+
+    holdings_before_min_filter = current_step_holdings.copy()
+
+    current_step_holdings = min_position_filter(current_step_holdings)
+
+    if not current_step_holdings:
+        current_step_holdings = holdings_before_min_filter
+   
+    # ==========================
+    # FINAL NORMALIZATION STEP
+    # ==========================
+
+    total_invested = sum(
+        price_map[asset_id] * shares
+        for asset_id, shares in current_step_holdings.items()
+    )
+    
+    total_buy_fees = buy_fee * len(current_step_holdings)
+
+    if total_invested + total_buy_fees > cash:
+        return {}
+
+    if total_invested <= 0:
+        return {}
+
+    for asset_id, shares in list(current_step_holdings.items()):
+
+        price = price_map[asset_id]
+
+        current_step_holdings[asset_id] = (
+            (price * shares) / total_invested,
+            shares
+        )
+
+    return current_step_holdings    
+            
 
 

@@ -3,16 +3,7 @@ import duckdb
 import pandas as pd
 import datetime
 import re
-import os
 
-# -------------------------------------------------------------------
-# STREAMLIT CONFIG (MUST BE FIRST)
-# -------------------------------------------------------------------
-st.set_page_config(page_title="Stratify 2026", layout="wide")
-
-# -------------------------------------------------------------------
-# IMPORTS
-# -------------------------------------------------------------------
 from Code.functions.db_manager import *
 from Code.functions.portfolio_managment import *
 from Code.functions.trading_logic import *
@@ -20,157 +11,126 @@ from Code.functions.users_managment import *
 from Code.functions.UI_components import *
 from Code.functions.pages import *
 
-# -------------------------------------------------------------------
-# PATH RESOLUTION
-# -------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-if "mount/src" in BASE_DIR.replace("\\", "/"):
-    DB_PATH = os.path.join(BASE_DIR, "Data_Storage", "stratify.duckdb")
+DB_PATH = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
 
-    if not os.path.exists(DB_PATH):
-        alt = os.path.join(os.path.dirname(BASE_DIR), "Data_Storage", "stratify.duckdb")
-        if os.path.exists(alt):
-            DB_PATH = alt
-
-    USE_CLOUD = True
-else:
-    DB_PATH = r"C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\Data_Storage\stratify.duckdb"
-    USE_CLOUD = False
-
-st.session_state["DB_PATH"] = DB_PATH
-st.session_state["use_cloud"] = USE_CLOUD
+# Run command:
+# python -m streamlit run "C:\Users\Lavie\OneDrive\Desktop\מוצאים עבודה\פרוייקטים\Stratify - gamify financial strategy\main.py"
 
 
-# -------------------------------------------------------------------
-# CONNECTIONS
-# -------------------------------------------------------------------
-@st.cache_resource
-def get_duckdb_connection(db_path: str):
-    return duckdb.connect(db_path)
+def show_no_db_preview_mode():
+    # Preview mode for checking UI pages without opening DuckDB.
 
+    st.sidebar.warning("NO DB MODE is active")
+    st.sidebar.write("DuckDB connection is disabled.")
 
-def init_connections():
-    # DuckDB (always exists)
-    if "duckdb_con" not in st.session_state:
-        st.session_state.duckdb_con = get_duckdb_connection(st.session_state["DB_PATH"])
+    preview_page = st.sidebar.selectbox(
+        "Preview page",
+        [
+            "login_page",
+            "regestration_page",
+            "password_recovery_page",
+            "home_page",
+            "portfolios",
+            "dashboard_home",
+            "asset_purchsing",
+            "strategy_builder",
+            "portfolio_performance_analysis",
+            "strategy_managment",
+            "test_page",
+        ],
+        index=0
+    )
 
-    # cloud connection placeholder (never None surprise)
-    if "con" not in st.session_state:
-        st.session_state.con = None
-
-    if "cloud_con" not in st.session_state:
-        st.session_state.cloud_con = None
-
-
-# -------------------------------------------------------------------
-# SESSION INIT (SAFE DEFAULTS)
-# -------------------------------------------------------------------
-def init_session_state():
-    defaults = {
-        "page": "login_page",
-        "user_id": None,
-        "use_cloud": st.session_state.get("use_cloud", False),
-        "cloud_con": None,
-        "con": None
+    preview_pages = {
+        "login_page": show_login_page,
+        "regestration_page": show_registration_page,
+        "password_recovery_page": show_password_recovery_page,
+        "home_page": show_home_page,
+        "portfolios": show_portfolios_page,
+        "dashboard_home": show_dashboard_home,
+        "asset_purchsing": show_asset_purchsing,
+        "strategy_builder": show_strategy_builder,
+        "portfolio_performance_analysis": show_portfolio_performance_analysis,
+        "strategy_managment": show_strategy_manager,
+        "test_page": test_page,
     }
 
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# -------------------------------------------------------------------
-# CLOUD SETUP (SAFE)
-# -------------------------------------------------------------------
-def setup_cloud_catalog():
-    if not st.session_state.get("use_cloud", False):
-        return
-
-    con = st.session_state.get("con")
-
-    if con is None:
-        try:
-            con = duckdb.connect(st.session_state["DB_PATH"])
-            st.session_state.con = con
-        except Exception as e:
-            st.sidebar.error(f"Cloud connection failed: {e}")
-            return
+    # Minimal fake session state for UI preview
+    if "page" not in st.session_state:
+        st.session_state.page = preview_page
 
     try:
-        base_url = "https://storage.googleapis.com/stratify-historical-data/data_snapshots"
-
-        con.execute("INSTALL httpfs;")
-        con.execute("LOAD httpfs;")
-
-        con.execute(f"""
-            CREATE OR REPLACE VIEW assets AS 
-            SELECT * FROM read_parquet('{base_url}/assets.parquet');
-        """)
-
-        con.execute(f"""
-            CREATE OR REPLACE VIEW prices AS 
-            SELECT * FROM read_parquet('{base_url}/prices.parquet');
-        """)
-
-        con.execute(f"""
-            CREATE OR REPLACE VIEW fundamentals AS 
-            SELECT * FROM read_parquet('{base_url}/fundamentals.parquet');
-        """)
-
-        con.execute(f"""
-            CREATE OR REPLACE VIEW asset_factors_normalized_final AS 
-            SELECT * FROM read_parquet('{base_url}/asset_factors_normalized_final.parquet');
-        """)
+        preview_pages[preview_page]()
 
     except Exception as e:
-        st.sidebar.error(f"⚠️ Cloud catalog registration failed: {e}")
-
-
-# -------------------------------------------------------------------
-# MAIN APP
-# -------------------------------------------------------------------
+        st.error("This page tried to use the database or missing session state.")
+        st.exception(e)
 def main():
+    # ======================================================
+    # PAGE CONFIGURATION
+    # ======================================================
+    st.set_page_config(
+        page_title="Stratify 2026",
+        layout="wide"
+    )
+
+    # ======================================================
+    # NO DB LOCAL PREVIEW MODE
+    # ======================================================
+    # If enabled in .streamlit/secrets.toml, this prevents the app
+    # from opening the local DuckDB database.
+    if st.secrets.get("NO_DB_MODE", "false") == "true":
+        show_no_db_preview_mode()
+        st.stop()
+
+    # ======================================================
+    # INITIAL SESSION STATE
+    # ======================================================
     init_session_state()
-    init_connections()
-    setup_cloud_catalog()
 
-    # ---------------- ROUTER ----------------
-    page = st.session_state.get("page", "login_page")
+    # ======================================================
+    # DATABASE CONNECTION
+    # ======================================================
+    # Create one DuckDB connection and keep it in Streamlit session state.
+    # This prevents opening a new connection on every rerun.
+    if "con" not in st.session_state:
+        st.session_state.con = duckdb.connect(DB_PATH)
 
-    if page == "login_page":
-        show_login_page()
+    # ======================================================
+    # PAGE SAFETY CHECK
+    # ======================================================
+    # If page state is missing, send the user back to login.
+    if "page" not in st.session_state:
+        st.error("Oops, something went wrong. Please log in again.")
+        st.session_state.page = "login_page"
 
-    elif page == "regestration_page":
-        show_registration_page()
+    # ======================================================
+    # ROUTER
+    # ======================================================
+    pages = {
+        "login_page": show_login_page,
+        "regestration_page": show_registration_page,
+        "password_recovery_page": show_password_recovery_page,
+        "home_page": show_home_page,
+        "portfolios": show_portfolios_page,
+        "dashboard_home": show_dashboard_home,
+        "asset_purchsing": show_asset_purchsing,
+        "strategy_builder": show_strategy_builder,
+        "portfolio_performance_analysis": show_portfolio_performance_analysis,
+        "strategy_managment": show_strategy_manager,
+        "test_page": test_page,
+    }
 
-    elif page == "password_recovery_page":
-        show_password_recovery_page()
+    current_page = st.session_state.page
 
-    elif page == "home_page":
-        show_home_page()
-
-    elif page == "portfolios":
-        show_portfolios_page()
-
-    elif page == "dashboard_home":
-        show_dashboard_home()
-
-    elif page == "asset_explorer":
-        show_asset_explorer()
-
-    elif page == "strategy_builder":
-        show_strategy_builder()
-
-    elif page == "portfolio_performance_analysis":
-        show_portfolio_performance_analysis()
+    if current_page in pages:
+        pages[current_page]()
+    else:
+        st.error(f"Unknown page: {current_page}. Redirecting to login page.")
+        st.session_state.page = "login_page"
+        st.rerun()
 
 
-# -------------------------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-    
-    
-

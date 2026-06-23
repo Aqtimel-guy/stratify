@@ -4,8 +4,9 @@ from .users_managment import *
 from .portfolio_managment import *
 from .UI_components import *
 from .trading_logic import *
-from sqlalchemy import text
-from Code.functions.db_manager import get_supabase_engine
+from .selling_logic import *
+import plotly.express as px
+import logging
 
 
 def go_to(page_name):
@@ -13,314 +14,296 @@ def go_to(page_name):
     st.rerun()
     
 
+
 def show_login_page():
-    """
-    Renders the login page and handles authentication flow.
-    """
+    # Check if redirected from a successful registration - display green success message
+    if st.session_state.get('reg_success'):
+        st.success("Registration successful! Please login with your new credentials.")
+        # Reset the flag so the message doesn't persist on page refresh
+        st.session_state.reg_success = False
 
-    # ---------------------------------------------------------------------
-    # 1. Registration success message (one-time)
-    # ---------------------------------------------------------------------
-    if st.session_state.get("reg_success"):
-        st.success("Registration successful! Please log in.")
-        st.session_state["reg_success"] = False
-
-    # ---------------------------------------------------------------------
-    # 2. Title section
-    # ---------------------------------------------------------------------
+    # Centered and styled Title using custom HTML/CSS
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057;">Sign In to Stratify</h1>
-            <p style="color: #7F8C8D;">Gamify your financial strategy</p>
+            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Sign In to Stratify</h1>
+            <p style="color: #7F8C8D; font-size: 16px;">Gamify your financial strategy</p>
         </div>
-        """,
+        """, 
         unsafe_allow_html=True
     )
-
-    prefilled_email = st.session_state.get("prefilled_email", "")
-
-    # ---------------------------------------------------------------------
-    # 3. Layout
-    # ---------------------------------------------------------------------
-    _, main_co, _ = st.columns([1, 2, 1])
-
+    
+    # Use prefilled email from registration if available
+    prefilled_email = st.session_state.get('prefilled_email', "")
+    
+    # Create a layout with 3 columns to center the login container (ratio: 1:2:1)
+    left_co, main_co, right_co = st.columns([1, 2, 1])
+    
     with main_co:
+        # Styled container using Streamlit's native card aesthetic
         with st.container(border=True):
             with st.form("login_form", clear_on_submit=False):
-
-                st.markdown("### Credentials")
-
-                user_email = st.text_input(
-                    "Email",
-                    value=prefilled_email,
-                    placeholder="example@mail.com"
+                st.markdown("<h4 style='color: #34495E;'>Credentials</h4>", unsafe_allow_html=True)
+                
+                user_email = st.text_input("Email", value=prefilled_email, placeholder="example@mail.com")
+                user_password = st.text_input("Password", type="password", placeholder="••••••••")
+            
+                # Custom CSS inject to make the login button full-width and styled
+                st.markdown(
+                    """
+                    <style>
+                    div[data-testid="stFormSubmitButton"] > button {
+                        width: 100%;
+                        background-color: #4CAF50;
+                        color: white;
+                        border-radius: 5px;
+                        border: none;
+                        padding: 0.5rem 1rem;
+                        font-weight: bold;
+                    }
+                    div[data-testid="stFormSubmitButton"] > button:hover {
+                        background-color: #45a049;
+                        border: none;
+                        color: white;
+                    }
+                    </style>
+                    """, 
+                    unsafe_allow_html=True
                 )
-
-                user_password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="••••••••"
-                )
-
-                submit_button = st.form_submit_button("Login")
-
-                # ---------------------------------------------------------
-                # 4. Form submission
-                # ---------------------------------------------------------
-                if submit_button:
-
+                
+                submit_button_loggin = st.form_submit_button("Login")
+                
+                if submit_button_loggin:
                     if not user_email or not user_password:
                         st.warning("Please fill in all fields.")
-                        return
-
-                    user_id, first_name = loggin_func(
-                        user_email,
-                        user_password
-                    )
-
-                    if user_id is not None:
-                        # ---------------- SUCCESS LOGIN ----------------
-                        st.session_state["user_id"] = user_id
-                        st.session_state["first_name"] = first_name
-                        st.session_state["logged_in"] = True
-
-                        # clear sensitive temp data
-                        st.session_state.pop("prefilled_email", None)
-
-                        # reset any auth protection state if exists
-                        if "auth_attempts" in st.session_state:
-                            st.session_state["auth_attempts"] = 0
-                        if "auth_locked_until" in st.session_state:
-                            st.session_state["auth_locked_until"] = 0
-
-                        st.success("Logged in successfully!")
-                        go_to("home_page")
-
                     else:
-                        st.error("Invalid email or password.")
+                        user_id, first_name = loggin_func(user_email, user_password)
+                    
+                        if user_id is not None:
+                            # Save credentials to Session State
+                            st.session_state.user_id = user_id
+                            st.session_state.first_name = first_name
+                            st.session_state.logged_in = True
+                            
+                            # Clean up temporary prefilled email after successful login
+                            if 'prefilled_email' in st.session_state:
+                                del st.session_state.prefilled_email
+                            
+                            st.success("Logged in successfully!")
+                            go_to("home_page")
+                        else:
+                            st.error("Login failed. Check your details.")
 
-    # ---------------------------------------------------------------------
-    # 5. Secondary actions
-    # ---------------------------------------------------------------------
-    st.write("")
-    col_reg, col_forgot = st.columns(2)
+        # Secondary actions (Registration and Forgot Password) positioned cleanly below the form
+        st.write("") # Spacer
+        col_reg, col_forgot = st.columns(2)
+        
+        with col_reg:
+            if st.button("New here? Register", use_container_width=True):
+                go_to("regestration_page")
+                
+        with col_forgot:
+            if st.button("Forgot password?", use_container_width=True):
+                go_to("password_recovery_page")
+        
 
-    with col_reg:
-        if st.button("New here? Register", width="stretch"):
-            go_to("regestration_page")
 
-    with col_forgot:
-        if st.button("Forgot password?", width="stretch"):
-            go_to("password_recovery_page")
-  
-  
-  
 def show_registration_page():
-    """
-    Renders user registration page and handles signup flow.
-    """
-
-    # ---------------------------------------------------------------------
-    # 1. Title
-    # ---------------------------------------------------------------------
+    # Centered and styled Title using custom HTML/CSS
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057;">Create Your Stratify Account</h1>
-            <p style="color: #7F8C8D;">Join us and start gamifying your financial strategy</p>
+            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Create Your Stratify Account</h1>
+            <p style="color: #7F8C8D; font-size: 16px;">Join us and start gamifying your financial strategy</p>
         </div>
-        """,
+        """, 
         unsafe_allow_html=True
     )
-
+    
+    # Create a layout with 3 columns to center the registration container (ratio: 1:2:1)
     left_co, main_co, right_co = st.columns([0.5, 2, 0.5])
-
+    
     with main_co:
+        # Styled container for the registration form
         with st.container(border=True):
             with st.form("registration_form", clear_on_submit=False):
-
-                st.markdown("### Personal Information")
-
-                # ---------------------------------------------------------
-                # Inputs
-                # ---------------------------------------------------------
+                st.markdown("<h4 style='color: #34495E;'>Personal Information</h4>", unsafe_allow_html=True)
+                
+                # Names section distributed into 3 columns
                 col_first, col_middle, col_last = st.columns(3)
-
                 with col_first:
                     first_name = st.text_input("First name *", placeholder="John")
-
                 with col_middle:
-                    middle_name = st.text_input("Middle name", placeholder="Snow")
-
+                    middle_name = st.text_input("Middle name", placeholder="Snow")  # Swapped the placeholder slightly for cleaner look
                 with col_last:
                     last_name = st.text_input("Last name *", placeholder="Stark")
-
-                st.markdown("---")
-
+                
+                # Account Details section
+                st.markdown("<hr style='margin: 15px 0; border-style: dashed;'>", unsafe_allow_html=True)
                 user_email = st.text_input("Email Address *", placeholder="example@mail.com")
-
+                
+                # Passwords section distributed into 2 columns
                 col_pass, col_confirm = st.columns(2)
-
                 with col_pass:
-                    user_password = st.text_input("Password *", type="password")
-
+                    user_password = st.text_input("Password *", type="password", placeholder="••••••••")
                 with col_confirm:
-                    user_password_confirm = st.text_input("Confirm password *", type="password")
-
+                    user_password_confirm = st.text_input("Confirm password *", type="password", placeholder="••••••••")
+                
+                # Date of Birth
                 today = datetime.date.today()
                 hundred_years_ago = today.replace(year=today.year - 100)
-
                 date_of_birth = st.date_input(
                     "Date of Birth",
                     value=datetime.date(2000, 1, 1),
-                    min_value=hundred_years_ago,
-                    max_value=today
+                    min_value=hundred_years_ago,    
+                    max_value=today,                
+                    help="Click to open the calendar and select your birth date"
                 )
+                
+                st.markdown("<p style='color: #7F8C8D; font-size: 12px;'>* Indicates mandatory fields</p>", unsafe_allow_html=True)
+                
+                # Custom CSS inject to make the register button full-width and styled green
+                st.markdown(
+                    """
+                    <style>
+                    div[data-testid="stFormSubmitButton"] > button {
+                        width: 100%;
+                        background-color: #4CAF50;
+                        color: white;
+                        border-radius: 5px;
+                        border: none;
+                        padding: 0.5rem 1rem;
+                        font-weight: bold;
+                    }
+                    div[data-testid="stFormSubmitButton"] > button:hover {
+                        background-color: #45a049;
+                        border: none;
+                        color: white;
+                    }
+                    </style>
+                    """, 
+                    unsafe_allow_html=True
+                )
+                
+                submit_button = st.form_submit_button("Register")
 
-                st.markdown("* Required fields")
-
-                submit = st.form_submit_button("Register")
-
-                # ---------------------------------------------------------
-                # 2. Submission
-                # ---------------------------------------------------------
-                if submit:
-
-                    # Basic validation (UI-level only)
-                    if not all([first_name, last_name, user_email, user_password]):
-                        st.error("Please fill in all required fields.")
-                        return
-
-                    if user_password != user_password_confirm:
-                        st.error("Passwords do not match.")
-                        return
-
-                    if len(user_password) < 8:
-                        st.error("Password must be at least 8 characters.")
-                        return
-
+                # Form Validations
+                if submit_button:
+                    is_valid = True
+                    
+                    if not first_name.strip() or not last_name.strip() or not user_email.strip() or not user_password.strip():
+                        st.error("All mandatory fields must be filled.")
+                        is_valid = False
+                    
                     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-                    if not re.match(email_pattern, user_email):
-                        st.error("Invalid email format.")
-                        return
+                    if is_valid and not re.match(email_pattern, user_email):
+                        st.error("Please enter a valid email address.")
+                        is_valid = False
+                        
+                    if is_valid and not get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [user_email]).empty:
+                        st.error("Email is already in use at Stratify")
+                        is_valid = False
+                        
+                    if is_valid and len(user_password) < 8:
+                        st.error("Password too short! Minimum 8 characters.")
+                        is_valid = False
+                        
+                    if is_valid and user_password != user_password_confirm:
+                        st.error("Passwords do not match.")
+                        is_valid = False
 
-                    # -----------------------------------------------------
-                    # 3. Duplicate check (cloud)
-                    # -----------------------------------------------------
-                    exists = get_data(
-                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1",
-                        {"email": user_email},
-                        use_cloud=True
-                    )
+                    # Final Submission Process
+                    if is_valid:
+                        m_name = middle_name.strip() if middle_name.strip() else None
+                        
+                        success = registration_func(
+                            user_email, first_name, m_name, last_name, date_of_birth, user_password, user_password_confirm
+                        )
+                        
+                        if success:
+                            # State management for redirection and pre-filling the login form
+                            st.session_state.reg_success = True
+                            st.session_state.prefilled_email = user_email
+                            
+                            st.success("Registration completed! Redirecting to login...")
+                            go_to("login_page")
+                        else:
+                            st.error("Something went wrong during registration.")
 
-                    if not exists.empty:
-                        st.error("Email already registered.")
-                        return
-
-                    # -----------------------------------------------------
-                    # 4. Call backend service
-                    # -----------------------------------------------------
-                    m_name = middle_name.strip() if middle_name.strip() else None
-
-                    success = registration_func(
-                        user_email,
-                        first_name,
-                        m_name,
-                        last_name,
-                        date_of_birth,
-                        user_password,
-                        user_password_confirm
-                    )
-
-                    if success:
-                        st.session_state["reg_success"] = True
-                        st.session_state["prefilled_email"] = user_email
-
-                        st.success("Account created successfully!")
-                        go_to("login_page")
-                    else:
-                        st.error("Registration failed. Please try again.")
-
-    # ---------------------------------------------------------------------
-    # 5. Back to login
-    # ---------------------------------------------------------------------
-    st.write("")
-
-    if st.button("← Already have an account? Login", width="stretch"):
-        go_to("login_page") 
+        # Back to Login secondary action below the main container
+        st.write("") # Spacer
+        if st.button("← Already have an account? Login", use_container_width=True):
+            go_to("login_page")
+        
  
- 
- 
- 
+
 def show_password_recovery_page():
-    """
-    Placeholder password recovery page (development mode only).
-    No real recovery logic is executed yet.
-    """
-
+    # Centered and styled Title using custom HTML/CSS
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #2E4057;">Reset Your Password</h1>
-            <p style="color: #7F8C8D;">We'll help you get back into Stratify</p>
+            <h1 style="color: #2E4057; font-family: 'Helvetica Neue', sans-serif;">Reset Your Password</h1>
+            <p style="color: #7F8C8D; font-size: 16px;">We'll help you get back into Stratify</p>
         </div>
-        """,
+        """, 
         unsafe_allow_html=True
     )
-
+    
+    # Create a layout with 3 columns to center the recovery container (ratio: 1:2:1)
     left_co, main_co, right_co = st.columns([1, 2, 1])
-
+    
     with main_co:
+        # Styled container for the password recovery form
         with st.container(border=True):
             with st.form("password_recovery_form", clear_on_submit=False):
-
-                st.markdown("### Account Recovery")
-
-                email = st.text_input(
-                    "Enter your registered email *",
-                    placeholder="example@mail.com"
+                st.markdown("<h4 style='color: #34495E;'>Account Recovery</h4>", unsafe_allow_html=True)
+                
+                email = st.text_input("Enter your registered email *", placeholder="example@mail.com")
+                
+                # Custom CSS inject to make the recovery button full-width and styled blue/steel
+                st.markdown(
+                    """
+                    <style>
+                    div[data-testid="stFormSubmitButton"] > button {
+                        width: 100%;
+                        background-color: #2E4057;
+                        color: white;
+                        border-radius: 5px;
+                        border: none;
+                        padding: 0.5rem 1rem;
+                        font-weight: bold;
+                    }
+                    div[data-testid="stFormSubmitButton"] > button:hover {
+                        background-color: #1F2D3E;
+                        border: none;
+                        color: white;
+                    }
+                    </style>
+                    """, 
+                    unsafe_allow_html=True
                 )
-
-                submit = st.form_submit_button("Recover Password")
-
-                if submit:
-
-                    # -----------------------------------------------------
-                    # Basic validation only (no backend logic yet)
-                    # -----------------------------------------------------
-                    if not email or not email.strip():
-                        st.warning("Please enter your email.")
-                        return
-
-                    email = email.strip()
-
-                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-
-                    if not re.match(email_pattern, email):
-                        st.error("Invalid email format.")
-                        return
-
-                    # -----------------------------------------------------
-                    # SAFE PLACEHOLDER (no user enumeration)
-                    # -----------------------------------------------------
-                    st.info(
-                        "If this email exists in our system, "
-                        "you will receive recovery instructions once the feature is enabled."
-                    )
-
-    # ---------------------------------------------------------------------
-    # Navigation
-    # ---------------------------------------------------------------------
-    st.write("")
-
-    if st.button("← Back to Login", width="stretch"):
-        go_to("login_page")      
-    
-    
-    
+                
+                submit_button = st.form_submit_button("Recover Password")
+        
+                # Form Validation and Submission
+                if submit_button:
+                    if email.strip():
+                        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+                            st.error("Please enter a valid email address.")
+                        elif get_data("SELECT 1 FROM users WHERE email = ? LIMIT 1", [email]).empty:
+                            st.error("No account found with that email.")
+                        # Placeholder for future logic
+                        else:
+                            st.info("Password recovery feature: Once the app is live, a reset link will be sent to this email.")
+                    else:
+                        st.warning("Please enter a valid email address.")
+        
+        # Back to Login secondary action positioned cleanly below the form container
+        st.write("") # Spacer
+        if st.button("← Back to Login", use_container_width=True):
+            go_to("login_page")
             
-######################################           
+            
 
 def show_home_page():
     # 1. Check and fetch user data (only if not already present in session state)
@@ -330,7 +313,7 @@ def show_home_page():
                  SELECT first_name 
                  FROM users
                  WHERE user_id = ?
-                 """, [int(st.session_state.user_id)], use_cloud=True)
+                 """, [int(st.session_state.user_id)])
             
             if not user_data.empty:
                 st.session_state.first_name = user_data.iloc[0, 0]
@@ -509,20 +492,20 @@ def show_home_page():
         with st.container():
             st.markdown("💼 **Real time Market**", unsafe_allow_html=True)
             st.write("Current market coming soon.")
-            st.button("Tuned", disabled=True, width="stretch", key="market_btn")
+            st.button("Tuned", disabled=True, use_container_width=True, key="market_btn")
 
     with gadget2:
         with st.container():
             st.markdown("📈 **My Simulation portfolios**", unsafe_allow_html=True)
             st.write("Define your investment strategy and test it.")
-            if st.button("Go to simulation portfolios", width="stretch", key="view_port"):
+            if st.button("Go to simulation portfolios", use_container_width=True, key="view_port"):
                 go_to("portfolios")
 
     with gadget3:
         with st.container():
             st.markdown("🚀 **Labs**", unsafe_allow_html=True)
             st.write("AI & Crypto coming soon.")
-            st.button("Tuned", disabled=True, width="stretch", key="labs_btn")
+            st.button("Tuned", disabled=True, use_container_width=True, key="labs_btn")
 
     st.write("") # Micro-spacer
     
@@ -607,20 +590,24 @@ def show_home_page():
     return
 
 
-######################################
-
 
 def show_portfolios_page():
-    """
-    Renders the central portfolio management workspace hub.
-    Handles cascading deletes, real-time value computations, and profile summaries.
-    All source documentation and comments are maintained strictly in English.
-    """
     # --- INITIALIZE STATE COUNTER FOR COMPONENT RESET ---
-    # Tracks structural key versions to force popover reset states post-submission
+    # This prevents the creation popover from staying open post-rerun
     if "portfolio_create_version" not in st.session_state:
         st.session_state.portfolio_create_version = 0
+        
+    if 'con' not in st.session_state or st.session_state.con is None:
+        logging.error("Connection lost! Attempting to reconnect...")
+        # try opening new connection if it is failed
+        try:
+            st.session_state.con = duckdb.connect(DB_PATH)
+        except Exception as e:
+            return False, "Database connection error. Please refresh the page."
+            
+            
 
+    con = st.session_state.con
     # ==========================================
     # SYSTEM INJECTION: UNIFIED ADVANCED UX & SIDEBAR STYLES
     # ==========================================
@@ -628,12 +615,13 @@ def show_portfolios_page():
         """
         <style>
         /* --- MAIN APP LAYOUT BASE STYLES --- */
+        /* Compact, modern layout & soft light-slate background */
         [data-testid="stAppViewContainer"] {
             background-color: #F7F9FB;
             padding: 10px 10px;
         }
 
-        /* Glassmorphism Portfolio Cards Design Frame */
+        /* Glassmorphism Portfolio Cards */
         .portfolio-card {
             background: rgba(255, 255, 255, 0.4);
             backdrop-filter: blur(10px);
@@ -645,7 +633,7 @@ def show_portfolios_page():
             margin-bottom: 15px;
         }
 
-        /* Responsive Action Pill-buttons Formatting */
+        /* Small Pill-shaped Action Buttons for Main Content */
         .stButton > button {
             border-radius: 20px !important;
             padding: 0.2rem 0.8rem !important;
@@ -662,7 +650,7 @@ def show_portfolios_page():
             border-color: #2E4057;
         }
 
-        /* Card-level Nested Context Popover Overrides */
+        /* Clean styling for popovers inside the card grid */
         div[data-testid="stPopover"] > button {
             border-radius: 20px !important;
             padding: 0.2rem 0.8rem !important;
@@ -679,6 +667,7 @@ def show_portfolios_page():
         }
 
         /* --- PREMIUM DARK SIDEBAR CORE STYLES --- */
+        /* Forces a strict 200px layout width footprint and sets deep premium dark slate background */
         [data-testid="stSidebar"], [data-testid="stSidebarUserContent"] {
             width: 200px !important; 
             min-width: 200px !important;
@@ -688,25 +677,30 @@ def show_portfolios_page():
             border-right: 1px solid rgba(0, 0, 0, 0.1);
         }
 
+        /* Completely removes the default sidebar collapse toggle arrow button */
         [data-testid="stSidebarCollapseButton"] {
             display: none !important;
         }
         
+        /* Forces all internal sidebar content to snap directly to the absolute top edge */
         [data-testid="stSidebarUserContent"] {
             padding-top: 0.2rem !important;
         }
 
+        /* Wipes out hidden default padding/margin gaps on the first structural inner block */
         [data-testid="stSidebarUserContent"] > div:first-child {
             padding-top: 0px !important;
             margin-top: 0px !important;
         }
         
+        /* Typography corrections for clear dark-mode contrast readability */
         [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p {
             color: #F8FAFC !important;
             font-weight: 600 !important;
         }
 
         /* --- TARGETED SIDEBAR NAVIGATION OVERRIDES --- */
+        /* Forced base style for all navigation sidebar buttons */
         [data-testid="stSidebar"] button:not([key="sidebar_logout_small"]) {
             border-radius: 10px !important;
             border: 1px solid rgba(255, 255, 255, 0.15) !important;
@@ -727,8 +721,8 @@ def show_portfolios_page():
             transform: translateY(-1px);
         }
 
-        /* --- TARGETING SIDEBAR LOGOUT BUTTON SPECIFICALLY VIA KEY --- */
-        div[data-testid="stSidebar"] button[key="sidebar_logout_small"] {
+        /* --- CUSTOM CRIMSON LOGOUT CONTAINER TARGETING --- */
+        .custom-logout-container button {
             background-color: rgba(239, 68, 68, 0.1) !important;
             border: 1px solid #EF4444 !important;
             border-radius: 10px !important;
@@ -737,15 +731,25 @@ def show_portfolios_page():
             font-weight: 600 !important;
             transition: all 0.2s ease-in-out !important;
             width: 100% !important;
+            display: block !important;
+        }
+        
+        .custom-logout-container button, 
+        .custom-logout-container button p,
+        .custom-logout-container button span {
             color: #EF4444 !important;
         }
         
-        div[data-testid="stSidebar"] button[key="sidebar_logout_small"]:hover {
+        .custom-logout-container button:hover {
             background-color: #EF4444 !important;
             border-color: #EF4444 !important;
-            color: #FFFFFF !important;
             transform: translateY(-1px) !important;
             box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3) !important;
+        }
+        
+        .custom-logout-container button:hover p,
+        .custom-logout-container button:hover span {
+            color: #FFFFFF !important;
         }
         </style>
         """,
@@ -755,6 +759,7 @@ def show_portfolios_page():
     # ==========================================
     # SIDEBAR GENERATION & RENDER FRAME
     # ==========================================
+    # --- App Branding Header ---
     st.sidebar.markdown(
         """
         <div style="text-align: center; margin-bottom: 20px;">
@@ -765,6 +770,7 @@ def show_portfolios_page():
         unsafe_allow_html=True
     )
 
+    # --- Investor Profile Header Section ---
     first_name = st.session_state.get("first_name", "Investor")
     st.sidebar.markdown(
         f"""
@@ -786,16 +792,19 @@ def show_portfolios_page():
         unsafe_allow_html=True
     )
     
-    st.sidebar.write("") 
+    st.sidebar.write("") # Micro-spacer
     
-    # FIXED: Avoided enclosing Streamlit components inside raw HTML block markers
+    # --- System Logout Trigger Action Wrapped in Custom Div Container ---
+    st.sidebar.markdown('<div class="custom-logout-container">', unsafe_allow_html=True)
     if st.sidebar.button("Logout", key="sidebar_logout_small"):
-        st.session_state.clear()  
-        st.sidebar.rerun()  
+        st.session_state.clear()  # Clear all memory frame cache states
+        st.sidebar.rerun()  # Rerun the app context back to the authentication screen
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
     # ==========================================
     # MAIN SURFACE SURFACE: PORTFOLIOS GRID
     # ==========================================
+    # --- Header ---
     st.markdown(
         """
         <div style="text-align: center; margin-bottom: 15px;">
@@ -808,6 +817,7 @@ def show_portfolios_page():
 
     user_id = int(st.session_state.user_id)
 
+    # Always fetch fresh data to avoid stale state issues
     user_portfolios = get_data("""
         SELECT 
             portfolio_id, 
@@ -816,50 +826,37 @@ def show_portfolios_page():
             starting_at,
             current_sim_date
         FROM portfolios
-        WHERE user_id = :user_id
+        WHERE user_id = ?
         ORDER BY created_at DESC
-    """, {"user_id": user_id}, use_cloud=True)
+    """, [user_id])
 
     if user_portfolios.empty:
         st.info("No portfolios found. Start by creating your first strategy!")
     else:
+        # Generate 2 columns layout for portfolio cards grid
         cols = st.columns(2)
 
         for index, row in user_portfolios.iterrows():
             p_id = row['portfolio_id']
             p_name = row['portfolio_name']
-            portfolio_id = st.session_state.get('active_portfolio_id') 
-            sim_date = st.session_state.get('sim_date')
             
             with cols[index % 2]:
+                # Custom Glass container wrapping each portfolio element
                 with st.container():
                     st.markdown(f"<h4 style='color: #2E4057; margin-bottom: 8px;'>📁 {p_name}</h4>", unsafe_allow_html=True)
 
-                    # Safe parsing: Guard against type mismatches returned from cloud database drivers
-                    start_dt = pd.to_datetime(row["starting_at"]).strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
-                    curr_dt = pd.to_datetime(row["current_sim_date"]).strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
+                    # Format dates safely
+                    start_dt = row["starting_at"].strftime("%Y-%m-%d") if pd.notnull(row["starting_at"]) else "N/A"
+                    curr_dt = row["current_sim_date"].strftime("%Y-%m-%d") if pd.notnull(row["current_sim_date"]) else "N/A"
 
-                    # Calculate live portfolio tracking performance matrix valuations
+                    # Calculate live portfolio value
                     try:
-                        # FIXED: Resilient parsing approach to guarantee a native datetime object regardless of driver raw data types
-                        raw_sim_date = row["current_sim_date"]
-                        if hasattr(raw_sim_date, "to_pydatetime"):
-                            sim_date_parsed = raw_sim_date.to_pydatetime()
-                        elif isinstance(raw_sim_date, (datetime.date, datetime.datetime)):
-                            sim_date_parsed = datetime.datetime.combine(raw_sim_date, datetime.time.min) if isinstance(raw_sim_date, datetime.date) and not isinstance(raw_sim_date, datetime.datetime) else raw_sim_date
-                        else:
-                            sim_date_parsed = pd.to_datetime(raw_sim_date).to_pydatetime()
-
-                        p_value = float(portfolio_value_calculator(
-                            duckdb_con=st.session_state.con,  
-                            portfolio_id=portfolio_id, 
-                            timestamp=sim_date
-                        ))
-                        
+                        p_value = portfolio_value_calculator(p_id, row["current_sim_date"], st.session_state.con)
                         val_str = f"${p_value:,.2f}"
                     except Exception:
                         val_str = "Error calculating"
 
+                    # Display portfolio details compactly with scaled typography for advanced readability
                     m_col1, m_col2, m_col3 = st.columns(3)
                     with m_col1:
                         st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>📅 Start<br><strong style='color:#2E4057; font-size: 18px;'>{start_dt}</strong></p>", unsafe_allow_html=True)
@@ -868,25 +865,32 @@ def show_portfolios_page():
                     with m_col3:
                         st.markdown(f"<p style='font-size: 16px; margin:0; color:#7F8C8D;'>💰 Net Value<br><strong style='color:#4CAF50; font-size: 18px;'>{val_str}</strong></p>", unsafe_allow_html=True)
                     
-                    st.write("") 
+                    st.write("") # Tiny vertical spacer inside the card
                     
+                    # Inside-card action row split into 2 compact halves (Enter / Delete)
                     btn_col_left, btn_col_right = st.columns([2, 1])
                     
                     with btn_col_left:
-                        if st.button("Enter Portfolio", key=f"enter_{p_id}", width="stretch"):
+                        if st.button("Enter Portfolio", key=f"enter_{p_id}", use_container_width=True):
                             st.session_state.current_portfolio_id = p_id
                             st.session_state.current_portfolio_name = p_name
+                            st.session_state.current_sim_date = row["current_sim_date"]
+                            st.session_state.current_portfolio_starting_at = row["starting_at"]
                             
-                            # Standardizing datetime formats safely across driver type states
-                            st.session_state.current_sim_date = pd.to_datetime(row["current_sim_date"]).to_pydatetime()
-                            st.session_state.current_portfolio_starting_at = pd.to_datetime(row["starting_at"]).to_pydatetime()
-                            go_to("dashboard_home")
+                            
+                            if float(p_value) == 0.0:
+                                st.session_state.active_tab = 0 # making sure they statrt with the questioaner
+
+                                go_to("strategy_builder")
+                            else:
+                                go_to("dashboard_home")
                             
                     with btn_col_right:
-                        with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", width="stretch"):
+                        # FIX 1: Explicit key bound to p_id forces delete popover to auto-close on deletion
+                        with st.popover("🗑️ Delete", key=f"popover_del_{p_id}", use_container_width=True):
                             st.markdown("<p style='font-size: 11px; color:#F44336; font-weight:bold;'>⚠️ Permanent Action</p>", unsafe_allow_html=True)
                             
-                            if st.button("Confirm", key=f"delete_{p_id}", width="stretch"):
+                            if st.button("Confirm", key=f"delete_{p_id}", use_container_width=True):
                                 success, message = delete_portfolio(p_id)
                                 if success:
                                     st.toast(f"🗑️ {p_name} deleted successfully!")
@@ -896,13 +900,14 @@ def show_portfolios_page():
 
     st.write("---")
 
-    # --- Footer Action Bar Frame ---
+    # --- Footer Action Bar (Create New / Return Home) ---
     col_a, col_b = st.columns(2)
 
     with col_b:
+        # FIX 2: Dynamic state version key to automatically close the creation popover form after submit
         create_popover_key = f"create_portfolio_popover_v{st.session_state.portfolio_create_version}"
         
-        with st.popover("➕ Create New Portfolio", key=create_popover_key, width="stretch"):
+        with st.popover("➕ Create New Portfolio", key=create_popover_key, use_container_width=True):
             st.markdown(
                 """
                 <div style="text-align: center; margin-bottom: 15px;">
@@ -914,6 +919,7 @@ def show_portfolios_page():
             )
             
             with st.form("create_portfolio_form", clear_on_submit=True):
+                # Clean split columns for balanced data layout
                 form_col1, form_col2 = st.columns(2)
                 
                 with form_col1:
@@ -931,29 +937,21 @@ def show_portfolios_page():
                         help="Select a historical benchmark date starting from Feb 2nd, 2000."
                     )
                     
-                st.write("") 
+                st.write("") # Micro spacer
                 
+                # Center the submit option
                 submit_col_left, submit_btn_col, submit_col_right = st.columns([1, 2, 1])
                 
                 with submit_btn_col:
-                    submit_clicked = st.form_submit_button("🔨 Create Strategy Now", width="stretch")
+                    submit_clicked = st.form_submit_button("🔨 Create Strategy Now", use_container_width=True)
                     
                 if submit_clicked:
                     if not new_name:
                         st.error("Portfolio name is required")
                     else:
-                        st.write(create_portfolio)
-                        st.write(create_portfolio.__module__)
-                        st.write(create_portfolio.__code__.co_varnames)
-                        success, message = create_portfolio(
-                            cloud_con=st.session_state.cloud_con,
-                            duckdb_con=st.session_state.duckdb_con,
-                            user_id=user_id,
-                            portfolio_name=new_name,
-                            starting_at=start_date
-                        )
-
+                        success, message = create_portfolio(user_id, new_name, start_date)
                         if success:
+                            # Advanced state mutation to force re-render components as closed
                             st.session_state.portfolio_create_version += 1
                             st.toast(f"🚀 Portfolio '{new_name}' created successfully!")
                             st.rerun()
@@ -961,19 +959,11 @@ def show_portfolios_page():
                             st.error(message)
 
     with col_a:
-        if st.button("🏠 Back to Home", width="stretch"):
-            go_to("home_page")
+        if st.button("🏠 Back to Home", use_container_width=True):
+            go_to("home_page")          
+            
 
-       
-
-     
 def show_dashboard_home():
-    """
-    Renders the main simulation strategy control center dashboard home view.
-    Handles cloud-native portfolio statistics, interim asset metrics caching,
-    fluid capital adjustments, and data ledger layout metrics.
-    All source documentation and comments are maintained strictly in English.
-    """
     # ==========================================
     # STEP 1: INITIAL VALIDATION & AUTH CHECK
     # ==========================================
@@ -989,6 +979,9 @@ def show_dashboard_home():
     user_id = int(raw_u_id)
     portfolio_id = int(raw_p_id)
 
+    
+    con = st.session_state.con
+
     # Initialize a clean component reset key versioning tracker for forms
     if "cash_op_version" not in st.session_state:
         st.session_state.cash_op_version = 0
@@ -996,12 +989,11 @@ def show_dashboard_home():
     # ==========================================
     # STEP 2: DATA EXTRACTION & CALCULATIONS
     # ==========================================
-    # Extract structural configuration state metadata from the cloud engine
     portfolio_data = get_data("""
         SELECT portfolio_name, available_cash, created_at, starting_at, current_sim_date 
         FROM portfolios 
-        WHERE portfolio_id = :portfolio_id AND user_id = :user_id
-    """, {"portfolio_id": portfolio_id, "user_id": user_id}, use_cloud=True)
+        WHERE portfolio_id = ? AND user_id = ?
+    """, [portfolio_id, user_id])
 
     if portfolio_data.empty:
         st.error("⚠️ Portfolio not found or access denied.")
@@ -1009,214 +1001,325 @@ def show_dashboard_home():
             go_to("portfolios")
         return
 
-    # Extract raw record variables from the verified operational data container row
+    # Extract raw record variables
     p_row = portfolio_data.iloc[0]
     p_name = p_row['portfolio_name']
-    p_cash = float(p_row['available_cash'])
+    p_cash = p_row['available_cash']
     sim_date = p_row['current_sim_date']
     
-    # Calculate global real-time metric assets value valuation using the isolated cloud interface
-    p_value = float(portfolio_value_calculator(
-        duckdb_con=duckdb.connect(":memory:"), 
-        portfolio_id=portfolio_id, 
-        timestamp=sim_date
-    ))    
+    # Calculate global real-time metric assets value valuation
+    p_value = portfolio_value_calculator(portfolio_id, sim_date, con)
+    
     # Commit synchronized application memory context updates
     st.session_state.current_available_cash = p_cash
     st.session_state.current_portfolio_name = p_name
     st.session_state.current_sim_date = sim_date
     st.session_state.current_sim_date_display = sim_date.strftime('%d/%m/%Y')
 
-    # Spin up an isolated transaction connection context frame block for metrics calculation
-    cloud_engine = get_supabase_engine()
-    with cloud_engine.connect() as cloud_con:
-        cash_stats_res = cloud_con.execute(
-            text("""
-                SELECT 
-                    COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END), 0) - 
-                    COALESCE(SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END), 0) as net_invested
-                FROM cash_transactions 
-                WHERE portfolio_id = :portfolio_id
-            """), 
-            {"portfolio_id": portfolio_id}
-        ).fetchone()
+    # Extract net historical deposit transaction flows
+    cash_stats = con.execute("""
+        SELECT 
+            SUM(CASE WHEN transaction_type = 'deposit' THEN amount ELSE 0 END) - 
+            SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount ELSE 0 END) as net_invested
+        FROM cash_transactions 
+        WHERE portfolio_id = ?
+    """, [portfolio_id]).fetchone()
 
-    net_invested = float(cash_stats_res[0]) if cash_stats_res and cash_stats_res[0] is not None else 0.0
+    net_invested = cash_stats[0] if cash_stats and cash_stats[0] is not None else 0
     total_profit_cash = p_value - net_invested
-    profit_pct = (total_profit_cash / net_invested * 100) if net_invested > 0 else 0.0
+    profit_pct = (total_profit_cash / net_invested * 100) if net_invested > 0 else 0
 
     # ==========================================
     # STEP 3: USER INTERFACE & CSS STYLING
     # ==========================================
     dashboard_sidebar() # Render navigation structure panel
 
-    st.markdown(
-        """
-        <style>
-        /* =========================================
-           COMPACT METRIC CARDS
-        ========================================= */
-        div[data-testid="stMetric"] {
-            background: #FFFFFF !important;
-            border: 1px solid #E2E8F0 !important;
-            border-radius: 10px !important;
-            padding: 8px 14px !important;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02) !important;
-        }
+    st.markdown("""
+<style>
 
-        div[data-testid="stMetric"] label [data-testid="stMetricLabel"] {
-            font-size: 0.8rem !important;
-            color: #64748B !important;
-            font-weight: 500 !important;
-        }
+/* ==================================================
+   GLOBAL DASHBOARD LOOK
+================================================== */
 
-        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-            font-size: 1.4rem !important;
-            font-weight: 700 !important;
-            letter-spacing: -0.5px !important;
-            line-height: 1.2 !important;
-        }
+.main .block-container {
+    padding-top: 1.2rem;
+}
 
-        div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
-            font-size: 0.75rem !important;
-        }
+/* ==================================================
+   METRICS
+================================================== */
 
-        /* =========================================
-           HEADER / TIMELINE FIX
-        ========================================= */
-        .timeline-wrapper {
-            width: 200%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
+div[data-testid="stMetric"] {
+    background: white !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 14px !important;
+    padding: 12px 16px !important;
+    box-shadow: 0 4px 12px rgba(15,23,42,0.04) !important;
+}
 
-        .timeline-card {
-            background: #E0F2FE;
-            border: 1px solid #BAE6FD;
-            border-radius: 10px;
-            padding: 120px 160px;
-            display: inline-flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-width: 170px;
-            max-width: 320px;
-            box-sizing: border-box;
-        }
+div[data-testid="stMetricValue"] {
+    font-weight: 700 !important;
+}
 
-        .timeline-title {
-            font-size: 11px;
-            color: #0369A1;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.6px;
-            text-align: center;
-            line-height: 1;
-        }
+/* ==================================================
+   DASHBOARD CARDS
+================================================== */
 
-        .timeline-date {
-            font-size: 15px;
-            color: #0C4A6E;
-            font-weight: 700;
-            margin-top: 6px;
-            text-align: center;
-            direction: ltr;
-            line-height: 1.2;
-        }
+.dashboard-card {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
 
-        /* =========================================
-           BUTTONS & POPOVERS
-        ========================================= */
-        div[data-testid="stForm"] button[kind="primaryFormSubmit"] {
-            transition: all 0.2s ease-in-out !important;
-            border-radius: 8px !important;
-            font-weight: 600 !important;
-            padding: 0.35rem 0.75rem !important;
-            font-size: 13px !important;
-        }
+/* ==================================================
+   PORTFOLIO TITLE
+================================================== */
 
-        div[data-testid="stPopover"] 
-        div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button {
-            background-color: #22C55E !important;
-            color: white !important;
-            border-color: #22C55E !important;
-        }
+.dashboard-title {
+    font-size: 2rem;
+    font-weight: 800;
+    color: #0F172A;
+    margin: 0;
+    padding-top: 8px;
+}
 
-        div[data-testid="stPopover"] 
-        div[data-testid="stForm"]:has(input[value="Manual Cash Deposit"]) button:hover {
-            background-color: #16A34A !important;
-            border-color: #16A34A !important;
-        }
+/* ==================================================
+   TIMELINE CARD
+================================================== */
 
-        div[data-testid="stPopover"] 
-        div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button {
-            background-color: #EF4444 !important;
-            color: white !important;
-            border-color: #EF4444 !important;
-        }
+.timeline-card {
+    background: linear-gradient(
+        135deg,
+        #EFF6FF 0%,
+        #F8FAFC 100%
+    );
 
-        div[data-testid="stPopover"] 
-        div[data-testid="stForm"]:has(input[value="Manual Cash Withdrawal"]) button:hover {
-            background-color: #DC2626 !important;
-            border-color: #DC2626 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    border: 1px solid #DBEAFE;
+    border-radius: 18px;
 
-    # Dynamic Dashboard Header Layout Render Sequence
-    header_col1, header_col2 , header_col3 = st.columns([2, 3 , 1.6])
+    padding: 20px;
+
+    text-align: center;
+
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
+
+.timeline-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748B;
+}
+
+.timeline-date {
+    margin-top: 8px;
+    font-size: 22px;
+    font-weight: 700;
+    color: #0F172A;
+}
+
+/* ==================================================
+   TIME MACHINE PANEL
+================================================== */
+
+.time-machine-card {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+}
+
+.time-machine-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748B;
+    margin-bottom: 12px;
+}
+
+/* ==================================================
+   BUTTONS
+================================================== */
+
+.stButton > button {
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    transition: all .15s ease !important;
+}
+
+.stButton > button:hover {
+    transform: translateY(-1px);
+}
+
+/* ==================================================
+   DATE INPUT
+================================================== */
+
+div[data-baseweb="input"] {
+    border-radius: 10px !important;
+}
+
+</style>
+""", unsafe_allow_html=True)
+    
+    
+    
+    # Dynamic Dashboard Header Layout
+    header_col1, header_col2, header_col3 = st.columns([2, 2, 2])
+    
     with header_col1:
-        st.markdown(f"<h1 style='margin:0; padding:0; color:#1E293B;'>📊 {p_name}</h1>", unsafe_allow_html=True)
-    with header_col2:
         st.markdown(
             f"""
-            <div style="display: flex; justify-content: center; align-items: center; width: 80%;">
-                <div style='
-                    background: #E0F2FE; 
-                    border: 1px solid #BAE6FD; 
-                    border-radius: 8px; 
-                    padding: 12px 8px; 
-                    text-align: center;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    justify-content: center;
-                    width: 480px;
-                '>
-                    <span style='
-                        font-size: 18px; 
-                        color: #0369A1; 
-                        font-weight: bold; 
-                        display: block; 
-                        text-transform: uppercase; 
-                        letter-spacing: 0.5px;
-                        text-align: center;
-                        width: 100%;
-                    '>Engine Timeline</span>
-                    <span style='
-                        font-size: 16px; 
-                        color: #0C4A6E; 
-                        font-weight: bold; 
-                        display: block; 
-                        margin-top: 2px;
-                        text-align: center;
-                        direction: ltr;
-                        width: 100%;
-                    '>⏳ {st.session_state.current_sim_date_display}</span>
+            <div class="dashboard-card" style="padding:32px 20px;">
+                <div class="dashboard-title">
+                    📊 {p_name}
                 </div>
             </div>
             """,
             unsafe_allow_html=True
         )
+   
+   
+    with header_col2:
+        sim_date_display = str(st.session_state.current_sim_date_display)
+
+        html = f"""
+        <div style="
+            background: linear-gradient(135deg,#EFF6FF 0%,#F8FAFC 100%);
+            border:1px solid #DBEAFE;
+            border-radius:12px;
+            padding:18px;
+            text-align:center;
+            box-shadow:0 4px 12px rgba(15,230,42,0.04);
+        ">
+            <div style="
+                font-size:11px;
+                font-weight:700;
+                text-transform:uppercase;
+                letter-spacing:1px;
+                color:#64748B;
+                margin-bottom:6px;
+            ">
+                Engine Timeline
+            </div>
+
+        <div style="
+            background: linear-gradient(135deg,#EFF6FF 0%,#F8FAFC 100%);
+            border:0px solid #DBEAFE;
+            border-radius:0px;
+            padding:12px;
+            text-align:center;
+        ">
+            <div style="
+                font-size:24px;
+                font-weight:800;
+                letter-spacing:2px;
+                color:#64748B;
+                margin-bottom:2px;
+            ">
+                {sim_date_display}
+            </div>
+        """
+
+        st.markdown(html, unsafe_allow_html=True)
+    
+    
+    
+    
     with header_col3:
-        st.write("to be filled later with a task progress to teach the users")
+
+        # =========================
+        # TITLE
+        # =========================
+        st.markdown(
+            """
+            <div style="
+                font-size:11px;
+                color:#64748B;
+                font-weight:700;
+                text-transform:uppercase;
+                letter-spacing:1px;
+                margin-bottom:10px;
+            ">
+                ⏳ Time Machine
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        p_id = st.session_state.get("portfolio_id")
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday_dt = datetime.datetime.combine(yesterday.date(), datetime.time.min)
+        current_dt = st.session_state.get('current_sim_date')
+
+        def safe_jump(new_d):
+            target = min(new_d, yesterday_dt)
+            if handle_time_jump(target, portfolio_id):
+                st.rerun()
+
+        # =========================
+        # QUICK JUMP BUTTONS CARD
+        # =========================
+
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("＋1D", use_container_width=True, key="tm_jump_1d_1"):
+                safe_jump(current_dt + datetime.timedelta(days=1))
+                st.rerun()
+
+        with col2:
+            if st.button("＋1M", use_container_width=True, key="tm_jump_1m_1"):
+                safe_jump(current_dt + datetime.timedelta(days=30))
+                st.rerun()
+
+        with col3:
+            if st.button("＋1Y", use_container_width=True, key="tm_jump_1y_1"):
+                safe_jump(current_dt + datetime.timedelta(days=365))
+                st.rerun()
+
+
+        # =========================
+        # DATE PICKER CARD
+        # =========================
+        min_d = current_dt.date() if hasattr(current_dt, 'date') else current_dt
+
+
+
+        picked_date = st.date_input(
+            "📅 choose a date to jump to",
+            value=None,
+            min_value=min_d,
+            max_value=yesterday.date(),
+            key="sb_date_picker_1",
+            label_visibility="visible"
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # =========================
+        # EXECUTE BUTTON
+        # =========================
+        if picked_date is not None:
+            picked_dt = datetime.datetime.combine(picked_date, datetime.time.min)
+
+            if picked_dt > current_dt:
+                if st.button("🚀 Execute Time Travel", use_container_width=True, key="tm_execute_travel_1"):
+                    if handle_time_jump(picked_dt, p_id):
+                        st.rerun()
+
+
+
 
     st.write("") # Layout spacer
     
-    # Financial KPI Metrics Block Row Setup
+    # Financial KPI Metrics Block Row
     m_col1, m_col2, m_col3 = st.columns(3)
     
     cash_ratio = (p_cash / p_value * 100) if p_value > 0 else 0
@@ -1250,129 +1353,146 @@ def show_dashboard_home():
     with col1:
         st.markdown("<p style='font-size:12px; font-weight:bold; color:#64748B; text-transform:uppercase; margin-bottom:10px;'>⚡ Portfolio Capital Control</p>", unsafe_allow_html=True)
     
-    # Initialize a global anti-spam timestamp tracker inside state storage
+    # Initialize a global anti-spam timestamp tracker
     if "last_transaction_time" not in st.session_state:
         st.session_state.last_transaction_time = 0.0
 
     v_key = st.session_state.cash_op_version
     with col2:
-        # Single master popover entry point to clear main dashboard space
-        with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", width="content"):
-            st.markdown("### 🛠️ Strategy Capital Operations")
-            st.caption("Execute safe fluid balance adjustments for this active strategy context frame.")
-            
-            # Dynamic transaction operation split selector
-            tx_mode = st.segmented_control(
-                "Select Operation Type",
-                options=["Deposit", "Withdraw"],
-                default="Deposit",
-                key=f"tx_mode_selector_v{v_key}",
-                label_visibility="collapsed"
-            )
-
-            # Pre-calculating UI states, colors, and boundary limits based on selected mode
-            if tx_mode == "Deposit":
-                mode_emoji = "📥"
-                mode_title = "Deposit Funds"
-                mode_color = "#10B981"
-                submit_label = "Confirm Inbound Deposit"
-                default_val = 1000.0
-                min_val = 1.0
-                max_val = None
-                step_val = 100.0
-                is_disabled = False
-                tx_type = "deposit"
-                memo_default = "Manual Cash Deposit"
-            else:
-                mode_emoji = "📤"
-                mode_title = "Withdraw Funds"
-                mode_color = "#EF4444"
-                submit_label = "Confirm Outbound Withdrawal"
-                has_cash = p_cash >= 1
-                default_val = float(min(1000, int(p_cash))) if has_cash else 1.0
-                min_val = 1.0
-                max_val = float(p_cash) if has_cash else 1.0
-                step_val = 100.0
-                is_disabled = not has_cash
-                tx_type = "withdrawal"
-                memo_default = "Manual Cash Withdrawal"
-
-            # High-visibility visual context header using the calculated mode color
-            st.markdown(
-                f"""
-                <div style='padding: 10px; border-left: 4px solid {mode_color}; background: rgba(255,255,255,0.02); border-radius: 4px; margin-bottom: 15px;'>
-                    <h4 style='margin: 0; color: {mode_color};'>{mode_emoji} {mode_title}</h4>
-                    <p style='margin: 4px 0 0 0; font-size: 12px; color: #94A3B8;'>Executing asset allocation changes inside this portfolio frame context.</p>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
-
-            # Unified transactional submission block form entry
-            with st.form(f"unified_capital_form_v{v_key}", clear_on_submit=True):
-                amount = st.number_input(
-                    "Amount ($)", 
-                    min_value=min_val, 
-                    max_value=max_val,
-                    value=default_val, 
-                    step=step_val,
-                    disabled=is_disabled,
-                    key=f"dynamic_amount_input_v{v_key}"
-                )
+            # Single master popover entry point to clear main dashboard space
+            with st.popover("💰 Deposit/Withdraw", key=f"master_capital_pop_v{v_key}", use_container_width=False):
+                st.markdown("### 🛠️ Strategy Capital Operations")
+                st.caption("Execute safe fluid balance adjustments for this active strategy context frame.")
                 
-                note = st.text_input(
-                    "Memo/Reference", 
-                    value=memo_default, 
-                    key=f"dynamic_note_input_v{v_key}"
+                # ------------------------------------------
+                # DYNAMIC TRANSACTION MODE SELECTOR
+                # ------------------------------------------
+                # ALL CODE FROM HERE DOWN MUST BE INDENTED UNDER THE POPOVER
+                tx_mode = st.segmented_control(
+                    "Select Operation Type",
+                    options=["Deposit", "Withdraw"],
+                    default="Deposit",
+                    key=f"tx_mode_selector_v{v_key}",
+                    label_visibility="collapsed"
                 )
-                
-                if st.form_submit_button(submit_label, width="stretch", disabled=is_disabled):
-                    current_click_time = time.time()
-                    time_delta = current_click_time - st.session_state.last_transaction_time
+
+                # Pre-calculating UI states, colors, and boundary limits based on selected mode
+                if tx_mode == "Deposit":
+                    mode_emoji = "📥"
+                    mode_title = "Deposit Funds"
+                    mode_color = "#10B981" # Emerald Green
+                    submit_label = "Confirm Inbound Deposit"
                     
-                    # Safety Layer 1: Anti-spam double click cooldown engine mitigation
-                    if time_delta < 5.0:
-                        remaining_time = 5.0 - time_delta
-                        countdown_text = st.empty()
-                        progress_bar = st.progress(0.0)
-                        
-                        while remaining_time > 0:
-                            countdown_text.warning(f"⏳ Action blocked to prevent duplicate submission. Cooling down: {remaining_time:.1f}s")
-                            progress_percent = min(max(remaining_time / 5.0, 0.0), 1.0)
-                            progress_bar.progress(progress_percent)
-                            time.sleep(0.1)
-                            remaining_time -= 0.1
-                        
-                        countdown_text.empty()
-                        progress_bar.empty()
+                    # Kept as floats to prevent StreamlitMixedNumericTypesError
+                    default_val = 1000.0
+                    min_val = 1.0
+                    max_val = None
+                    step_val = 100.0
+                    is_disabled = False
+                    tx_type = "deposit"
+                    memo_default = "Manual Cash Deposit"
+                else:
+                    mode_emoji = "📤"
+                    mode_title = "Withdraw Funds"
+                    mode_color = "#EF4444" # Crimson Red
+                    submit_label = "Confirm Outbound Withdrawal"
+                    has_cash = p_cash >= 1
                     
-                    # Safety Layer 2: Hard cash balance boundary enforcement
-                    elif tx_type == "withdrawal" and amount > p_cash:
-                        st.error(f"🛑 Insufficient funds! You requested ${amount:,.2f} but only have ${p_cash:,.2f} available.")
+                    # Kept as floats to prevent StreamlitMixedNumericTypesError
+                    default_val = float(min(1000, int(p_cash))) if has_cash else 1.0
+                    min_val = 1.0
+                    max_val = float(p_cash) if has_cash else 1.0
+                    step_val = 100.0
+                    is_disabled = not has_cash
+                    tx_type = "withdrawal"
+                    memo_default = "Manual Cash Withdrawal"
+
+                # High-visibility visual context header using the calculated mode color
+                st.markdown(
+                    f"""
+                    <div style='padding: 10px; border-left: 4px solid {mode_color}; background: rgba(255,255,255,0.02); border-radius: 4px; margin-bottom: 15px;'>
+                        <h4 style='margin: 0; color: {mode_color};'>{mode_emoji} {mode_title}</h4>
+                        <p style='margin: 4px 0 0 0; font-size: 12px; color: #94A3B8;'>Executing asset allocation changes inside this portfolio frame context.</p>
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+
+                # ------------------------------------------
+                # UNIFIED DYNAMIC TRANSACTION FORM
+                # ------------------------------------------
+                with st.form(f"unified_capital_form_v{v_key}", clear_on_submit=True):
                     
-                    # Safety Layer 3: Execute ledger entry directly inside cloud engine context
-                    else:
-                        st.session_state.last_transaction_time = current_click_time
-                        with cloud_engine.connect() as tx_con:
-                            # Direct transaction proxy deployment sequence logic
-                            success, message = execute_cash_transaction(tx_con, portfolio_id, amount, tx_type, sim_date, note)
+                    # Context-aware number input enforcing live financial boundaries
+                    amount = st.number_input(
+                        "Amount ($)", 
+                        min_value=min_val, 
+                        max_value=max_val,
+                        value=default_val, 
+                        step=step_val,
+                        disabled=is_disabled,
+                        key=f"dynamic_amount_input_v{v_key}"
+                    )
+                    
+                    note = st.text_input(
+                        "Memo/Reference", 
+                        value=memo_default, 
+                        key=f"dynamic_note_input_v{v_key}"
+                    )
+                    
+                    # Submission handling with strict runtime validations
+                    if st.form_submit_button(submit_label, use_container_width=True, disabled=is_disabled):
+                        current_click_time = time.time()
+                        time_delta = current_click_time - st.session_state.last_transaction_time
                         
-                        if success:
-                            st.session_state.cash_op_version += 1
-                            st.toast(f"{mode_emoji} Processed ${amount:,.2f} successfully!")
-                            st.rerun()
+                        # Safety Layer 1: Anti-spam double click mitigation UI cooldown
+                        if time_delta < 5.0:
+                            remaining_time = 5.0 - time_delta
+                            countdown_text = st.empty()
+                            progress_bar = st.progress(0.0)
+                            
+                            while remaining_time > 0:
+                                countdown_text.warning(f"⏳ Action blocked to prevent duplicate submission. Cooling down: {remaining_time:.1f}s")
+                                progress_percent = min(max(remaining_time / 5.0, 0.0), 1.0)
+                                progress_bar.progress(progress_percent)
+                                time.sleep(0.1)
+                                remaining_time -= 0.1
+                            
+                            countdown_text.empty()
+                            progress_bar.empty()
+                        
+                        # Safety Layer 2: Hard cash boundary enforcement for withdrawals
+                        elif tx_type == "withdrawal" and amount > p_cash:
+                            st.error(f"🛑 Insufficient funds! You requested ${amount:,.2f} but only have ${p_cash:,.2f} available.")
+                        
+                        # Safety Layer 3: Secure database write and execution block
                         else:
-                            st.error(message)
+                            st.session_state.last_transaction_time = current_click_time
+                            success, message = execute_cash_transaction(con, portfolio_id, amount, tx_type, sim_date, note)
+                            
+                            if success:
+                                st.session_state.cash_op_version += 1
+                                st.toast(f"{mode_emoji} Processed ${amount:,.2f} successfully!")
+                                st.rerun()
+                            else:
+                                st.error(message)
                             
     with col3:
-        with st.popover("📜 Portfolio Cash History", width="stretch"):
-            with cloud_engine.connect() as hist_con:
-                df = get_portfolio_cash_history(portfolio_id, sim_date)
+        
+
+        with st.popover("📜 Portfolio Cash History", use_container_width=True , width="stretch"):
+
+            df = get_portfolio_cash_history(con, portfolio_id, sim_date)
 
             if df.empty:
                 st.info("No cash history available.")
+
             else:
+                # =========================
+                # FILTER SECTION
+                # =========================
                 types = ["All"] + sorted(df["type"].dropna().unique().tolist())
+
                 selected_type = st.selectbox(
                     "Filter by type",
                     types,
@@ -1381,11 +1501,17 @@ def show_dashboard_home():
                 )
 
                 filtered_df = df.copy()
+
                 if selected_type != "All":
                     filtered_df = filtered_df[filtered_df["type"] == selected_type]
 
+                # =========================
+                # FORMAT FOR DISPLAY
+                # =========================
                 display_df = filtered_df.copy()
+
                 display_df["timestamp"] = pd.to_datetime(display_df["timestamp"]).dt.strftime("%Y-%m-%d")
+
                 display_df = display_df.sort_values("timestamp", ascending=False)
 
                 display_df = display_df.rename(columns={
@@ -1396,15 +1522,33 @@ def show_dashboard_home():
                 })
                 display_df["Amount"] = pd.to_numeric(display_df["Amount"], errors="coerce").fillna(0).round(2)
 
+
+                # =========================
+                # SIMPLE VISUAL ENHANCEMENT (SAFE FOR STREAMLIT)
+                # =========================
                 def highlight_type(row):
-                    tx_type_str = str(row["Type"]).lower()
-                    amount_val = float(row["Amount"])
-                    if tx_type_str == "dividend":
-                        return ["background-color: rgba(34,197,94,0.12); color:#166534; font-weight:600;"] * len(row)
-                    elif amount_val > 0:
-                        return ["background-color: rgba(59,130,246,0.10); color:#1D4ED8;"] * len(row)
-                    elif amount_val < 0:
-                        return ["background-color: rgba(239,68,68,0.10); color:#991B1B;"] * len(row)
+
+                    tx_type = str(row["Type"]).lower()
+                    amount = float(row["Amount"])
+
+                    # Dividends → green
+                    if tx_type == "dividend":
+                        return [
+                            "background-color: rgba(34,197,94,0.12); color:#166534; font-weight:600;"
+                        ] * len(row)
+
+                    # Money entering account → blue
+                    elif amount > 0:
+                        return [
+                            "background-color: rgba(59,130,246,0.10); color:#1D4ED8;"
+                        ] * len(row)
+
+                    # Money leaving account → red
+                    elif amount < 0:
+                        return [
+                            "background-color: rgba(239,68,68,0.10); color:#991B1B;"
+                        ] * len(row)
+
                     return [""] * len(row)
 
                 styled_df = (
@@ -1412,10 +1556,12 @@ def show_dashboard_home():
                     .apply(highlight_type, axis=1)
                     .format({"Amount": "{:,.2f}"})
                 )
-                
+                # =========================
+                # RENDER
+                # =========================
                 st.dataframe(
                     styled_df,
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True
                 )
     
@@ -1424,11 +1570,11 @@ def show_dashboard_home():
     # ==========================================
     # STEP 5: SECURITIES HOLDINGS LEDGER MATRIX
     # ==========================================
+    
     st.markdown("<p style='font-size:12px; font-weight:bold; color:#64748B; text-transform:uppercase; margin-bottom:5px;'>📊 Strategy Asset Allocation Ledger</p>", unsafe_allow_html=True)
     
-    with cloud_engine.connect() as holdings_con:
-        render_holdings_table(holdings_con, portfolio_id, sim_date)
-
+    render_holdings_table(con, portfolio_id, sim_date)
+    
     
     
 def dashboard_sidebar():
@@ -1574,17 +1720,23 @@ def dashboard_sidebar():
         nav_pages = {
             "🏠 Dashboard Home": "dashboard_home",
             "📈 Performance Analysis": "portfolio_performance_analysis",
-            "🛠️ Strategy Builder": "strategy_builder",
-            "🔍 Asset Explorer": "asset_explorer"
+            "🛠️ Strategy Manager": "strategy_managment",
+            "🔍 Asset Purchasing": "asset_purchsing"
         }
+        
+        if st.button("test page"):
+            st.session_state.page = "test_page"
+            st.rerun()
         
         for label, page_val in nav_pages.items():
             is_current = st.session_state.get('page') == page_val
             # Setting a unique dynamic key prefix so the CSS can securely detect the active element
             btn_key = f"active_nav_{page_val}" if is_current else f"nav_{page_val}"
             
-            if st.button(label, width="stretch", key=btn_key):
+            if st.button(label, use_container_width=True, key=btn_key):
                 st.session_state.page = page_val
+                st.session_state.active_tab = 1 # making sure to skip quesiotn part if they already have a strategy
+
                 st.rerun()
         
         st.write("") 
@@ -1607,17 +1759,17 @@ def dashboard_sidebar():
         # Step Increments Row
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("＋ 1D", width="stretch", help="Advance 1 day", key="tm_jump_1d"):
+            if st.button("＋ 1D", use_container_width=True, help="Advance 1 day", key="tm_jump_1d"):
                 safe_jump(current_dt + datetime.timedelta(days=1))
                 st.rerun()
 
         with col2:
-            if st.button("＋ 1M", width="stretch", help="Advance 30 days", key="tm_jump_1m"):
+            if st.button("＋ 1M", use_container_width=True, help="Advance 30 days", key="tm_jump_1m"):
                 safe_jump(current_dt + datetime.timedelta(days=30))
                 st.rerun()
 
         with col3:
-            if st.button("＋ 1Y", width="stretch", help="Advance 365 days", key="tm_jump_1y"):
+            if st.button("＋ 1Y", use_container_width=True, help="Advance 365 days", key="tm_jump_1y"):
                 safe_jump(current_dt + datetime.timedelta(days=365))
                 st.rerun()
 
@@ -1639,7 +1791,7 @@ def dashboard_sidebar():
             picked_dt = datetime.datetime.combine(picked_date, datetime.time.min)
             
             if picked_dt > current_dt:
-                if st.button("🚀 Execute Time Travel", width="stretch", key="tm_execute_travel"):
+                if st.button("🚀 Execute Time Travel", use_container_width=True, key="tm_execute_travel"):
                     if handle_time_jump(picked_dt, p_id):
                         st.rerun()
 
@@ -1650,7 +1802,7 @@ def dashboard_sidebar():
         # ==========================================
         # SECTION 3: SYSTEM CONTEXT SAFE RESET
         # ==========================================
-        if st.button("🔙 Unload & Exit Portfolio", width="stretch", help="Safely discard session context state and go home", key="sys_exit_portfolio"):
+        if st.button("🔙 Unload & Exit Portfolio", use_container_width=True, help="Safely discard session context state and go home", key="sys_exit_portfolio"):
             keys_to_clear = [
                 'current_portfolio_id', 
                 'current_portfolio_name', 
@@ -1666,89 +1818,583 @@ def dashboard_sidebar():
             st.session_state.page = "portfolios"
             st.rerun()
             
-       
             
-def show_asset_explorer():
-    dashboard_sidebar()
-    st.title("🔍 Asset Explorer")
-    
-    # Initialize asset variable to avoid UnboundLocalError
-    asset = None 
-    
-    # Fetch the dynamically resolved environment-agnostic path from session state
-    # Fallback to a locally defined variable if main.py hasn't set it yet
-    current_db_path = st.session_state.get('DB_PATH')
-    
-    # Track path mutations or initial connections to enforce state consistency across deployments
-    if 'con' not in st.session_state:
-        st.session_state.con = duckdb.connect(current_db_path)
-    elif st.session_state.get('last_db_path') != current_db_path:
-        try:
-            st.session_state.con.close()
-        except:
-            pass
-        st.session_state.con = duckdb.connect(current_db_path)
+            
+            
+# for quickly getting recommendations at asset explorer page
+@st.cache_data(show_spinner=False)
+def cached_build_full_allocation(portfolio_id, sim_date, cache_version):
+
+    con = st.session_state.con
+
+    strategy_context = build_strategy_context(
+        con=con,
+        portfolio_id=portfolio_id,
+        sim_date=sim_date
+    )
+
+    meta = strategy_context.get("meta", {})
+    strategies = strategy_context.get("strategies", {})
+
+    all_rows = []
+    strategy_results = {}
+
+    for strategy_id, ctx in strategies.items():
+
+        cash = ctx.get("cash", 0)
+        df = ctx.get("closest_assets")
+
+        if df is None or df.empty:
+            strategy_results[strategy_id] = []
+            continue
+
+        allocation = build_allocation(
+            strategy_id=strategy_id,
+            context=strategy_context,
+            df=df,
+            cash=cash,
+            current_step_holdings={}
+        )
+
+        rows = []
         
-    # Keep track of the active connection configuration path
-    st.session_state.last_db_path = current_db_path
+        asset_names_df = con.execute("""
+            SELECT
+                asset_id,
+                name
+            FROM assets
+        """).df()
+
+        asset_name_map = dict(
+            zip(
+                asset_names_df["asset_id"],
+                asset_names_df["name"]
+            )
+        )
+
+        for asset_id, allocation_data in allocation.items():
+
+            asset_match = df[df["asset_id"] == asset_id]
+
+            if asset_match.empty:
+                continue
+
+            asset_row = asset_match.iloc[0]
+
+            weight, shares = allocation_data
+            price = asset_row["price"]
+            value = shares * price
+
+            row = {
+                "strategy_id": strategy_id,
+                "asset_id": asset_id,
+                "ticker": asset_row["ticker"],
+                "name": asset_name_map.get(int(asset_id), asset_row["ticker"]),
+                "sector": asset_row["sector"],
+                "price": price,
+                "shares": shares,
+                "value": value,
+                "weight": weight
+            }
+
+            rows.append(row)
+            all_rows.append(row)
+
+        strategy_results[strategy_id] = rows
+
+    return meta, strategies, strategy_results, all_rows  
+  
+  
+            
+def show_asset_purchsing():
+    dashboard_sidebar()
+    
+    # Header with a cleaner look
+    st.title("🔍 Asset Explorer")
+    st.markdown("Explore market assets, analyze financial data, and find your next investment based on your strategy.")
+    
+    st.markdown("""
+    <style>
+    div[data-testid="stContainer"] {
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     con = st.session_state.con
     
-    # Initialize cloud SQLAlchemy engine connection if not already exists for dual-write/cloud reading
-    if 'supabase_engine' not in st.session_state:
-        # st.session_state.supabase_engine = create_engine(CLOUD_DB_URL)
-        pass # Replace with your actual global engine initialization
+    # 1. Use Tabs to separate Main Search from Recommendations
+    tab1, tab2 , tab3= st.tabs(["🔎 Market Search", "🤖 AI Recommendations" ,"👾Full Portfolio allocation" ])
     
-    # 1. Asset search component
-    asset_search_component(con)
+    
+    
+    with tab1:
 
-    # 2. Load asset data only if a ticker is selected
-    selected_ticker = st.session_state.get('selected_ticker_for_analysis')
-    
-    if selected_ticker:
-        # Check if the application is running in cloud mode or local development
-        # This parameter determines if we pull from the cloud storage bucket or local tables
-        use_cloud_storage = st.session_state.get('use_cloud', False)
-        
-        # get_asset_snapshot must handle SQLAlchemy text(:param) for cloud and con.execute(?) for local
-        asset = get_asset_snapshot(
-            con, 
-            selected_ticker, 
-            st.session_state.current_sim_date,
-            use_cloud=use_cloud_storage
+        selected_ticker = st.session_state.get('selected_ticker_for_analysis')
+
+        asset = None
+        if selected_ticker:
+            asset = get_asset_snapshot(
+                con,
+                selected_ticker,
+                st.session_state.current_sim_date
+            )
+
+        search_col, asset_col, action_col = st.columns(
+            [1.8, 3.4, 1],
+            gap="small"
         )
-        
-        # Ensure asset exists before rendering UI
-        if asset:
-            col_info, col_actions = st.columns([2, 1])
-            
-            with col_info:
+
+        # ======================================================
+        # SEARCH
+        # ======================================================
+        with search_col:
+            asset_search_component(con)
+
+        # ======================================================
+        # ASSET (NO HTML AT ALL)
+        # ======================================================
+        with asset_col:
+
+            if asset:
+
+                col_a, col_b = st.columns([1, 1])
+
+                with col_a:
+                    st.caption("")
+
+
                 display_asset_card(asset)
+
+            else:
+
+                st.info("Select an asset to view details")
+
+        # ======================================================
+        # ACTIONS
+        # ======================================================
+        with action_col:
+
+            st.markdown("### ⚡ Actions")
+
+            if asset and asset.get("current_price"):
+
+
+                show_buy_component(
+                    selected_ticker,
+                    asset["current_price"]
+                )
+
+
+                if st.button(
+                    "📊 Deep Analysis",
+                    key=f"btn1_{asset['ticker']}",
+                    type="secondary",
+                    use_container_width=True
+                ):
+                    st.session_state.last_inspected_ticker = asset["ticker"]
+                    st.rerun()
+
+            else:
+                st.caption("No asset selected")
+
+    with tab2:
+
+        # ======================================================
+        # HEADER (CLEAR INTENT)
+        # ======================================================
+        st.markdown(
+            """
+            <div style="
+                padding: 10px 0px 18px 0px;
+            ">
+                <div style="font-size: 20px; font-weight: 700;">
+                    Suggested Investments
+                </div>
+                <div style="font-size: 13px; opacity: 0.6;">
+                    Ranked by similarity to your strategy • filtered and customizable
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # ======================================================
+        # MAIN CONTENT WRAPPER (CENTERED + CLEAN)
+        # ======================================================
+        left, center, right = st.columns([0.1, 3.8, 0.1])
+
+        with center:
+
+            # Subtle container around the whole module
+            with st.container(border=True):
+
+                st.markdown(
+                    """
+                    <div style="
+                        padding: 10px 0px 5px 0px;
+                        font-weight: 600;
+                        font-size: 14px;
+                        opacity: 0.8;
+                    ">
+                        Recommendation Engine
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+
+
+                render_asset_finder(con)
+
+        # ======================================================
+        # ANALYSIS MODAL (UNCHANGED LOGIC)
+        # ======================================================
+        if st.session_state.get('last_inspected_ticker'):
+            ticker_to_analyze = st.session_state.last_inspected_ticker
+            st.session_state.last_inspected_ticker = None
+            show_asset_analysis_dialog(ticker_to_analyze)
             
-            with col_actions:
-                if asset['current_price']:
-                    # show_buy_component will execute the dual-write logic (Cloud + Local Mirror)
-                    show_buy_component(
-                        selected_ticker, 
-                        asset['current_price']
+    with tab3:
+
+        st.markdown("## 👾 Full Portfolio Allocation")
+        st.caption("Recommended allocation based on your active strategy mix.")
+
+        portfolio_id = st.session_state.get("current_portfolio_id")
+        sim_date = st.session_state.get("current_sim_date")
+
+        if not portfolio_id or not sim_date:
+            st.warning("Missing portfolio context (portfolio_id / sim_date)")
+            st.stop()
+
+        try:
+            con = st.session_state.con
+
+            cache_version = st.session_state.get("allocation_cache_version", 0)
+
+            meta, strategies, strategy_results, all_allocation_rows = cached_build_full_allocation(
+                portfolio_id,
+                sim_date,
+                cache_version
+            )
+
+        except Exception as e:
+            st.error(f"Failed to build allocation: {e}")
+            st.stop()
+
+        if not strategies:
+            st.warning("No active strategies available.")
+            st.stop()
+
+        # ======================================================
+        # PORTFOLIO SUMMARY
+        # ======================================================
+        total_cash = meta.get("total_cash", 0)
+        diversification_value = meta.get("diversification")
+
+        diversification_labels = {
+            1: "Low",
+            2: "Medium",
+            3: "High"
+        }
+
+        summary_cols = st.columns(4)
+
+        with summary_cols[0]:
+            st.metric("Total Availble Cash", f"{total_cash:,.0f} $")
+
+        with summary_cols[1]:
+            st.metric("Strategies", len(strategies))
+
+        with summary_cols[2]:
+            st.metric(
+                "Diversification",
+                diversification_labels.get(diversification_value, diversification_value)
+            )
+
+        with summary_cols[3]:
+            col1 , col2 = st.columns(2)
+            with col1:
+                st.metric("Buy Fee", str(meta.get("buy_fee", "-")) + "$")
+            with col2:
+                st.metric("Sell Fee", str(meta.get("sell_fee", "-")) + "$")
+
+        with st.expander("📦 Portfolio Context", expanded=False):
+            st.write(f"📥 Monthly Deposit: {meta.get('monthly_deposit')}")
+            st.write(f"💸 Fees: buy {meta.get('buy_fee')} | sell {meta.get('sell_fee')}")
+            st.write(f"🏦 Deposit/Withdraw: {meta.get('deposit_fee')} | {meta.get('withdrawal_fee')}")
+            st.write(f"📊 Preferred Sectors: {meta.get('preferred_sectors')}")
+            st.write(f"🚫 Excluded Sectors: {meta.get('excluded_sectors')}")
+
+        
+        if st.button("🔄 Recalculate recommendation", use_container_width=True):
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+            st.rerun()
+            
+        st.divider()
+
+        # ======================================================
+        # STRATEGY ITEMS
+        # ======================================================
+        strategy_items = list(strategies.items())
+
+        # ======================================================
+        # LOAD STRATEGY NAMES
+        # ======================================================
+        strategy_ids = [int(strategy_id) for strategy_id, _ in strategy_items]
+
+        placeholders = ",".join(["?"] * len(strategy_ids))
+
+        strategy_names_df = con.execute(f"""
+            SELECT 
+                portfolio_strategy_id,
+                strategy_name
+            FROM user_preferences_strategy
+            WHERE portfolio_strategy_id IN ({placeholders})
+        """, strategy_ids).df()
+
+        strategy_name_map = dict(
+            zip(
+                strategy_names_df["portfolio_strategy_id"],
+                strategy_names_df["strategy_name"]
+            )
+        )
+
+
+        # ======================================================
+        # CREATE TABS
+        # ======================================================
+        strategy_tabs = st.tabs(
+            ["🌍 Total Portfolio"] +
+            [
+                strategy_name_map.get(int(strategy_id), f"Strategy {strategy_id}")
+                for strategy_id, _ in strategy_items
+            ]
+        )
+
+
+        # ======================================================
+        # STRATEGY ALLOCATION TABS
+        # ======================================================
+        for strategy_tab, (strategy_id, ctx) in zip(strategy_tabs[1:], strategy_items):
+
+            with strategy_tab:
+
+                strategy_name = strategy_name_map.get(
+                    int(strategy_id),
+                    f"Strategy {strategy_id}"
+                )
+
+                st.markdown(f"### 🎯 {strategy_name}")
+                st.caption(f"Strategy ID: {strategy_id}")
+
+                cash = ctx.get("cash", 0)
+                df = ctx.get("closest_assets")
+
+                if df is None or df.empty:
+                    st.warning("No assets available for this strategy.")
+                    continue
+
+                required_cols = ["asset_id", "ticker", "sector", "price", "distance", "score"]
+                missing_cols = [c for c in required_cols if c not in df.columns]
+
+                if missing_cols:
+                    st.error(f"Missing columns: {missing_cols}")
+                    continue
+
+                st.write(f"💰 Strategy Cash: **{cash:,.2f}**")
+
+                # ======================================================
+                # BUILD ALLOCATION
+                # ======================================================
+                rows = strategy_results.get(strategy_id, [])
+
+                if not rows:
+                    st.info("No allocation was created.")
+                    continue
+
+                if not rows:
+                    st.info("Allocation exists, but no display rows could be created.")
+                    continue
+
+                result_df = pd.DataFrame(rows)
+
+
+
+                result_df = result_df.sort_values(
+                    "value",
+                    ascending=False
+                ).reset_index(drop=True)
+
+                invested_value = result_df["value"].sum()
+                leftover_cash = cash - invested_value
+
+                metric_cols = st.columns(3)
+
+                with metric_cols[0]:
+                    st.metric("Invested", f"{round(invested_value):,.2f}")
+
+                with metric_cols[1]:
+                    st.metric("Leftover Cash", f"{leftover_cash:,.2f}")
+
+                with metric_cols[2]:
+                    st.metric("Assets", len(result_df))
+
+                display_df = result_df.copy()
+
+                display_df["price"] = display_df["price"].round(2)
+                display_df["value"] = display_df["value"].round(2)
+                display_df["weight"] = (display_df["weight"] * 100).round(2)
+
+                display_df = display_df.rename(columns={
+                    "name": "Company",
+                    "ticker": "Ticker",
+                    "sector": "Sector",
+                    "price": "Price",
+                    "shares": "Shares",
+                    "value": "Value",
+                    "weight": "Weight %"
+                })
+
+                st.dataframe(
+                    display_df[
+                        ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                    ],
+                    use_container_width=True,
+                    height=420
+                )
+
+        # ======================================================
+        # TOTAL PORTFOLIO TAB
+        # ======================================================
+        with strategy_tabs[0]:
+
+            st.markdown("### 🌍 Total Portfolio Allocation")
+            st.caption("Combined recommendation across all active strategies.")
+
+            if not all_allocation_rows:
+                st.info("No allocation results available.")
+
+            else:
+                total_df = pd.DataFrame(all_allocation_rows)
+
+                total_df = (
+                    total_df
+                    .groupby(["asset_id", "ticker", "name", "sector", "price"], as_index=False)
+                    .agg({
+                        "shares": "sum",
+                        "value": "sum"
+                    })
+                )
+
+                total_invested = total_df["value"].sum()
+                leftover_cash = total_cash - total_invested
+
+                if total_invested > 0:
+                    total_df["weight"] = total_df["value"] / total_invested
+                else:
+                    total_df["weight"] = 0
+
+                total_df = total_df.sort_values(
+                    "value",
+                    ascending=False
+                ).reset_index(drop=True)
+
+                # ======================================================
+                # METRICS
+                # ======================================================
+                col_left , col_right = st.columns([3,2])
+                with col_left:
+                    metric_cols = st.columns(4)
+
+                    with metric_cols[0]:
+                        st.metric("Total Invested", f"{round(total_invested / 1000,2)} K")
+
+                    with metric_cols[1]:
+                        st.metric("Leftover Cash", f"{round(leftover_cash , 2)} $")
+
+                    with metric_cols[2]:
+                        st.metric("Assets", len(total_df))
+
+                    with metric_cols[3]:
+                        st.metric("Total Cash", f"{round(total_cash / 1000 , 2)} K")
+                        
+                    # ======================================================
+                    # DISPLAY TABLE
+                    # ======================================================
+                    display_total_df = total_df.copy()
+
+                    display_total_df["price"] = display_total_df["price"].round(2)
+                    display_total_df["value"] = display_total_df["value"].round(2)
+                    display_total_df["weight"] = (display_total_df["weight"] * 100).round(2)
+
+                    display_total_df = display_total_df.rename(columns={
+                        "name": "Company",
+                        "ticker": "Ticker",
+                        "sector": "Sector",
+                        "price": "Price",
+                        "shares": "Shares",
+                        "value": "Value",
+                        "weight": "Weight %"
+                    })
+
+                    st.dataframe(
+                        display_total_df[
+                            ["Company", "Ticker", "Sector", "Price", "Shares", "Value", "Weight %"]
+                        ],
+                        use_container_width=True,
+                        height=500 ,
+                        hide_index=True
+
                     )
                     
-                    if st.button(
-                        f"🔍 Analyze {asset['ticker']}", 
-                        key=f"btn1_{asset['ticker']}", 
-                        width="stretch"
-                    ): 
-                        st.session_state.last_inspected_ticker = asset['ticker']
-                        st.rerun()
-            
-            # ----------------------------------------------------
-            # Existing analysis dialog logic (unchanged)
-            # ----------------------------------------------------
-            if st.session_state.get('last_inspected_ticker') == asset['ticker']:
-                st.session_state.last_inspected_ticker = None
-                show_asset_analysis_dialog(asset['ticker'])
-                
-        st.divider()
-       
+                with col_right:
+                    # ======================================================
+                    # SECTOR PIE CHART
+                    # ======================================================
+                    sector_df = (
+                        total_df
+                        .groupby("sector", as_index=False)
+                        .agg({
+                            "value": "sum"
+                        })
+                    )
+
+                    sector_df["weight"] = sector_df["value"] / total_invested
+
+                    fig_sector = px.pie(
+                        sector_df,
+                        names="sector",
+                        values="value",
+                        title="Sector Allocation"
+                    )
+                    
+                    fig_sector.update_layout(
+                        title_x=0.3
+                    )
+
+                    st.plotly_chart(
+                        fig_sector,
+                        use_container_width=True
+                    )
+        if st.button("🛒 Review and execute trades", type="primary", use_container_width=True):
+            open_execution_review_dialog(
+                con ,
+                total_df=total_df,
+                total_cash=total_cash,
+                buy_fee=meta.get("buy_fee", 0)
+            )
+
+
+
+
+
+
 def show_portfolio_performance_analysis():
     dashboard_sidebar()
     
@@ -1759,44 +2405,44 @@ def show_portfolio_performance_analysis():
         st.error("Please select a portfolio first.")
         return
 
+    con = st.session_state.con
+        
     # --- מנגנון מטמון חכם (Cache) ---
     # בודקים אם יש לנו כבר נתונים ב-State ואם הם שייכים לפורטפוליו הנוכחי
     if ('perf_data' not in st.session_state or 
         st.session_state.get('perf_portfolio_id') != portfolio_id):
-        
+
         # שליפה מלאה רק כשצריך (בכניסה ראשונה או החלפת תיק)
-        with duckdb.connect(DB_PATH) as con:
-            query = """
-            SELECT timestamp, portfolio_value as value
-            FROM portfolio_history
-            WHERE portfolio_id = ? AND timestamp <= ?
-            ORDER BY timestamp
-            """
-            st.session_state.perf_data = con.execute(query, [portfolio_id, sim_date]).df()
-            st.session_state.perf_portfolio_id = portfolio_id
-            st.session_state.last_perf_update = sim_date
+        query = """
+        SELECT timestamp, portfolio_value as value
+        FROM portfolio_history
+        WHERE portfolio_id = ? AND timestamp <= ?
+        ORDER BY timestamp
+        """
+        st.session_state.perf_data = con.execute(query, [portfolio_id, sim_date]).df()
+        st.session_state.perf_portfolio_id = portfolio_id
+        st.session_state.last_perf_update = sim_date
 
     # --- עדכון אופטימי (Delta Update) ---
     # אם התאריך בסימולציה התקדם מאז השליפה האחרונה, נשלוף רק את הפער
     elif sim_date > st.session_state.last_perf_update:
-        with duckdb.connect(DB_PATH) as con:
-            delta_query = """
-            SELECT timestamp, portfolio_value as value
-            FROM portfolio_history
-            WHERE portfolio_id = ? AND timestamp > ? AND timestamp <= ?
-            ORDER BY timestamp
-            """
-            new_rows = con.execute(delta_query, [
-                portfolio_id, 
-                st.session_state.last_perf_update, 
-                sim_date
-            ]).df()
+        delta_query = """
+        SELECT timestamp, portfolio_value as value
+        FROM portfolio_history
+        WHERE portfolio_id = ? AND timestamp > ? AND timestamp <= ?
+        ORDER BY timestamp
+        """
+        new_rows = con.execute(delta_query, [
+            portfolio_id, 
+            st.session_state.last_perf_update, 
+            sim_date
+        ]).df()
             
-            if not new_rows.empty:
-                # משרשרים את הנקודות החדשות ל-DataFrame הקיים ב-State
-                import pandas as pd
-                st.session_state.perf_data = pd.concat([st.session_state.perf_data, new_rows]).drop_duplicates()
-                st.session_state.last_perf_update = sim_date
+        if not new_rows.empty:
+            # משרשרים את הנקודות החדשות ל-DataFrame הקיים ב-State
+            import pandas as pd
+            st.session_state.perf_data = pd.concat([st.session_state.perf_data, new_rows]).drop_duplicates()
+            st.session_state.last_perf_update = sim_date
 
     # --- תצוגה ---
     if not st.session_state.perf_data.empty:
@@ -1808,10 +2454,46 @@ def show_portfolio_performance_analysis():
         
         
 
+    
+    
 def show_strategy_builder():
+    with st.sidebar:
+        st.write("first configure your strategy")
+        if st.button("back to portfolios"):
+            st.session_state.page = "portfolios"
+            st.rerun()
 
-    dashboard_sidebar()
     st.title("🛠️ Strategy Builder")
+
+    # ---------------------------------------
+    # Get required state
+    # ---------------------------------------
+    con = st.session_state.con
+    portfolio_id = st.session_state.get('current_portfolio_id')
+
+    # ---------------------------------------
+    # Validations
+    # ---------------------------------------
+    if con is None:
+        st.error("Database connection is missing.")
+        return
+
+    if portfolio_id is None:
+        st.warning("Please select a portfolio first.")
+        return
+
+    # ---------------------------------------
+    # Render main component
+    # ---------------------------------------
+    strategy_creating_component(con, portfolio_id)
+    
+    
+    
+    
+
+def show_strategy_manager():
+    dashboard_sidebar()
+    st.title("🛠️ Strategy Manager")
 
     # ---------------------------------------
     # Get required state
@@ -1834,3 +2516,362 @@ def show_strategy_builder():
     # Render main component
     # ---------------------------------------
     strategy_creating_component(con, portfolio_id)
+    
+    
+ 
+ 
+    
+    
+def test_page():
+    dashboard_sidebar()
+
+    st.title("🧪 Sell Engine")
+    st.caption("Review current holdings, strategy relevance, and recommended sell orders.")
+
+    con = st.session_state.con
+    portfolio_id = st.session_state.get("current_portfolio_id")
+    sim_date = st.session_state.get("current_sim_date")
+
+    if portfolio_id is None:
+        st.error("No active portfolio selected.")
+        return
+
+    if sim_date is None:
+        st.error("No simulation date selected.")
+        return
+
+    # ======================================================
+    # LOAD CURRENT HOLDINGS
+    # ======================================================
+    holdings_df = get_current_holdings_with_prices(
+        con,
+        portfolio_id,
+        sim_date
+    )
+
+    if holdings_df is None or holdings_df.empty:
+        st.info("This portfolio has no current holdings.")
+        return
+
+    # ======================================================
+    # LOAD STRATEGY CONTEXT
+    # ======================================================
+    context = build_strategy_context(
+        con,
+        portfolio_id,
+        sim_date
+    )
+
+    strategy_ids = sorted(list(context["strategies"].keys()))
+
+    if not strategy_ids:
+        st.warning("No active strategies found for this portfolio.")
+        return
+
+    sell_fee = context["meta"].get("sell_fee", 0)
+
+    # ======================================================
+    # TOP SUMMARY
+    # ======================================================
+    total_market_value = holdings_df["market_value"].sum()
+    number_of_positions = holdings_df["asset_id"].nunique()
+    avg_pnl = holdings_df["pnl_pct"].mean() if "pnl_pct" in holdings_df.columns else 0
+
+    st.markdown("### 📌 Portfolio Overview")
+
+    metric_col2, metric_col3, metric_col4 = st.columns(3)
+
+
+    with metric_col2:
+        st.metric("Positions", number_of_positions)
+
+    with metric_col3:
+        st.metric("Market Value", f"{total_market_value:,.2f}")
+
+    with metric_col4:
+        st.metric("Sell Fee", f"{sell_fee:,.2f} $")
+        
+    
+
+    st.divider()
+
+    # ======================================================
+    # CURRENT HOLDINGS
+    # ======================================================
+    col_left , col_right = st.columns(2)
+    with col_left:
+        
+        st.markdown("### 📦 Current Portfolio Holdings")
+
+        holdings_display_cols = [
+            col for col in [
+                "ticker",
+                "name",
+                "sector",
+                "shares",
+                "avg_buy_price",
+                "current_price",
+                "market_value",
+                "pnl_pct",
+                "portfolio_weight"
+            ]
+            if col in holdings_df.columns
+        ]
+
+        with st.expander("Show current holdings", expanded=False):
+            st.dataframe(
+                holdings_df[holdings_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+
+    with col_right:
+        st.markdown("### 🔍 Holdings Relevance by Strategy")
+
+        with st.expander("Holdings Relevance by Strategy", expanded=False):
+            # ======================================================
+            # STRATEGY RELEVANCE EVALUATION
+            # ======================================================
+
+            strategy_evaluations = {}
+
+            strategy_tabs = st.tabs([
+                f"Strategy {strategy_id}"
+                for strategy_id in strategy_ids
+            ])
+
+            for tab, strategy_id in zip(strategy_tabs, strategy_ids):
+
+                with tab:
+                    evaluation_df = evaluate_current_holdings(
+                        con=con,
+                        context=context,
+                        strategy_id=strategy_id,
+                        holdings_df=holdings_df,
+                        sim_date=sim_date
+                    )
+
+                    strategy_evaluations[strategy_id] = evaluation_df
+
+                    if evaluation_df is None or evaluation_df.empty:
+                        st.info(f"No evaluation available for strategy {strategy_id}.")
+                        continue
+
+                    status_counts = (
+                        evaluation_df["relevance_status"]
+                        .value_counts()
+                        .to_dict()
+                        if "relevance_status" in evaluation_df.columns
+                        else {}
+                    )
+
+                    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+
+                    with stat_col1:
+                        st.metric("Strong / Hold", status_counts.get("strong_hold", 0) + status_counts.get("hold", 0))
+
+                    with stat_col2:
+                        st.metric("Watch", status_counts.get("watch", 0))
+
+                    with stat_col3:
+                        st.metric("Consider Out", status_counts.get("consider_out", 0))
+
+                    with stat_col4:
+                        st.metric("Weak Hold", status_counts.get("weak_hold", 0))
+
+                    evaluation_display_cols = [
+                        col for col in [
+                            "ticker",
+                            "name",
+                            "sector",
+                            "shares",
+                            "market_value",
+                            "portfolio_weight",
+                            "strategy_rank",
+                            "rank_percentile",
+                            "relevance_status",
+                            "relevance_score"
+                        ]
+                        if col in evaluation_df.columns
+                    ]
+
+                    st.dataframe(
+                        evaluation_df[evaluation_display_cols],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+    st.divider()
+    
+    # ======================================================
+    # PORTFOLIO-LEVEL SELL SUGGESTIONS
+    # ======================================================
+    
+    
+    col_left , col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("### 📦 Portfolio-Level Sell Suggestions")
+
+        sell_candidates_df = find_portfolio_sell_candidates(
+            strategy_evaluations=strategy_evaluations,
+            context=context
+        )
+
+        if sell_candidates_df is None or sell_candidates_df.empty:
+            st.success("No sell candidates found. Current holdings look acceptable across strategies.")
+            return
+
+        decision_counts = (
+            sell_candidates_df["portfolio_decision"]
+            .value_counts()
+            .to_dict()
+            if "portfolio_decision" in sell_candidates_df.columns
+            else {}
+        )
+
+        decision_col1, decision_col2, decision_col3, decision_col4 = st.columns(4)
+
+        with decision_col1:
+            st.metric("Sell Candidates", decision_counts.get("sell_candidate", 0))
+
+        with decision_col2:
+            st.metric("Low Confidence", decision_counts.get("sell_candidate_low_confidence", 0))
+
+        with decision_col3:
+            st.metric("Reduce", decision_counts.get("reduce_candidate", 0))
+
+        with decision_col4:
+            st.metric("Review", decision_counts.get("review_only", 0))
+
+        sell_candidates_display_cols = [
+            col for col in [
+                "ticker",
+                "name",
+                "sector",
+                "shares",
+                "current_price",
+                "market_value",
+                "portfolio_weight",
+                "portfolio_decision",
+                "support_count",
+                "exit_count",
+                "unknown_count",
+                "best_strategy_rank",
+                "worst_strategy_rank",
+                "passes_min_trade_filter",
+                "is_overweight"
+            ]
+            if col in sell_candidates_df.columns
+        ]
+
+        with st.expander("Show sell candidate details", expanded=False):
+            st.dataframe(
+                sell_candidates_df[sell_candidates_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+    with col_right:
+        
+        # ======================================================
+        # BUILD RECOMMENDED SELL ORDERS
+        # ======================================================
+        st.markdown("### 🧾 Recommended Sell Orders")
+
+        sell_execution_df = build_recommended_sell_execution_df(
+            sell_candidates_df=sell_candidates_df,
+            sell_fee=sell_fee
+        )
+
+        if sell_execution_df is None or sell_execution_df.empty:
+            st.info("Sell candidates were found, but no executable sell orders were generated.")
+            return
+
+        total_sell_value = sell_execution_df["estimated_value"].sum()
+        total_sell_fees = sell_execution_df["estimated_fee"].sum()
+        total_cash_added = sell_execution_df["estimated_cash_added"].sum()
+        number_of_sell_orders = len(sell_execution_df)
+
+        order_col1, order_col2, order_col3, order_col4 = st.columns(4)
+
+        with order_col1:
+            st.metric("Sell Orders", number_of_sell_orders)
+
+        with order_col2:
+            st.metric("Gross Sold", f"{total_sell_value:,.2f}")
+
+        with order_col3:
+            st.metric("Sell Fees", f"{total_sell_fees:,.2f}")
+
+        with order_col4:
+            st.metric("Net Cash Added", f"{total_cash_added:,.2f}")
+
+        with st.expander("Show Recommended Sell Orders", expanded=False):
+
+            execution_display_cols = [
+                col for col in [
+                    "ticker",
+                    "portfolio_decision",
+                    "current_holding_shares",
+                    "shares",
+                    "price",
+                    "estimated_value",
+                    "estimated_fee",
+                    "estimated_cash_added"
+                ]
+                if col in sell_execution_df.columns
+            ]
+
+            st.dataframe(
+                sell_execution_df[execution_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.warning(
+                "This action will execute real sell transactions in the database, "
+                "update holdings, charge sell fees, update available cash, and record a portfolio snapshot."
+            )
+
+
+
+    action_col1, action_col2 = st.columns([2, 1])
+
+    with action_col1:
+        confirm_sell = st.checkbox(
+            "I understand and want to execute these recommended sell orders."
+        )
+
+    with action_col2:
+        execute_clicked = st.button(
+            "Execute sells",
+            type="primary",
+            disabled=not confirm_sell,
+            use_container_width=True
+        )
+
+    if execute_clicked:
+        success, message = execute_portfolio_sell_orders(
+            con=con,
+            portfolio_id=portfolio_id,
+            execution_df=sell_execution_df,
+            timestamp=sim_date,
+            sell_fee=sell_fee
+        )
+
+        if success:
+            st.success(message)
+
+            st.session_state["allocation_cache_version"] = (
+                st.session_state.get("allocation_cache_version", 0) + 1
+            )
+
+            st.rerun()
+
+        else:
+            st.error(message)
+            
+            
+    
