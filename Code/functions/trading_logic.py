@@ -795,6 +795,7 @@ def handle_time_jump(new_date, p_id):
         return False
 
     con = st.session_state.con
+    p_id = st.session_state.current_portfolio_id
 
     try:
         portfolio_row = con.execute("""

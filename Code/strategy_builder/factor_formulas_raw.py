@@ -98,9 +98,6 @@ def momentum_factor_raw_calculator(
     return df[["asset_id", "timestamp", "momentum_factor_raw"]]
 
 
-
-
-
 def value_factor_raw_calculator(
     con,
     asset_id,
@@ -119,18 +116,21 @@ def value_factor_raw_calculator(
     """
     Calculates a robust raw composite value factor for a single asset.
 
-    The function uses:
-    - EPS TTM / close
-    - Revenue TTM / market cap
-    - Dividend TTM / close
+    Formula is conceptually unchanged:
+    - earnings yield
+    - sales yield
+    - dividend yield
 
-    Core principles:
-    - Fundamentals are lagged to avoid lookahead bias.
-    - Missing values are not filled with fake values.
-    - Negative earnings yield is kept and treated as a penalty.
-    - Zero dividend yield is a valid value, not missing.
-    - Extreme values are clipped before scoring.
-    - Components are converted to comparable scores before weighting.
+    Source of truth:
+    - features.pe_ratio for earnings yield
+    - fundamentals for revenue / market cap / shares
+    - prices only for close when needed
+    - dividends table for dividend yield
+
+    Missing values are not filled with fake values.
+    Negative earnings yield is kept and treated as a penalty.
+    Zero dividend yield is a valid value, not missing.
+    Components are converted to comparable scores before weighting.
     """
 
     logger = logging.getLogger(__name__)
@@ -148,69 +148,103 @@ def value_factor_raw_calculator(
         return None
 
     # ======================================================
-    # 1. LOAD PRICES
+    # 1. LOAD DAILY TIMELINE FROM FEATURES
     # ======================================================
+    params = [asset_id]
 
+    date_filter = ""
     if start_date is not None:
-        prices_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp,
-                close
-            FROM prices
-            WHERE asset_id = ?
-              AND close IS NOT NULL
-              AND close > 0
-              AND timestamp >= ?
-            ORDER BY timestamp ASC
-        """, [asset_id, start_date]).df()
-    else:
-        prices_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp,
-                close
-            FROM prices
-            WHERE asset_id = ?
-              AND close IS NOT NULL
-              AND close > 0
-            ORDER BY timestamp ASC
-        """, [asset_id]).df()
+        date_filter = "AND f.timestamp >= ?"
+        params.append(start_date)
 
-    if prices_df.empty:
-        return pd.DataFrame(columns=["asset_id", "timestamp", "value_factor_raw"])
+    df = con.execute(f"""
+        SELECT
+            f.asset_id,
+            f.timestamp,
+            f.pe_ratio,
+            p.close
+        FROM features f
+        JOIN prices p
+            ON f.asset_id = p.asset_id
+           AND f.timestamp = p.timestamp
+        WHERE f.asset_id = ?
+          AND p.close IS NOT NULL
+          AND p.close > 0
+          {date_filter}
+        ORDER BY f.timestamp ASC
+    """, params).df()
 
-    prices_df["timestamp"] = pd.to_datetime(prices_df["timestamp"])
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "asset_id",
+            "timestamp",
+            "value_factor_raw"
+        ])
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    df = df.sort_values("timestamp").drop_duplicates(
+        subset=["asset_id", "timestamp"],
+        keep="last"
+    ).reset_index(drop=True)
+
+    df["pe_ratio"] = pd.to_numeric(df["pe_ratio"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+
+    df.loc[~np.isfinite(df["pe_ratio"]), "pe_ratio"] = np.nan
+    df.loc[~np.isfinite(df["close"]), "close"] = np.nan
 
     # ======================================================
-    # 2. LOAD FUNDAMENTALS AND CALCULATE TTM VALUES
+    # 2. EARNINGS YIELD FROM FEATURES PE RATIO
     # ======================================================
+    # If PE is positive, earnings yield is positive.
+    # If PE is negative, earnings yield is negative.
+    # If PE is missing or zero, earnings yield is missing.
+    df["earnings_yield"] = np.where(
+        df["pe_ratio"].notna() &
+        (df["pe_ratio"].abs() > EPSILON),
+        1.0 / df["pe_ratio"],
+        np.nan
+    )
 
+    # ======================================================
+    # 3. LOAD FUNDAMENTALS FOR SALES YIELD
+    # ======================================================
     fundamentals_df = con.execute("""
         SELECT
             asset_id,
             timestamp,
-            eps,
             revenue,
+            market_cap,
             shares_outstanding
         FROM fundamentals
         WHERE asset_id = ?
         ORDER BY timestamp ASC
     """, [asset_id]).df()
 
-    if not fundamentals_df.empty:
-        fundamentals_df["timestamp"] = pd.to_datetime(fundamentals_df["timestamp"])
+    if fundamentals_df.empty:
+        df["revenue_ttm"] = np.nan
+        df["market_cap_from_fundamentals"] = np.nan
+        df["shares_outstanding"] = np.nan
+
+    else:
+        fundamentals_df["timestamp"] = pd.to_datetime(
+            fundamentals_df["timestamp"]
+        )
+
+        for col in ["revenue", "market_cap", "shares_outstanding"]:
+            fundamentals_df[col] = pd.to_numeric(
+                fundamentals_df[col],
+                errors="coerce"
+            )
+
+        fundamentals_df = fundamentals_df.sort_values("timestamp").drop_duplicates(
+            subset=["asset_id", "timestamp"],
+            keep="last"
+        ).reset_index(drop=True)
 
         fundamentals_df["available_timestamp"] = (
             fundamentals_df["timestamp"] + pd.Timedelta(days=fundamental_lag_days)
-        )
-
-        fundamentals_df = fundamentals_df.sort_values("available_timestamp")
-
-        fundamentals_df["eps_ttm"] = (
-            fundamentals_df["eps"]
-            .rolling(window=4, min_periods=4)
-            .sum()
         )
 
         fundamentals_df["revenue_ttm"] = (
@@ -221,13 +255,13 @@ def value_factor_raw_calculator(
 
         fundamentals_aligned = fundamentals_df[[
             "available_timestamp",
-            "eps_ttm",
             "revenue_ttm",
+            "market_cap",
             "shares_outstanding"
         ]].copy()
 
         df = pd.merge_asof(
-            prices_df.sort_values("timestamp"),
+            df.sort_values("timestamp"),
             fundamentals_aligned.sort_values("available_timestamp"),
             left_on="timestamp",
             right_on="available_timestamp",
@@ -239,30 +273,50 @@ def value_factor_raw_calculator(
         ).dt.days
 
         stale_fundamentals_mask = (
-            df["available_timestamp"].isna()
-            | (df["fundamental_age_days"] > max_fundamental_age_days)
+            df["available_timestamp"].isna() |
+            (df["fundamental_age_days"] > max_fundamental_age_days)
         )
 
         df.loc[
             stale_fundamentals_mask,
-            ["eps_ttm", "revenue_ttm", "shares_outstanding"]
+            ["revenue_ttm", "market_cap", "shares_outstanding"]
         ] = np.nan
+
+        df = df.rename(columns={
+            "market_cap": "market_cap_from_fundamentals"
+        })
 
         df = df.drop(
             columns=["available_timestamp", "fundamental_age_days"],
             errors="ignore"
         )
 
-    else:
-        df = prices_df.copy()
-        df["eps_ttm"] = np.nan
-        df["revenue_ttm"] = np.nan
-        df["shares_outstanding"] = np.nan
+    # If market_cap is missing in fundamentals, estimate it from shares * close.
+    df["market_cap_estimated"] = np.where(
+        df["shares_outstanding"].notna() &
+        (df["shares_outstanding"] > 0) &
+        df["close"].notna() &
+        (df["close"] > 0),
+        df["shares_outstanding"] * df["close"],
+        np.nan
+    )
+
+    df["market_cap_used"] = df["market_cap_from_fundamentals"].combine_first(
+        df["market_cap_estimated"]
+    )
+
+    df["sales_yield"] = np.where(
+        df["revenue_ttm"].notna() &
+        (df["revenue_ttm"] > 0) &
+        df["market_cap_used"].notna() &
+        (df["market_cap_used"] > EPSILON),
+        df["revenue_ttm"] / df["market_cap_used"],
+        np.nan
+    )
 
     # ======================================================
-    # 3. LOAD DIVIDENDS AND CALCULATE TTM DIVIDENDS
+    # 4. LOAD DIVIDENDS AND CALCULATE TTM DIVIDENDS
     # ======================================================
-
     dividends_df = con.execute("""
         SELECT
             timestamp,
@@ -302,77 +356,47 @@ def value_factor_raw_calculator(
         )
 
         df = df.sort_values("timestamp")
-        df["dividend_ttm"] = df["timestamp"].map(dividend_ttm_series).fillna(0.0)
+        df["dividend_ttm"] = df["timestamp"].map(
+            dividend_ttm_series
+        ).fillna(0.0)
 
-    # ======================================================
-    # 4. CALCULATE RAW VALUE COMPONENTS
-    # ======================================================
-
-    df["market_cap"] = df["shares_outstanding"] * df["close"]
-
-    # Earnings yield:
-    # Positive EPS gives positive score.
-    # Zero EPS gives 0.
-    # Negative EPS gives negative score.
-    # Missing EPS stays missing.
-    df["earnings_yield"] = np.where(
-        (df["eps_ttm"].notna()) &
-        (df["close"].notna()) &
-        (df["close"] > EPSILON),
-        df["eps_ttm"] / df["close"],
-        np.nan
-    )
-
-    # Sales yield:
-    # Revenue should be positive and market cap must be valid.
-    df["sales_yield"] = np.where(
-        (df["revenue_ttm"].notna()) &
-        (df["revenue_ttm"] > 0) &
-        (df["market_cap"].notna()) &
-        (df["market_cap"] > EPSILON),
-        df["revenue_ttm"] / df["market_cap"],
-        np.nan
-    )
-
-    # Dividend yield:
-    # Zero dividend is a valid value.
-    # Missing dividend_ttm stays missing, but in this pipeline no dividend rows means 0.
     df["dividend_yield"] = np.where(
-        (df["dividend_ttm"].notna()) &
+        df["dividend_ttm"].notna() &
         (df["dividend_ttm"] >= 0) &
-        (df["close"].notna()) &
+        df["close"].notna() &
         (df["close"] > EPSILON),
         df["dividend_ttm"] / df["close"],
         np.nan
     )
 
+    # ======================================================
+    # 5. CLEAN RAW COMPONENTS
+    # ======================================================
     for col in ["earnings_yield", "sales_yield", "dividend_yield"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
         df.loc[~np.isfinite(df[col]), col] = np.nan
 
     # ======================================================
-    # 5. ROBUST COMPONENT SCORING
+    # 6. ROBUST COMPONENT SCORING
     # ======================================================
 
-    # Earnings score range:
-    # Negative earnings yield is allowed and becomes a negative score.
-    # Positive earnings yield is rewarded up to a cap.
     earnings_yield_clipped = df["earnings_yield"].clip(
         lower=-earnings_yield_negative_cap,
         upper=earnings_yield_positive_cap
     )
 
     df["earnings_score"] = np.where(
-        earnings_yield_clipped.notna() & (earnings_yield_clipped >= 0),
+        earnings_yield_clipped.notna() &
+        (earnings_yield_clipped >= 0),
         earnings_yield_clipped / earnings_yield_positive_cap,
         np.where(
-            earnings_yield_clipped.notna() & (earnings_yield_clipped < 0),
+            earnings_yield_clipped.notna() &
+            (earnings_yield_clipped < 0),
             earnings_yield_clipped / earnings_yield_negative_cap,
             np.nan
         )
     )
 
-    # Sales score range:
-    # Uses log scaling because sales yield can be much larger than other yields.
     sales_yield_clipped = df["sales_yield"].clip(
         lower=0,
         upper=sales_yield_cap
@@ -384,9 +408,6 @@ def value_factor_raw_calculator(
         np.nan
     )
 
-    # Dividend score range:
-    # Zero dividend gets 0.
-    # Very high dividend yield is capped to reduce special-dividend distortions.
     dividend_yield_clipped = df["dividend_yield"].clip(
         lower=0,
         upper=dividend_yield_cap
@@ -399,24 +420,29 @@ def value_factor_raw_calculator(
     )
 
     for col in ["earnings_score", "sales_score", "dividend_score"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
         df.loc[~np.isfinite(df[col]), col] = np.nan
 
     # ======================================================
-    # 6. WEIGHTED FACTOR WITH AVAILABLE COMPONENTS ONLY
+    # 7. WEIGHTED FACTOR WITH AVAILABLE COMPONENTS ONLY
     # ======================================================
-
-    weighted_sum = 0
-    available_weight_sum = 0
-    available_components = 0
+    weighted_sum = pd.Series(0.0, index=df.index)
+    available_weight_sum = pd.Series(0.0, index=df.index)
+    available_components = pd.Series(0, index=df.index)
 
     for col, weight in weights.items():
         is_available = df[col].notna()
 
-        weighted_sum = weighted_sum + df[col].where(is_available, 0) * weight
+        weighted_sum = weighted_sum + df[col].where(is_available, 0.0) * weight
         available_weight_sum = available_weight_sum + is_available.astype(float) * weight
         available_components = available_components + is_available.astype(int)
 
-    df["value_factor_raw"] = weighted_sum / available_weight_sum
+    df["value_factor_raw"] = np.divide(
+        weighted_sum,
+        available_weight_sum,
+        out=np.full(len(df), np.nan),
+        where=available_weight_sum > 0
+    )
 
     df.loc[
         (available_weight_sum == 0) |
@@ -426,7 +452,11 @@ def value_factor_raw_calculator(
 
     df = df.replace([np.inf, -np.inf], np.nan)
 
-    return df[["asset_id", "timestamp", "value_factor_raw"]]
+    return df[[
+        "asset_id",
+        "timestamp",
+        "value_factor_raw"
+    ]]
 
 
 def quality_factor_raw_calculator(
@@ -435,19 +465,22 @@ def quality_factor_raw_calculator(
     w_profitability=0.70,
     w_earnings_stability=0.30,
     fundamental_lag_days=60,
-    min_available_components=1 ,
+    min_available_components=1,
     start_date=None
-
 ):
     """
     Calculates a raw composite quality factor for a single asset.
 
-    The function uses lagged fundamentals to avoid lookahead bias.
+    Formula is unchanged.
 
     Components:
     - profitability_margin: EPS TTM divided by revenue per share TTM
     - earnings_stability: stability of EPS over recent fundamental observations
 
+    Source of daily timeline:
+    - features table
+
+    Fundamentals are lagged by fundamental_lag_days to avoid lookahead bias.
     Missing values are not filled with zero.
     Available component weights are re-normalized per row.
     """
@@ -467,46 +500,38 @@ def quality_factor_raw_calculator(
         return None
 
     # ======================================================
-    # 1. LOAD PRICES
+    # 1. LOAD DAILY TIMELINE FROM FEATURES
     # ======================================================
+    params = [asset_id]
+
+    date_filter = ""
     if start_date is not None:
-        prices_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp,
-                close
-            FROM prices
-            WHERE asset_id = ?
-            AND close IS NOT NULL
-            AND close > 0
-            AND timestamp >= ?
-            ORDER BY timestamp ASC
-        """, [asset_id, start_date]).df()
-    else:
-        prices_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp,
-                close
-            FROM prices
-            WHERE asset_id = ?
-            AND close IS NOT NULL
-            AND close > 0
-            ORDER BY timestamp ASC
-        """, [asset_id]).df()
-    
-    if prices_df.empty:
+        date_filter = "AND timestamp >= ?"
+        params.append(start_date)
+
+    timeline_df = con.execute(f"""
+        SELECT
+            asset_id,
+            timestamp
+        FROM features
+        WHERE asset_id = ?
+          {date_filter}
+        ORDER BY timestamp ASC
+    """, params).df()
+
+    if timeline_df.empty:
         return pd.DataFrame(columns=[
             "asset_id",
             "timestamp",
             "quality_factor_raw"
         ])
 
-    prices_df["timestamp"] = pd.to_datetime(prices_df["timestamp"])
-    prices_df = prices_df.sort_values("timestamp").drop_duplicates(
+    timeline_df["timestamp"] = pd.to_datetime(timeline_df["timestamp"])
+
+    timeline_df = timeline_df.sort_values("timestamp").drop_duplicates(
         subset=["asset_id", "timestamp"],
         keep="last"
-    )
+    ).reset_index(drop=True)
 
     # ======================================================
     # 2. LOAD FUNDAMENTALS
@@ -525,14 +550,13 @@ def quality_factor_raw_calculator(
 
     if fundamentals_df.empty:
         return pd.DataFrame({
-            "asset_id": prices_df["asset_id"],
-            "timestamp": prices_df["timestamp"],
+            "asset_id": timeline_df["asset_id"],
+            "timestamp": timeline_df["timestamp"],
             "quality_factor_raw": np.nan
         })
 
     fundamentals_df["timestamp"] = pd.to_datetime(fundamentals_df["timestamp"])
 
-    # Ensure numeric columns are actually numeric.
     for col in ["eps", "revenue", "shares_outstanding"]:
         fundamentals_df[col] = pd.to_numeric(
             fundamentals_df[col],
@@ -549,10 +573,28 @@ def quality_factor_raw_calculator(
     )
 
     # ======================================================
-    # 3. CALCULATE QUALITY COMPONENTS
+    # 3. CALCULATE ORIGINAL QUALITY COMPONENTS
     # ======================================================
 
-    # TTM profitability component.
+    # Explicit rolling counts make the calculation easier to debug.
+    fundamentals_df["eps_count_4q"] = (
+        fundamentals_df["eps"]
+        .rolling(window=4, min_periods=1)
+        .count()
+    )
+
+    fundamentals_df["revenue_count_4q"] = (
+        fundamentals_df["revenue"]
+        .rolling(window=4, min_periods=1)
+        .count()
+    )
+
+    fundamentals_df["shares_count_4q"] = (
+        fundamentals_df["shares_outstanding"]
+        .rolling(window=4, min_periods=1)
+        .count()
+    )
+
     fundamentals_df["eps_ttm"] = (
         fundamentals_df["eps"]
         .rolling(window=4, min_periods=4)
@@ -571,21 +613,32 @@ def quality_factor_raw_calculator(
         .mean()
     )
 
-    fundamentals_df["revenue_per_share_ttm"] = (
-        fundamentals_df["revenue_ttm"] /
-        fundamentals_df["avg_shares_outstanding_4q"].replace(0, np.nan)
+    fundamentals_df["revenue_per_share_ttm"] = np.divide(
+        fundamentals_df["revenue_ttm"],
+        fundamentals_df["avg_shares_outstanding_4q"],
+        out=np.full(len(fundamentals_df), np.nan),
+        where=(
+            fundamentals_df["revenue_ttm"].notna()
+            & fundamentals_df["avg_shares_outstanding_4q"].notna()
+            & (fundamentals_df["avg_shares_outstanding_4q"] > EPSILON)
+        )
     )
 
-    fundamentals_df["profitability_margin"] = np.where(
-        (fundamentals_df["eps_ttm"].notna()) &
-        (fundamentals_df["revenue_per_share_ttm"].notna()) &
-        (fundamentals_df["revenue_per_share_ttm"] > EPSILON),
-        fundamentals_df["eps_ttm"] / fundamentals_df["revenue_per_share_ttm"],
-        np.nan
+    fundamentals_df["profitability_margin"] = np.divide(
+        fundamentals_df["eps_ttm"],
+        fundamentals_df["revenue_per_share_ttm"],
+        out=np.full(len(fundamentals_df), np.nan),
+        where=(
+            fundamentals_df["eps_ttm"].notna()
+            & fundamentals_df["revenue_per_share_ttm"].notna()
+            & (fundamentals_df["revenue_per_share_ttm"] > EPSILON)
+            & (fundamentals_df["eps_count_4q"] >= 4)
+            & (fundamentals_df["revenue_count_4q"] >= 4)
+            & (fundamentals_df["shares_count_4q"] >= 4)
+        )
     )
 
-    # EPS stability component.
-    # Important:
+    # Earnings stability component.
     # std == 0 means perfectly stable EPS, not missing data.
     eps_std_8q = (
         fundamentals_df["eps"]
@@ -600,15 +653,28 @@ def quality_factor_raw_calculator(
         .abs()
     )
 
-    eps_relative_volatility = (
-        eps_std_8q /
-        (eps_mean_abs_8q + EPSILON)
+    eps_count_8q = (
+        fundamentals_df["eps"]
+        .rolling(window=8, min_periods=1)
+        .count()
     )
 
-    fundamentals_df["earnings_stability"] = np.where(
-        eps_relative_volatility.notna(),
-        1 / (1 + eps_relative_volatility),
-        np.nan
+    eps_relative_volatility = np.divide(
+        eps_std_8q,
+        eps_mean_abs_8q + EPSILON,
+        out=np.full(len(fundamentals_df), np.nan),
+        where=(
+            eps_std_8q.notna()
+            & eps_mean_abs_8q.notna()
+            & (eps_count_8q >= 4)
+        )
+    )
+
+    fundamentals_df["earnings_stability"] = np.divide(
+        1.0,
+        1.0 + eps_relative_volatility,
+        out=np.full(len(fundamentals_df), np.nan),
+        where=eps_relative_volatility.notna()
     )
 
     component_cols = [
@@ -630,7 +696,7 @@ def quality_factor_raw_calculator(
     fundamentals_df = fundamentals_df.sort_values("available_timestamp")
 
     # ======================================================
-    # 4. ALIGN FUNDAMENTALS TO DAILY PRICES
+    # 4. ALIGN FUNDAMENTAL COMPONENTS TO DAILY FEATURE DATES
     # ======================================================
     aligned_components = fundamentals_df[[
         "available_timestamp",
@@ -639,7 +705,7 @@ def quality_factor_raw_calculator(
     ]].copy()
 
     df = pd.merge_asof(
-        prices_df.sort_values("timestamp"),
+        timeline_df.sort_values("timestamp"),
         aligned_components.sort_values("available_timestamp"),
         left_on="timestamp",
         right_on="available_timestamp",
@@ -682,7 +748,6 @@ def quality_factor_raw_calculator(
         "timestamp",
         "quality_factor_raw"
     ]]
-    
 
 
 def growth_factor_raw_calculator(
@@ -690,32 +755,26 @@ def growth_factor_raw_calculator(
     asset_id,
     w_eps=0.5,
     w_revenue=0.5,
-    fundamental_lag_days=60,
-    min_available_components=1 ,
+    min_available_components=1,
     start_date=None
-
 ):
     """
     Calculates a raw composite growth factor for a single asset.
 
-    ETFs return an empty DataFrame because company-level EPS and revenue growth
-    are not directly relevant for ETFs.
-
-    Growth is calculated from quarterly fundamentals:
+    Formula is unchanged:
     - EPS YoY growth
     - Revenue YoY growth
 
-    Fundamentals are lagged by fundamental_lag_days to avoid lookahead bias.
+    Source of truth:
+    - features.eps_growth_yoy
+    - features.revenue_growth_yoy
+
     Missing values are not filled with zero.
     Available component weights are re-normalized per row.
     """
 
     logger = logging.getLogger(__name__)
-    EPSILON = 1e-6
 
-    # ======================================================
-    # 1. VALIDATE WEIGHTS
-    # ======================================================
     weights = {
         "eps_growth_yoy": w_eps,
         "revenue_growth_yoy": w_revenue,
@@ -726,186 +785,67 @@ def growth_factor_raw_calculator(
         logger.error(f"Weights must sum to 1. Current sum: {weights_sum}")
         return None
 
-    # ======================================================
-    # 2. SKIP ETFS
-    # ======================================================
-    asset_meta = con.execute("""
-        SELECT asset_id, ticker, is_etf
-        FROM assets
-        WHERE asset_id = ?
-    """, [asset_id]).df()
+    params = [asset_id]
 
-    if asset_meta.empty:
-        logger.warning(f"Asset {asset_id} was not found in assets table.")
-        return pd.DataFrame(columns=[
-            "asset_id",
-            "timestamp",
-            "growth_factor_raw"
-        ])
+    date_filter = ""
+    if start_date is not None:
+        date_filter = "AND timestamp >= ?"
+        params.append(start_date)
 
-    is_etf = bool(asset_meta["is_etf"].iloc[0])
-
-    if is_etf:
-        return pd.DataFrame(columns=[
-            "asset_id",
-            "timestamp",
-            "growth_factor_raw"
-        ])
-
-    # ======================================================
-    # 3. LOAD FUNDAMENTALS
-    # ======================================================
-    f_df = con.execute("""
+    df = con.execute(f"""
         SELECT
             asset_id,
             timestamp,
-            eps,
-            revenue
-        FROM fundamentals
+            eps_growth_yoy,
+            revenue_growth_yoy
+        FROM features
         WHERE asset_id = ?
+          {date_filter}
         ORDER BY timestamp ASC
-    """, [asset_id]).df()
+    """, params).df()
 
-    if f_df.empty:
+    if df.empty:
         return pd.DataFrame(columns=[
             "asset_id",
             "timestamp",
             "growth_factor_raw"
         ])
 
-    f_df["timestamp"] = pd.to_datetime(f_df["timestamp"])
-
-    # ======================================================
-    # 4. APPLY REPORTING LAG
-    # ======================================================
-    f_df["available_timestamp"] = (
-        f_df["timestamp"] + pd.Timedelta(days=fundamental_lag_days)
-    )
-
-    f_df = f_df.sort_values("timestamp").reset_index(drop=True)
-
-    # ======================================================
-    # 5. EVENT-BASED YOY GROWTH
-    # ======================================================
-    def compute_yoy(df, col):
-        results = []
-
-        for _, row in df.iterrows():
-            curr_val = row[col]
-
-            if pd.isna(curr_val):
-                results.append(np.nan)
-                continue
-
-            target_time = row["timestamp"] - pd.Timedelta(days=365)
-
-            past = df[
-                (df["timestamp"] >= target_time - pd.Timedelta(days=60)) &
-                (df["timestamp"] <= target_time + pd.Timedelta(days=60))
-            ].copy()
-
-            if past.empty:
-                results.append(np.nan)
-                continue
-
-            past["date_distance"] = (past["timestamp"] - target_time).abs()
-            past = past.sort_values("date_distance")
-
-            prev_val = past.iloc[0][col]
-
-            if pd.isna(prev_val) or abs(prev_val) < EPSILON:
-                results.append(np.nan)
-                continue
-
-            growth = (curr_val - prev_val) / abs(prev_val)
-            results.append(growth)
-
-        return np.array(results)
-
-    f_df["eps_growth_yoy"] = compute_yoy(f_df, "eps")
-    f_df["revenue_growth_yoy"] = compute_yoy(f_df, "revenue")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     for col in ["eps_growth_yoy", "revenue_growth_yoy"]:
-        f_df.loc[~np.isfinite(f_df[col]), col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.loc[~np.isfinite(df[col]), col] = np.nan
 
-    # ======================================================
-    # 6. LOAD PRICES
-    # ======================================================
-    if start_date is not None:
-        p_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp
-            FROM prices
-            WHERE asset_id = ?
-            AND timestamp >= ?
-            ORDER BY timestamp ASC
-        """, [asset_id, start_date]).df()
-    else:
-        p_df = con.execute("""
-            SELECT
-                asset_id,
-                timestamp
-            FROM prices
-            WHERE asset_id = ?
-            ORDER BY timestamp ASC
-        """, [asset_id]).df()
-
-    if p_df.empty:
-        return pd.DataFrame(columns=[
-            "asset_id",
-            "timestamp",
-            "growth_factor_raw"
-        ])
-
-    p_df["timestamp"] = pd.to_datetime(p_df["timestamp"])
-
-    # ======================================================
-    # 7. ALIGN FUNDAMENTAL GROWTH TO TRADING DAYS
-    # ======================================================
-    df = pd.merge_asof(
-        p_df.sort_values("timestamp"),
-        f_df[[
-            "available_timestamp",
-            "eps_growth_yoy",
-            "revenue_growth_yoy"
-        ]].sort_values("available_timestamp"),
-        left_on="timestamp",
-        right_on="available_timestamp",
-        direction="backward"
-    )
-
-    df = df.drop(columns=["available_timestamp"], errors="ignore")
-
-    # ======================================================
-    # 8. WEIGHTED FACTOR WITH AVAILABLE COMPONENTS ONLY
-    # ======================================================
-    weighted_sum = 0
-    available_weight_sum = 0
-    available_components = 0
+    weighted_sum = pd.Series(0.0, index=df.index)
+    available_weight_sum = pd.Series(0.0, index=df.index)
+    available_components = pd.Series(0, index=df.index)
 
     for col, weight in weights.items():
         is_available = df[col].notna()
 
-        weighted_sum = weighted_sum + df[col].where(is_available, 0) * weight
+        weighted_sum = weighted_sum + df[col].where(is_available, 0.0) * weight
         available_weight_sum = available_weight_sum + is_available.astype(float) * weight
         available_components = available_components + is_available.astype(int)
 
-    df["growth_factor_raw"] = weighted_sum / available_weight_sum
+    df["growth_factor_raw"] = np.divide(
+        weighted_sum,
+        available_weight_sum,
+        out=np.full(len(df), np.nan),
+        where=available_weight_sum > 0
+    )
 
     df.loc[
-        (available_weight_sum == 0) | (available_components < min_available_components),
+        (available_weight_sum == 0) |
+        (available_components < min_available_components),
         "growth_factor_raw"
-    ] = None
-
-    df["asset_id"] = asset_id
+    ] = np.nan
 
     return df[[
         "asset_id",
         "timestamp",
         "growth_factor_raw"
     ]]
-
 
 
 def defensive_factor_raw_calculator(
@@ -1187,17 +1127,13 @@ def size_factor_raw_calculator(
                 asset_id,
                 timestamp,
                 close,
-                adj_close,
+                COALESCE(adj_close, close) AS adjusted_price,
                 volume
             FROM prices
             WHERE asset_id = ?
-            AND close IS NOT NULL
-            AND close > 0
-            AND adj_close IS NOT NULL
-            AND adj_close > 0
-            AND volume IS NOT NULL
-            AND volume > 0
-            AND timestamp >= ?
+              AND close IS NOT NULL
+              AND close > 0
+              AND timestamp >= ?
             ORDER BY timestamp ASC
         """, [asset_id, price_start_date]).df()
     else:
@@ -1206,19 +1142,15 @@ def size_factor_raw_calculator(
                 asset_id,
                 timestamp,
                 close,
-                adj_close,
+                COALESCE(adj_close, close) AS adjusted_price,
                 volume
             FROM prices
             WHERE asset_id = ?
-            AND close IS NOT NULL
-            AND close > 0
-            AND adj_close IS NOT NULL
-            AND adj_close > 0
-            AND volume IS NOT NULL
-            AND volume > 0
+              AND close IS NOT NULL
+              AND close > 0
             ORDER BY timestamp ASC
         """, [asset_id]).df()
-
+    
     if prices_df.empty:
         return pd.DataFrame(columns=[
             "asset_id",
@@ -1228,6 +1160,10 @@ def size_factor_raw_calculator(
 
     prices_df["timestamp"] = pd.to_datetime(prices_df["timestamp"])
     prices_df = prices_df.sort_values("timestamp")
+    prices_df = prices_df.drop_duplicates(
+        subset=["asset_id", "timestamp"],
+        keep="last"
+    )
 
     # ======================================================
     # 3. LOAD LAGGED SHARES OUTSTANDING
@@ -1288,9 +1224,11 @@ def size_factor_raw_calculator(
 
     # For liquidity, adjusted close is acceptable because this is a traded-value proxy.
     df["dollar_volume"] = np.where(
-        (df["adj_close"] > 0) &
+        (df["adjusted_price"].notna()) &
+        (df["adjusted_price"] > 0) &
+        (df["volume"].notna()) &
         (df["volume"] > 0),
-        df["adj_close"] * df["volume"],
+        df["adjusted_price"] * df["volume"],
         np.nan
     )
 
@@ -1947,3 +1885,176 @@ def diversification_factor_raw_calculator(con, asset_id, benchmark_id=504, windo
 # update_asset_factors_raw_v1()
 
 
+# test_tickers = ["AAPL", "MSFT", "TSLA", "PLTR", "F", "UBER" , "META"]
+# start_date = "2020-01-01"
+
+# factor_calculators = {
+#     "momentum_factor_raw": momentum_factor_raw_calculator,
+#     "value_factor_raw": value_factor_raw_calculator,
+#     "quality_factor_raw": quality_factor_raw_calculator,
+#     "growth_factor_raw": growth_factor_raw_calculator,
+#     "defensive_factor_raw": defensive_factor_raw_calculator,
+#     "size_factor_raw": size_factor_raw_calculator,
+
+# }
+
+# results = []
+
+# with duckdb.connect(DB_PATH) as con:
+#     for ticker in test_tickers:
+#         row = con.execute("""
+#             SELECT asset_id
+#             FROM assets
+#             WHERE ticker = ?
+#             LIMIT 1
+#         """, [ticker]).fetchone()
+
+#         if row is None:
+#             print(ticker, "not found")
+#             continue
+
+#         asset_id = int(row[0])
+
+#         print("=" * 100)
+#         print(f"Testing ticker: {ticker} | asset_id: {asset_id}")
+#         print("=" * 100)
+
+#         for factor_col, calculator_func in factor_calculators.items():
+#             try:
+#                 df = calculator_func(
+#                     con=con,
+#                     asset_id=asset_id,
+#                     start_date=start_date
+#                 )
+
+#                 if df is None or df.empty:
+#                     result = {
+#                         "ticker": ticker,
+#                         "asset_id": asset_id,
+#                         "factor": factor_col,
+#                         "rows": 0,
+#                         "null_pct": 100.0,
+#                         "non_null": 0,
+#                         "first_non_null_date": None,
+#                         "last_non_null_date": None,
+#                         "status": "EMPTY_DF"
+#                     }
+
+#                     results.append(result)
+
+#                     print(
+#                         f"{factor_col:<30} | "
+#                         f"rows: {0:<6} | "
+#                         f"null pct: {100.0:<6} | "
+#                         f"non-null: {0:<6} | "
+#                         f"status: EMPTY_DF"
+#                     )
+
+#                     continue
+
+#                 if factor_col not in df.columns:
+#                     result = {
+#                         "ticker": ticker,
+#                         "asset_id": asset_id,
+#                         "factor": factor_col,
+#                         "rows": len(df),
+#                         "null_pct": None,
+#                         "non_null": None,
+#                         "first_non_null_date": None,
+#                         "last_non_null_date": None,
+#                         "status": "MISSING_FACTOR_COLUMN"
+#                     }
+
+#                     results.append(result)
+
+#                     print(
+#                         f"{factor_col:<30} | "
+#                         f"rows: {len(df):<6} | "
+#                         f"status: MISSING_FACTOR_COLUMN"
+#                     )
+
+#                     continue
+
+#                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+#                 non_null_mask = df[factor_col].notna()
+#                 rows_count = len(df)
+#                 non_null_count = int(non_null_mask.sum())
+#                 null_pct = round(df[factor_col].isna().mean() * 100, 2)
+
+#                 if non_null_count > 0:
+#                     first_non_null_date = df.loc[
+#                         non_null_mask,
+#                         "timestamp"
+#                     ].min()
+
+#                     last_non_null_date = df.loc[
+#                         non_null_mask,
+#                         "timestamp"
+#                     ].max()
+#                 else:
+#                     first_non_null_date = None
+#                     last_non_null_date = None
+
+#                 result = {
+#                     "ticker": ticker,
+#                     "asset_id": asset_id,
+#                     "factor": factor_col,
+#                     "rows": rows_count,
+#                     "null_pct": null_pct,
+#                     "non_null": non_null_count,
+#                     "first_non_null_date": first_non_null_date,
+#                     "last_non_null_date": last_non_null_date,
+#                     "status": "OK"
+#                 }
+
+#                 results.append(result)
+
+#                 print(
+#                     f"{factor_col:<30} | "
+#                     f"rows: {rows_count:<6} | "
+#                     f"null pct: {null_pct:<6} | "
+#                     f"non-null: {non_null_count:<6} | "
+#                     f"first: {first_non_null_date} | "
+#                     f"last: {last_non_null_date}"
+#                 )
+
+#             except Exception as e:
+#                 result = {
+#                     "ticker": ticker,
+#                     "asset_id": asset_id,
+#                     "factor": factor_col,
+#                     "rows": None,
+#                     "null_pct": None,
+#                     "non_null": None,
+#                     "first_non_null_date": None,
+#                     "last_non_null_date": None,
+#                     "status": f"ERROR: {str(e)}"
+#                 }
+
+#                 results.append(result)
+
+#                 print(
+#                     f"{factor_col:<30} | "
+#                     f"status: ERROR | {str(e)}"
+#                 )
+
+# results_df = pd.DataFrame(results)
+# problematic_df = results_df[
+#     (results_df["status"] != "OK") |
+#     (results_df["null_pct"].fillna(100) > 50)
+# ].copy()
+
+# print("\n")
+# print("=" * 100)
+# print("PROBLEMS TABLE")
+# print("=" * 100)
+
+# print(problematic_df)
+
+# print("\n")
+# print("=" * 100)
+# print("SUMMARY TABLE")
+# print("=" * 100)
+
+# print(results_df)

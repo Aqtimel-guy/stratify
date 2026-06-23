@@ -633,6 +633,79 @@ def render_performance_chart(df, title="Portfolio Performance History"):
         config={"displayModeBar": False},
     )
 
+def render_performance_comparison_chart(portfolio_df, asset_df, ticker):
+    """
+    Renders normalized portfolio vs asset performance chart.
+    Both series start at 100 from the first shared available date.
+    """
+
+    import pandas as pd
+    import plotly.express as px
+
+    if portfolio_df is None or portfolio_df.empty:
+        st.info("No portfolio performance data available.")
+        return
+
+    if asset_df is None or asset_df.empty:
+        st.warning(f"No price history found for {ticker}.")
+        render_performance_chart(portfolio_df, title="Portfolio Performance History")
+        return
+
+    portfolio_df = portfolio_df.copy()
+    asset_df = asset_df.copy()
+
+    portfolio_df["timestamp"] = pd.to_datetime(portfolio_df["timestamp"])
+    asset_df["timestamp"] = pd.to_datetime(asset_df["timestamp"])
+
+    portfolio_df = portfolio_df.sort_values("timestamp")
+    asset_df = asset_df.sort_values("timestamp")
+
+    common_start = max(
+        portfolio_df["timestamp"].min(),
+        asset_df["timestamp"].min()
+    )
+
+    portfolio_df = portfolio_df[portfolio_df["timestamp"] >= common_start]
+    asset_df = asset_df[asset_df["timestamp"] >= common_start]
+
+    if portfolio_df.empty or asset_df.empty:
+        st.warning("Not enough overlapping data to compare portfolio and asset.")
+        render_performance_chart(portfolio_df, title="Portfolio Performance History")
+        return
+
+    portfolio_start_value = portfolio_df["value"].iloc[0]
+    asset_start_value = asset_df["value"].iloc[0]
+
+    # if portfolio_start_value == 0 or asset_start_value == 0:
+    #     st.warning("Cannot normalize chart because one of the starting values is zero.")
+    #     render_performance_chart(portfolio_df, title="Portfolio Performance History")
+    #     return
+
+    portfolio_df["normalized_value"] = portfolio_df["value"] / portfolio_start_value * 100
+    asset_df["normalized_value"] = asset_df["value"] / asset_start_value * 100
+
+    portfolio_plot_df = portfolio_df[["timestamp", "normalized_value"]].copy()
+    portfolio_plot_df["series"] = "Portfolio"
+
+    asset_plot_df = asset_df[["timestamp", "normalized_value"]].copy()
+    asset_plot_df["series"] = ticker
+
+    chart_df = pd.concat([portfolio_plot_df, asset_plot_df], ignore_index=True)
+
+    fig = px.line(
+        chart_df,
+        x="timestamp",
+        y="normalized_value",
+        color="series",
+        title=f"Portfolio Performance vs {ticker}",
+        labels={
+            "timestamp": "Date",
+            "normalized_value": "Normalized Value",
+            "series": "Series"
+        }
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 def asset_search_component(con):
     """Handles asset search and stores selection in session state."""
@@ -2511,8 +2584,49 @@ def strategy_creating_component(con, portfolio_id):
                 st.rerun()
                 
         
-     
-    
+# for comparing assets during performance analysis
+def asset_search_component_for_comparison(con):
+    """
+    Lets the user search for an asset and stores the selected ticker in session state.
+    """
+
+    if "all_assets_list" not in st.session_state:
+        assets_df = con.execute("""
+            SELECT ticker, name 
+            FROM assets
+            ORDER BY ticker
+        """).df()
+
+        st.session_state.all_assets_list = [
+            f"{row['ticker']} | {row['name']}"
+            for _, row in assets_df.iterrows()
+        ]
+
+    selected_option = st.selectbox(
+        "Choose asset to compare",
+        options=[""] + st.session_state.all_assets_list,
+        format_func=lambda x: "Type to search..." if x == "" else x,
+        index=0,
+        key="performance_comparison_search_box"
+    )
+
+    if selected_option:
+        ticker = selected_option.split(" | ")[0]
+
+        if st.button("Add comparison", key="add_performance_comparison_button"):
+            st.session_state.performance_comparison_ticker = ticker
+            st.rerun()
+
+    if st.session_state.get("performance_comparison_ticker"):
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            st.info(f"Comparing against: {st.session_state.performance_comparison_ticker}")
+
+        with col2:
+            if st.button("Remove", key="remove_performance_comparison_button"):
+                st.session_state.performance_comparison_ticker = None
+                st.rerun()
 
     
 # for recomending assets based on strategy  

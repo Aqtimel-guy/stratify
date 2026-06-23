@@ -610,7 +610,7 @@ def fill_fundamentals_table(
     max_batches=None,
     max_fail_count=10,
     pause_between_tickers=(0.5, 1.5),
-    pause_between_batches=60,
+    pause_between_batches=1,
     include_etfs=False,
     allow_slow_info_fallback=False
 ):
@@ -1825,10 +1825,14 @@ def fill_fundamentals_table_from_sec():
                 WHERE COALESCE(is_etf, FALSE) = FALSE
 
                 -- Ticker-based filters
-                AND ticker NOT LIKE '%W'
-                AND ticker NOT LIKE '%U'
-                AND ticker NOT LIKE '%R'
-                AND ticker NOT LIKE '%P'
+                AND ticker NOT LIKE '%.W'
+                AND ticker NOT LIKE '%-W'
+                AND ticker NOT LIKE '%.U'
+                AND ticker NOT LIKE '%-U'
+                AND ticker NOT LIKE '%.R'
+                AND ticker NOT LIKE '%-R'
+                AND ticker NOT LIKE '%.P'
+                AND ticker NOT LIKE '%-P'
                 AND ticker NOT LIKE '%+'
                 AND ticker NOT LIKE '%='
 
@@ -1974,6 +1978,7 @@ def fill_fundamentals_table_from_sec():
         """
 
         return con.sql(query).df()
+
 
     def fill_fundamentals_with_sec(
         con,
@@ -2777,158 +2782,190 @@ def fill_features_table(
                 first_close = first_close_row[0] if first_close_row is not None else None
 
                 # ======================================================
-                # 4.2 FETCH PRICES + LAGGED FUNDAMENTALS
+                # 4.2 FETCH PRICES
                 # ======================================================
-                # Fundamentals are not available on the quarter end date.
-                # We delay them by fundamental_lag_days to reduce lookahead risk.
 
-                df = con.execute("""
-                    WITH fundamentals_base AS (
-                        SELECT
-                            asset_id,
-                            timestamp,
-                            revenue,
-                            eps,
-                            shares_outstanding,
-
-                            LAG(revenue, 4) OVER (
-                                PARTITION BY asset_id
-                                ORDER BY timestamp
-                            ) AS previous_year_revenue,
-
-                            LAG(eps, 4) OVER (
-                                PARTITION BY asset_id
-                                ORDER BY timestamp
-                            ) AS previous_year_eps,
-
-                            SUM(eps) OVER (
-                                PARTITION BY asset_id
-                                ORDER BY timestamp
-                                ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
-                            ) AS eps_ttm_raw,
-
-                            COUNT(eps) OVER (
-                                PARTITION BY asset_id
-                                ORDER BY timestamp
-                                ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
-                            ) AS eps_ttm_count
-
-                        FROM fundamentals
-                        WHERE asset_id = ?
-                    ),
-
-                    fundamentals_enriched AS (
-                        SELECT
-                            asset_id,
-
-                            timestamp + (CAST(? AS INTEGER) * INTERVAL '1 day') AS available_timestamp,
-
-                            CASE
-                                WHEN revenue IS NOT NULL
-                                    AND previous_year_revenue IS NOT NULL
-                                    AND previous_year_revenue > 0
-                                THEN revenue / previous_year_revenue - 1
-                                ELSE NULL
-                            END AS revenue_growth_yoy,
-
-                            CASE
-                                WHEN eps IS NOT NULL
-                                    AND previous_year_eps IS NOT NULL
-                                    AND previous_year_eps != 0
-                                THEN (eps - previous_year_eps) / ABS(previous_year_eps)
-                                ELSE NULL
-                            END AS eps_growth_yoy,
-
-                            CASE
-                                WHEN eps_ttm_count = 4
-                                    AND eps_ttm_raw IS NOT NULL
-                                    AND eps_ttm_raw != 0
-                                THEN eps_ttm_raw
-                                ELSE NULL
-                            END AS eps_ttm
-
-                        FROM fundamentals_base
-                    ),
-
-                    prices_adjusted AS (
-                        SELECT
-                            p.asset_id,
-                            p.timestamp,
-
-                            CASE
-                                WHEN p.adj_close IS NOT NULL
-                                    AND p.close IS NOT NULL
-                                    AND p.close > 0
-                                    AND p.open IS NOT NULL
-                                THEN p.open * (p.adj_close / p.close)
-                                ELSE p.open
-                            END AS open,
-
-                            CASE
-                                WHEN p.adj_close IS NOT NULL
-                                    AND p.close IS NOT NULL
-                                    AND p.close > 0
-                                    AND p.high IS NOT NULL
-                                THEN p.high * (p.adj_close / p.close)
-                                ELSE p.high
-                            END AS high,
-
-                            CASE
-                                WHEN p.adj_close IS NOT NULL
-                                    AND p.close IS NOT NULL
-                                    AND p.close > 0
-                                    AND p.low IS NOT NULL
-                                THEN p.low * (p.adj_close / p.close)
-                                ELSE p.low
-                            END AS low,
-
-                            COALESCE(p.adj_close, p.close) AS close,
-
-                            p.close AS raw_close,
-
-                            p.volume
-
-                        FROM prices p
-                        WHERE
-                            p.asset_id = ?
-                            AND p.timestamp >= ?
-                    )
-
+                prices_df = con.execute("""
                     SELECT
                         p.asset_id,
                         p.timestamp,
-                        p.open,
-                        p.high,
-                        p.low,
-                        p.close,
-                        p.raw_close,
-                        p.volume,
 
-                        f.revenue_growth_yoy,
-                        f.eps_growth_yoy,
-                        f.eps_ttm
+                        CASE
+                            WHEN p.adj_close IS NOT NULL
+                                AND p.close IS NOT NULL
+                                AND p.close > 0
+                                AND p.open IS NOT NULL
+                            THEN p.open * (p.adj_close / p.close)
+                            ELSE p.open
+                        END AS open,
 
-                    FROM prices_adjusted p
-                    ASOF LEFT JOIN fundamentals_enriched f
-                        ON p.asset_id = f.asset_id
-                    AND p.timestamp >= f.available_timestamp
+                        CASE
+                            WHEN p.adj_close IS NOT NULL
+                                AND p.close IS NOT NULL
+                                AND p.close > 0
+                                AND p.high IS NOT NULL
+                            THEN p.high * (p.adj_close / p.close)
+                            ELSE p.high
+                        END AS high,
+
+                        CASE
+                            WHEN p.adj_close IS NOT NULL
+                                AND p.close IS NOT NULL
+                                AND p.close > 0
+                                AND p.low IS NOT NULL
+                            THEN p.low * (p.adj_close / p.close)
+                            ELSE p.low
+                        END AS low,
+
+                        COALESCE(p.adj_close, p.close) AS close,
+                        p.close AS raw_close,
+                        p.volume
+
+                    FROM prices p
+                    WHERE
+                        p.asset_id = ?
+                        AND p.timestamp >= ?
                     ORDER BY p.timestamp
                 """, [
-                    asset_id,
-                    int(fundamental_lag_days),
                     asset_id,
                     fetch_start_date.strftime("%Y-%m-%d")
                 ]).df()
 
-                if df.empty or len(df) < min_price_rows:
+                if prices_df.empty or len(prices_df) < min_price_rows:
                     assets_skipped += 1
                     logger.info(
                         f"{asset_index}/{total_assets} | {ticker}: skipped, not enough price rows."
                     )
                     continue
 
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                prices_df["timestamp"] = pd.to_datetime(prices_df["timestamp"])
 
+                prices_df = prices_df.sort_values("timestamp").drop_duplicates(
+                    subset=["asset_id", "timestamp"],
+                    keep="last"
+                ).reset_index(drop=True)
+
+                # ======================================================
+                # 4.2.1 FETCH AND ENRICH FUNDAMENTALS
+                # ======================================================
+
+                fundamentals_df = con.execute("""
+                    SELECT
+                        asset_id,
+                        timestamp,
+                        revenue,
+                        eps,
+                        shares_outstanding
+                    FROM fundamentals
+                    WHERE asset_id = ?
+                    ORDER BY timestamp ASC
+                """, [asset_id]).df()
+
+                if fundamentals_df.empty:
+                    df = prices_df.copy()
+                    df["revenue_growth_yoy"] = pd.NA
+                    df["eps_growth_yoy"] = pd.NA
+                    df["eps_ttm"] = pd.NA
+
+                else:
+                    fundamentals_df["timestamp"] = pd.to_datetime(
+                        fundamentals_df["timestamp"],
+                        errors="coerce"
+                    )
+
+                    fundamentals_df = fundamentals_df.dropna(
+                        subset=["timestamp"]
+                    ).sort_values("timestamp").drop_duplicates(
+                        subset=["asset_id", "timestamp"],
+                        keep="last"
+                    ).reset_index(drop=True)
+
+                    for col in ["revenue", "eps", "shares_outstanding"]:
+                        fundamentals_df[col] = pd.to_numeric(
+                            fundamentals_df[col],
+                            errors="coerce"
+                        )
+
+                    fundamentals_df["previous_year_revenue"] = (
+                        fundamentals_df["revenue"].shift(4)
+                    )
+
+                    fundamentals_df["previous_year_eps"] = (
+                        fundamentals_df["eps"].shift(4)
+                    )
+
+                    fundamentals_df["eps_ttm_raw"] = (
+                        fundamentals_df["eps"]
+                        .rolling(window=4, min_periods=4)
+                        .sum()
+                    )
+
+                    fundamentals_df["eps_ttm_count"] = (
+                        fundamentals_df["eps"]
+                        .rolling(window=4, min_periods=1)
+                        .count()
+                    )
+
+                    fundamentals_df["revenue_growth_yoy"] = np.where(
+                        fundamentals_df["revenue"].notna()
+                        & fundamentals_df["previous_year_revenue"].notna()
+                        & (fundamentals_df["previous_year_revenue"] > 0),
+                        fundamentals_df["revenue"] / fundamentals_df["previous_year_revenue"] - 1,
+                        np.nan
+                    )
+
+                    fundamentals_df["eps_growth_yoy"] = np.where(
+                        fundamentals_df["eps"].notna()
+                        & fundamentals_df["previous_year_eps"].notna()
+                        & (fundamentals_df["previous_year_eps"] != 0),
+                        (
+                            fundamentals_df["eps"]
+                            - fundamentals_df["previous_year_eps"]
+                        ) / fundamentals_df["previous_year_eps"].abs(),
+                        np.nan
+                    )
+
+                    fundamentals_df["eps_ttm"] = np.where(
+                        (
+                            (fundamentals_df["eps_ttm_count"] >= 4)
+                            & fundamentals_df["eps_ttm_raw"].notna()
+                            & (fundamentals_df["eps_ttm_raw"] != 0)
+                        ),
+                        fundamentals_df["eps_ttm_raw"],
+                        np.nan
+                    )
+
+                    fundamentals_df["available_timestamp"] = (
+                        fundamentals_df["timestamp"]
+                        + pd.Timedelta(days=fundamental_lag_days)
+                    )
+
+                    fundamentals_enriched = fundamentals_df[[
+                        "available_timestamp",
+                        "revenue_growth_yoy",
+                        "eps_growth_yoy",
+                        "eps_ttm"
+                    ]].copy()
+
+                    fundamentals_enriched = fundamentals_enriched.sort_values(
+                        "available_timestamp"
+                    ).drop_duplicates(
+                        subset=["available_timestamp"],
+                        keep="last"
+                    ).reset_index(drop=True)
+
+                    df = pd.merge_asof(
+                        prices_df.sort_values("timestamp"),
+                        fundamentals_enriched.sort_values("available_timestamp"),
+                        left_on="timestamp",
+                        right_on="available_timestamp",
+                        direction="backward"
+                    )
+
+                    df = df.drop(
+                        columns=["available_timestamp"],
+                        errors="ignore"
+                    )
                 # ======================================================
                 # 4.3 RETURNS
                 # ======================================================
@@ -3899,11 +3936,22 @@ def daily_updates(data=True , factor=True):
 # update_factors_zscore() # then we update the factors zscore table with the latest z-scores based on the updated percentiles.
 # update_asset_factors_normalized_final() # then we update the final normalized factors table with the latest data from the raw, percentile, and zscore tables.
 
+# fill_fundamentals_table(
+#     force_refresh=False,
+#     refresh_days=30,
+#     retry_failed_days=5,
+#     max_fail_count=5,
+#     pause_between_batches=1
+# )
+# fill_fundamentals_table_from_sec()
 fill_features_table(
     fundamental_lag_days=60,
     lookback_days=1200,
     force_rebuild=True,
-    rebuild_from_date="2000-01-01"
+    rebuild_from_date="2001-01-01"
 )
 
-
+update_asset_factors_raw_v1(
+    force_rebuild=True,
+    rebuild_from_date="2001-01-01"
+)
